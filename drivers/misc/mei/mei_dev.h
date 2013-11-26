@@ -239,7 +239,7 @@ struct mei_hw_ops {
 	bool (*host_is_ready) (struct mei_device *dev);
 
 	bool (*hw_is_ready) (struct mei_device *dev);
-	void (*hw_reset) (struct mei_device *dev, bool enable);
+	int (*hw_reset) (struct mei_device *dev, bool enable);
 	int  (*hw_start) (struct mei_device *dev);
 	void (*hw_config) (struct mei_device *dev);
 
@@ -502,8 +502,8 @@ struct mei_cl_cb *mei_amthif_find_read_list_entry(struct mei_device *dev,
 
 void mei_amthif_run_next_cmd(struct mei_device *dev);
 
-int mei_amthif_irq_write_complete(struct mei_device *dev, s32 *slots,
-			struct mei_cl_cb *cb, struct mei_cl_cb *cmpl_list);
+int mei_amthif_irq_write_complete(struct mei_cl *cl, struct mei_cl_cb *cb,
+				  s32 *slots, struct mei_cl_cb *cmpl_list);
 
 void mei_amthif_complete(struct mei_device *dev, struct mei_cl_cb *cb);
 int mei_amthif_irq_read_msg(struct mei_device *dev,
@@ -521,15 +521,6 @@ void mei_nfc_host_exit(void);
  * NFC Client UUID
  */
 extern const uuid_le mei_nfc_guid;
-
-int mei_amthif_irq_write_complete(struct mei_device *dev, s32 *slots,
-			struct mei_cl_cb *cb, struct mei_cl_cb *cmpl_list);
-
-void mei_amthif_complete(struct mei_device *dev, struct mei_cl_cb *cb);
-int mei_amthif_irq_read_message(struct mei_cl_cb *complete_list,
-		struct mei_device *dev, struct mei_msg_hdr *mei_hdr);
-int mei_amthif_irq_read(struct mei_device *dev, s32 *slots);
-
 
 int mei_wd_send(struct mei_device *dev);
 int mei_wd_stop(struct mei_device *dev);
@@ -554,14 +545,14 @@ static inline void mei_hw_config(struct mei_device *dev)
 {
 	dev->ops->hw_config(dev);
 }
-static inline void mei_hw_reset(struct mei_device *dev, bool enable)
+static inline int mei_hw_reset(struct mei_device *dev, bool enable)
 {
-	dev->ops->hw_reset(dev, enable);
+	return dev->ops->hw_reset(dev, enable);
 }
 
-static inline void mei_hw_start(struct mei_device *dev)
+static inline int mei_hw_start(struct mei_device *dev)
 {
-	dev->ops->hw_start(dev);
+	return dev->ops->hw_start(dev);
 }
 
 static inline void mei_clear_interrupts(struct mei_device *dev)

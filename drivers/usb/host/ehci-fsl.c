@@ -412,7 +412,7 @@ static int ehci_fsl_mpc512x_drv_suspend(struct device *dev)
 	struct fsl_usb2_platform_data *pdata = dev->platform_data;
 	u32 tmp;
 
-#ifdef DEBUG
+#if defined(DEBUG) || defined(CONFIG_DYNAMIC_DEBUG)
 	u32 mode = ehci_readl(ehci, hcd->regs + FSL_SOC_USB_USBMODE);
 	mode &= USBMODE_CM_MASK;
 	tmp = ehci_readl(ehci, hcd->regs + 0x140);	/* usbcmd */
@@ -726,6 +726,7 @@ static struct platform_driver ehci_fsl_driver = {
 	.shutdown = usb_hcd_platform_shutdown,
 	.driver = {
 		.name = "fsl-ehci",
+		.owner	= THIS_MODULE,
 		.pm = EHCI_FSL_PM_OPS,
 	},
 };

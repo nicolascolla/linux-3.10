@@ -91,7 +91,8 @@ static u64 he_get_##_field(struct hist_entry *he)				\
 	return he->stat._field;							\
 }										\
 										\
-static int perf_gtk__hpp_color_##_type(struct perf_hpp *hpp,			\
+static int perf_gtk__hpp_color_##_type(struct perf_hpp_fmt *fmt __maybe_unused,	\
+				       struct perf_hpp *hpp,			\
 				       struct hist_entry *he)			\
 {										\
 	return __hpp__color_fmt(hpp, he, he_get_##_field);			\
@@ -124,7 +125,8 @@ void perf_gtk__init_hpp(void)
 				perf_gtk__hpp_color_overhead_guest_us;
 }
 
-static void perf_gtk__show_hists(GtkWidget *window, struct hists *hists)
+static void perf_gtk__show_hists(GtkWidget *window, struct hists *hists,
+				 float min_pcnt)
 {
 	struct perf_hpp_fmt *fmt;
 	GType col_types[MAX_COLUMNS];
@@ -164,7 +166,7 @@ static void perf_gtk__show_hists(GtkWidget *window, struct hists *hists)
 	col_idx = 0;
 
 	perf_hpp__for_each_format(fmt) {
-		fmt->header(&hpp);
+		fmt->header(fmt, &hpp);
 
 		gtk_tree_view_insert_column_with_attributes(GTK_TREE_VIEW(view),
 							    -1, ltrim(s),
@@ -189,8 +191,13 @@ static void perf_gtk__show_hists(GtkWidget *window, struct hists *hists)
 	for (nd = rb_first(&hists->entries); nd; nd = rb_next(nd)) {
 		struct hist_entry *h = rb_entry(nd, struct hist_entry, rb_node);
 		GtkTreeIter iter;
+		float percent = h->stat.period * 100.0 /
+					hists->stats.total_period;
 
 		if (h->filtered)
+			continue;
+
+		if (percent < min_pcnt)
 			continue;
 
 		gtk_list_store_append(store, &iter);
@@ -199,9 +206,9 @@ static void perf_gtk__show_hists(GtkWidget *window, struct hists *hists)
 
 		perf_hpp__for_each_format(fmt) {
 			if (fmt->color)
-				fmt->color(&hpp, h);
+				fmt->color(fmt, &hpp, h);
 			else
-				fmt->entry(&hpp, h);
+				fmt->entry(fmt, &hpp, h);
 
 			gtk_list_store_set(store, &iter, col_idx++, s, -1);
 		}
@@ -222,7 +229,8 @@ static void perf_gtk__show_hists(GtkWidget *window, struct hists *hists)
 
 int perf_evlist__gtk_browse_hists(struct perf_evlist *evlist,
 				  const char *help,
-				  struct hist_browser_timer *hbt __maybe_unused)
+				  struct hist_browser_timer *hbt __maybe_unused,
+				  float min_pcnt)
 {
 	struct perf_evsel *pos;
 	GtkWidget *vbox;
@@ -286,7 +294,7 @@ int perf_evlist__gtk_browse_hists(struct perf_evlist *evlist,
 							GTK_POLICY_AUTOMATIC,
 							GTK_POLICY_AUTOMATIC);
 
-		perf_gtk__show_hists(scrolled_window, hists);
+		perf_gtk__show_hists(scrolled_window, hists, min_pcnt);
 
 		tab_label = gtk_label_new(evname);
 

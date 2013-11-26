@@ -75,6 +75,7 @@
 #include <net/netdma.h>
 #include <net/secure_seq.h>
 #include <net/tcp_memcontrol.h>
+#include <net/busy_poll.h>
 
 #include <linux/inet.h>
 #include <linux/ipv6.h>
@@ -176,7 +177,7 @@ int tcp_v4_connect(struct sock *sk, struct sockaddr *uaddr, int addr_len)
 	if (IS_ERR(rt)) {
 		err = PTR_ERR(rt);
 		if (err == -ENETUNREACH)
-			IP_INC_STATS(sock_net(sk), IPSTATS_MIB_OUTNOROUTES);
+			IP_INC_STATS_BH(sock_net(sk), IPSTATS_MIB_OUTNOROUTES);
 		return err;
 	}
 
@@ -545,8 +546,7 @@ out:
 	sock_put(sk);
 }
 
-static void __tcp_v4_send_check(struct sk_buff *skb,
-				__be32 saddr, __be32 daddr)
+void __tcp_v4_send_check(struct sk_buff *skb, __be32 saddr, __be32 daddr)
 {
 	struct tcphdr *th = tcp_hdr(skb);
 
@@ -570,23 +570,6 @@ void tcp_v4_send_check(struct sock *sk, struct sk_buff *skb)
 	__tcp_v4_send_check(skb, inet->inet_saddr, inet->inet_daddr);
 }
 EXPORT_SYMBOL(tcp_v4_send_check);
-
-int tcp_v4_gso_send_check(struct sk_buff *skb)
-{
-	const struct iphdr *iph;
-	struct tcphdr *th;
-
-	if (!pskb_may_pull(skb, sizeof(*th)))
-		return -EINVAL;
-
-	iph = ip_hdr(skb);
-	th = tcp_hdr(skb);
-
-	th->check = 0;
-	skb->ip_summed = CHECKSUM_PARTIAL;
-	__tcp_v4_send_check(skb, iph->saddr, iph->daddr);
-	return 0;
-}
 
 /*
  *	This routine will send an RST to the other tcp.
@@ -2019,6 +2002,7 @@ process:
 	if (sk_filter(sk, skb))
 		goto discard_and_relse;
 
+	sk_mark_napi_id(sk, skb);
 	skb->dev = NULL;
 
 	bh_lock_sock_nested(sk);
@@ -2629,7 +2613,7 @@ static void get_openreq4(const struct sock *sk, const struct request_sock *req,
 	long delta = req->expires - jiffies;
 
 	seq_printf(f, "%4d: %08X:%04X %08X:%04X"
-		" %02X %08X:%08X %02X:%08lX %08X %5d %8d %u %d %pK%n",
+		" %02X %08X:%08X %02X:%08lX %08X %5u %8d %u %d %pK%n",
 		i,
 		ireq->loc_addr,
 		ntohs(inet_sk(sk)->inet_sport),
@@ -2687,7 +2671,7 @@ static void get_tcp4_sock(struct sock *sk, struct seq_file *f, int i, int *len)
 		rx_queue = max_t(int, tp->rcv_nxt - tp->copied_seq, 0);
 
 	seq_printf(f, "%4d: %08X:%04X %08X:%04X %02X %08X:%08X %02X:%08lX "
-			"%08X %5d %8d %lu %d %pK %lu %lu %u %u %d%n",
+			"%08X %5u %8d %lu %d %pK %lu %lu %u %u %d%n",
 		i, src, srcp, dest, destp, sk->sk_state,
 		tp->write_seq - tp->snd_una,
 		rx_queue,
@@ -2802,52 +2786,6 @@ void tcp4_proc_exit(void)
 	unregister_pernet_subsys(&tcp4_net_ops);
 }
 #endif /* CONFIG_PROC_FS */
-
-struct sk_buff **tcp4_gro_receive(struct sk_buff **head, struct sk_buff *skb)
-{
-	const struct iphdr *iph = skb_gro_network_header(skb);
-	__wsum wsum;
-	__sum16 sum;
-
-	switch (skb->ip_summed) {
-	case CHECKSUM_COMPLETE:
-		if (!tcp_v4_check(skb_gro_len(skb), iph->saddr, iph->daddr,
-				  skb->csum)) {
-			skb->ip_summed = CHECKSUM_UNNECESSARY;
-			break;
-		}
-flush:
-		NAPI_GRO_CB(skb)->flush = 1;
-		return NULL;
-
-	case CHECKSUM_NONE:
-		wsum = csum_tcpudp_nofold(iph->saddr, iph->daddr,
-					  skb_gro_len(skb), IPPROTO_TCP, 0);
-		sum = csum_fold(skb_checksum(skb,
-					     skb_gro_offset(skb),
-					     skb_gro_len(skb),
-					     wsum));
-		if (sum)
-			goto flush;
-
-		skb->ip_summed = CHECKSUM_UNNECESSARY;
-		break;
-	}
-
-	return tcp_gro_receive(head, skb);
-}
-
-int tcp4_gro_complete(struct sk_buff *skb)
-{
-	const struct iphdr *iph = ip_hdr(skb);
-	struct tcphdr *th = tcp_hdr(skb);
-
-	th->check = ~tcp_v4_check(skb->len - skb_transport_offset(skb),
-				  iph->saddr, iph->daddr, 0);
-	skb_shinfo(skb)->gso_type = SKB_GSO_TCPV4;
-
-	return tcp_gro_complete(skb);
-}
 
 struct proto tcp_prot = {
 	.name			= "TCP",

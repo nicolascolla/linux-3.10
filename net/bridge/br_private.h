@@ -260,6 +260,7 @@ struct net_bridge
 	unsigned long			multicast_query_interval;
 	unsigned long			multicast_query_response_interval;
 	unsigned long			multicast_startup_query_interval;
+	unsigned long			multicast_querier_delay_time;
 
 	spinlock_t			multicast_lock;
 	struct net_bridge_mdb_htable __rcu *mdb;
@@ -438,7 +439,8 @@ extern int br_ioctl_deviceless_stub(struct net *net, unsigned int cmd, void __us
 extern unsigned int br_mdb_rehash_seq;
 extern int br_multicast_rcv(struct net_bridge *br,
 			    struct net_bridge_port *port,
-			    struct sk_buff *skb);
+			    struct sk_buff *skb,
+			    u16 vid);
 extern struct net_bridge_mdb_entry *br_mdb_get(struct net_bridge *br,
 					       struct sk_buff *skb, u16 vid);
 extern void br_multicast_add_port(struct net_bridge_port *port);
@@ -493,10 +495,18 @@ static inline bool br_multicast_is_router(struct net_bridge *br)
 	       (br->multicast_router == 1 &&
 		timer_pending(&br->multicast_router_timer));
 }
+
+static inline bool br_multicast_querier_exists(struct net_bridge *br)
+{
+	return time_is_before_jiffies(br->multicast_querier_delay_time) &&
+	       (br->multicast_querier ||
+		timer_pending(&br->multicast_querier_timer));
+}
 #else
 static inline int br_multicast_rcv(struct net_bridge *br,
 				   struct net_bridge_port *port,
-				   struct sk_buff *skb)
+				   struct sk_buff *skb,
+				   u16 vid)
 {
 	return 0;
 }
@@ -548,6 +558,10 @@ static inline void br_multicast_forward(struct net_bridge_mdb_entry *mdst,
 static inline bool br_multicast_is_router(struct net_bridge *br)
 {
 	return 0;
+}
+static inline bool br_multicast_querier_exists(struct net_bridge *br)
+{
+	return false;
 }
 static inline void br_mdb_init(void)
 {
@@ -611,9 +625,7 @@ static inline u16 br_get_pvid(const struct net_port_vlans *v)
 	 * vid wasn't set
 	 */
 	smp_rmb();
-	return (v->pvid & VLAN_TAG_PRESENT) ?
-			(v->pvid & ~VLAN_TAG_PRESENT) :
-			VLAN_N_VID;
+	return v->pvid ?: VLAN_N_VID;
 }
 
 #else

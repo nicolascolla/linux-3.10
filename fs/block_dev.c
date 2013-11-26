@@ -172,7 +172,8 @@ blkdev_direct_IO(int rw, struct kiocb *iocb, const struct iovec *iov,
 	struct inode *inode = file->f_mapping->host;
 
 	return __blockdev_direct_IO(rw, iocb, inode, I_BDEV(inode), iov, offset,
-				    nr_segs, blkdev_get_block, NULL, NULL, 0);
+				    nr_segs, blkdev_get_block, NULL, NULL,
+				    DIO_IGNORE_TRUNCATE);
 }
 
 int __sync_blockdev(struct block_device *bdev, int wait)
@@ -1590,6 +1591,7 @@ static const struct address_space_operations def_blk_aops = {
 	.writepages	= generic_writepages,
 	.releasepage	= blkdev_releasepage,
 	.direct_IO	= blkdev_direct_IO,
+	.is_dirty_writeback = buffer_check_dirty_writeback,
 };
 
 const struct file_operations def_blk_fops = {

@@ -39,7 +39,6 @@
 #include <linux/ipmi.h>
 #include <linux/device.h>
 #include <linux/pnp.h>
-#include <linux/spinlock.h>
 
 MODULE_AUTHOR("Zhao Yakui");
 MODULE_DESCRIPTION("ACPI IPMI Opregion driver");
@@ -58,7 +57,7 @@ struct acpi_ipmi_device {
 	struct list_head head;
 	/* the IPMI request message list */
 	struct list_head tx_msg_list;
-	spinlock_t	tx_msg_lock;
+	spinlock_t tx_msg_lock;
 	acpi_handle handle;
 	struct pnp_dev *pnp_dev;
 	ipmi_user_t	user_interface;
@@ -382,6 +381,7 @@ acpi_ipmi_space_handler(u32 function, acpi_physical_address address,
 	int err, rem_time;
 	acpi_status status;
 	unsigned long flags;
+
 	/*
 	 * IPMI opregion message.
 	 * IPMI message is firstly written to the BMC and system software

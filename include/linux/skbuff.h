@@ -319,6 +319,8 @@ enum {
 	SKB_GSO_GRE = 1 << 6,
 
 	SKB_GSO_UDP_TUNNEL = 1 << 7,
+
+	SKB_GSO_MPLS = 1 << 8,
 };
 
 #if BITS_PER_LONG > 32
@@ -329,6 +331,11 @@ enum {
 typedef unsigned int sk_buff_data_t;
 #else
 typedef unsigned char *sk_buff_data_t;
+#endif
+
+#if defined(CONFIG_NF_DEFRAG_IPV4) || defined(CONFIG_NF_DEFRAG_IPV4_MODULE) || \
+    defined(CONFIG_NF_DEFRAG_IPV6) || defined(CONFIG_NF_DEFRAG_IPV6_MODULE)
+#define NET_SKBUFF_NF_DEFRAG_NEEDED 1
 #endif
 
 /** 
@@ -363,6 +370,7 @@ typedef unsigned char *sk_buff_data_t;
  *	@protocol: Packet protocol from driver
  *	@destructor: Destruct function
  *	@nfct: Associated connection, if any
+ *	@nfct_reasm: netfilter conntrack re-assembly pointer
  *	@nf_bridge: Saved data about a bridged frame - see br_netfilter.c
  *	@skb_iif: ifindex of device we arrived on
  *	@tc_index: Traffic control index
@@ -378,11 +386,13 @@ typedef unsigned char *sk_buff_data_t;
  *	@no_fcs:  Request NIC to treat last 4 bytes as Ethernet FCS
  *	@dma_cookie: a cookie to one of several possible DMA operations
  *		done by skb DMA functions
+  *	@napi_id: id of the NAPI struct this skb came from
  *	@secmark: security marking
  *	@mark: Generic packet mark
  *	@dropcount: total number of sk_receive_queue overflows
  *	@vlan_proto: vlan encapsulation protocol
  *	@vlan_tci: vlan tag control information
+ *	@inner_protocol: Protocol (encapsulation)
  *	@inner_transport_header: Inner transport layer header (encapsulation)
  *	@inner_network_header: Network layer header (encapsulation)
  *	@inner_mac_header: Link layer header (encapsulation)
@@ -449,6 +459,9 @@ struct sk_buff {
 #if defined(CONFIG_NF_CONNTRACK) || defined(CONFIG_NF_CONNTRACK_MODULE)
 	struct nf_conntrack	*nfct;
 #endif
+#ifdef NET_SKBUFF_NF_DEFRAG_NEEDED
+	struct sk_buff		*nfct_reasm;
+#endif
 #ifdef CONFIG_BRIDGE_NETFILTER
 	struct nf_bridge_info	*nf_bridge;
 #endif
@@ -488,8 +501,11 @@ struct sk_buff {
 	/* 7/9 bit hole (depending on ndisc_nodetype presence) */
 	kmemcheck_bitfield_end(flags2);
 
-#ifdef CONFIG_NET_DMA
-	dma_cookie_t		dma_cookie;
+#if defined CONFIG_NET_DMA || defined CONFIG_NET_LL_RX_POLL
+	union {
+		unsigned int	napi_id;
+		dma_cookie_t	dma_cookie;
+	};
 #endif
 #ifdef CONFIG_NETWORK_SECMARK
 	__u32			secmark;
@@ -500,12 +516,28 @@ struct sk_buff {
 		__u32		reserved_tailroom;
 	};
 
-	sk_buff_data_t		inner_transport_header;
-	sk_buff_data_t		inner_network_header;
-	sk_buff_data_t		inner_mac_header;
-	sk_buff_data_t		transport_header;
-	sk_buff_data_t		network_header;
-	sk_buff_data_t		mac_header;
+	__be16			inner_protocol;
+	__u16			inner_transport_header;
+	__u16			inner_network_header;
+	__u16			inner_mac_header;
+	__u16			transport_header;
+	__u16			network_header;
+	__u16			mac_header;
+
+	/* RHEL SPECIFIC
+	 *
+	 * The following padding has been inserted before ABI freeze to
+	 * allow extending the structure while preserve ABI. Feel free
+	 * to replace reserved slots with required structure field
+	 * additions of your backport.
+	 */
+#ifndef __GENKSYMS__
+	u32			rh_reserved1;
+	u32			rh_reserved2;
+	u32			rh_reserved3;
+	u32			rh_reserved4;
+#endif
+
 	/* These elements must be at the end, see alloc_skb() for details.  */
 	sk_buff_data_t		tail;
 	sk_buff_data_t		end;
@@ -1299,11 +1331,6 @@ static inline int skb_pagelen(const struct sk_buff *skb)
 	return len + skb_headlen(skb);
 }
 
-static inline bool skb_has_frags(const struct sk_buff *skb)
-{
-	return skb_shinfo(skb)->nr_frags;
-}
-
 /**
  * __skb_fill_page_desc - initialise a paged fragment in an skb
  * @skb: buffer containing fragment to be initialised
@@ -1384,6 +1411,11 @@ static inline void skb_set_tail_pointer(struct sk_buff *skb, const int offset)
 	skb_reset_tail_pointer(skb);
 	skb->tail += offset;
 }
+
+static inline unsigned long skb_tail_offset(const struct sk_buff *skb)
+{
+	return skb->tail;
+}
 #else /* NET_SKBUFF_DATA_USES_OFFSET */
 static inline unsigned char *skb_tail_pointer(const struct sk_buff *skb)
 {
@@ -1400,6 +1432,10 @@ static inline void skb_set_tail_pointer(struct sk_buff *skb, const int offset)
 	skb->tail = skb->data + offset;
 }
 
+static inline unsigned long skb_tail_offset(const struct sk_buff *skb)
+{
+	return skb->tail - skb->head;
+}
 #endif /* NET_SKBUFF_DATA_USES_OFFSET */
 
 /*
@@ -1524,7 +1560,6 @@ static inline void skb_reset_mac_len(struct sk_buff *skb)
 	skb->mac_len = skb->network_header - skb->mac_header;
 }
 
-#ifdef NET_SKBUFF_DATA_USES_OFFSET
 static inline unsigned char *skb_inner_transport_header(const struct sk_buff
 							*skb)
 {
@@ -1578,7 +1613,7 @@ static inline void skb_set_inner_mac_header(struct sk_buff *skb,
 }
 static inline bool skb_transport_header_was_set(const struct sk_buff *skb)
 {
-	return skb->transport_header != ~0U;
+	return skb->transport_header != (typeof(skb->transport_header))~0U;
 }
 
 static inline unsigned char *skb_transport_header(const struct sk_buff *skb)
@@ -1621,7 +1656,7 @@ static inline unsigned char *skb_mac_header(const struct sk_buff *skb)
 
 static inline int skb_mac_header_was_set(const struct sk_buff *skb)
 {
-	return skb->mac_header != ~0U;
+	return skb->mac_header != (typeof(skb->mac_header))~0U;
 }
 
 static inline void skb_reset_mac_header(struct sk_buff *skb)
@@ -1634,112 +1669,6 @@ static inline void skb_set_mac_header(struct sk_buff *skb, const int offset)
 	skb_reset_mac_header(skb);
 	skb->mac_header += offset;
 }
-
-#else /* NET_SKBUFF_DATA_USES_OFFSET */
-static inline unsigned char *skb_inner_transport_header(const struct sk_buff
-							*skb)
-{
-	return skb->inner_transport_header;
-}
-
-static inline void skb_reset_inner_transport_header(struct sk_buff *skb)
-{
-	skb->inner_transport_header = skb->data;
-}
-
-static inline void skb_set_inner_transport_header(struct sk_buff *skb,
-						   const int offset)
-{
-	skb->inner_transport_header = skb->data + offset;
-}
-
-static inline unsigned char *skb_inner_network_header(const struct sk_buff *skb)
-{
-	return skb->inner_network_header;
-}
-
-static inline void skb_reset_inner_network_header(struct sk_buff *skb)
-{
-	skb->inner_network_header = skb->data;
-}
-
-static inline void skb_set_inner_network_header(struct sk_buff *skb,
-						const int offset)
-{
-	skb->inner_network_header = skb->data + offset;
-}
-
-static inline unsigned char *skb_inner_mac_header(const struct sk_buff *skb)
-{
-	return skb->inner_mac_header;
-}
-
-static inline void skb_reset_inner_mac_header(struct sk_buff *skb)
-{
-	skb->inner_mac_header = skb->data;
-}
-
-static inline void skb_set_inner_mac_header(struct sk_buff *skb,
-						const int offset)
-{
-	skb->inner_mac_header = skb->data + offset;
-}
-static inline bool skb_transport_header_was_set(const struct sk_buff *skb)
-{
-	return skb->transport_header != NULL;
-}
-
-static inline unsigned char *skb_transport_header(const struct sk_buff *skb)
-{
-	return skb->transport_header;
-}
-
-static inline void skb_reset_transport_header(struct sk_buff *skb)
-{
-	skb->transport_header = skb->data;
-}
-
-static inline void skb_set_transport_header(struct sk_buff *skb,
-					    const int offset)
-{
-	skb->transport_header = skb->data + offset;
-}
-
-static inline unsigned char *skb_network_header(const struct sk_buff *skb)
-{
-	return skb->network_header;
-}
-
-static inline void skb_reset_network_header(struct sk_buff *skb)
-{
-	skb->network_header = skb->data;
-}
-
-static inline void skb_set_network_header(struct sk_buff *skb, const int offset)
-{
-	skb->network_header = skb->data + offset;
-}
-
-static inline unsigned char *skb_mac_header(const struct sk_buff *skb)
-{
-	return skb->mac_header;
-}
-
-static inline int skb_mac_header_was_set(const struct sk_buff *skb)
-{
-	return skb->mac_header != NULL;
-}
-
-static inline void skb_reset_mac_header(struct sk_buff *skb)
-{
-	skb->mac_header = skb->data;
-}
-
-static inline void skb_set_mac_header(struct sk_buff *skb, const int offset)
-{
-	skb->mac_header = skb->data + offset;
-}
-#endif /* NET_SKBUFF_DATA_USES_OFFSET */
 
 static inline void skb_probe_transport_header(struct sk_buff *skb,
 					      const int offset_hint)
@@ -2479,6 +2408,7 @@ extern void	       skb_split(struct sk_buff *skb,
 				 struct sk_buff *skb1, const u32 len);
 extern int	       skb_shift(struct sk_buff *tgt, struct sk_buff *skb,
 				 int shiftlen);
+extern void	       skb_scrub_packet(struct sk_buff *skb);
 
 extern struct sk_buff *skb_segment(struct sk_buff *skb,
 				   netdev_features_t features);
@@ -2691,6 +2621,18 @@ static inline void nf_conntrack_get(struct nf_conntrack *nfct)
 		atomic_inc(&nfct->use);
 }
 #endif
+#ifdef NET_SKBUFF_NF_DEFRAG_NEEDED
+static inline void nf_conntrack_get_reasm(struct sk_buff *skb)
+{
+	if (skb)
+		atomic_inc(&skb->users);
+}
+static inline void nf_conntrack_put_reasm(struct sk_buff *skb)
+{
+	if (skb)
+		kfree_skb(skb);
+}
+#endif
 #ifdef CONFIG_BRIDGE_NETFILTER
 static inline void nf_bridge_put(struct nf_bridge_info *nf_bridge)
 {
@@ -2708,6 +2650,10 @@ static inline void nf_reset(struct sk_buff *skb)
 #if defined(CONFIG_NF_CONNTRACK) || defined(CONFIG_NF_CONNTRACK_MODULE)
 	nf_conntrack_put(skb->nfct);
 	skb->nfct = NULL;
+#endif
+#ifdef NET_SKBUFF_NF_DEFRAG_NEEDED
+	nf_conntrack_put_reasm(skb->nfct_reasm);
+	skb->nfct_reasm = NULL;
 #endif
 #ifdef CONFIG_BRIDGE_NETFILTER
 	nf_bridge_put(skb->nf_bridge);
@@ -2730,6 +2676,10 @@ static inline void __nf_copy(struct sk_buff *dst, const struct sk_buff *src)
 	nf_conntrack_get(src->nfct);
 	dst->nfctinfo = src->nfctinfo;
 #endif
+#ifdef NET_SKBUFF_NF_DEFRAG_NEEDED
+	dst->nfct_reasm = src->nfct_reasm;
+	nf_conntrack_get_reasm(src->nfct_reasm);
+#endif
 #ifdef CONFIG_BRIDGE_NETFILTER
 	dst->nf_bridge  = src->nf_bridge;
 	nf_bridge_get(src->nf_bridge);
@@ -2740,6 +2690,9 @@ static inline void nf_copy(struct sk_buff *dst, const struct sk_buff *src)
 {
 #if defined(CONFIG_NF_CONNTRACK) || defined(CONFIG_NF_CONNTRACK_MODULE)
 	nf_conntrack_put(dst->nfct);
+#endif
+#ifdef NET_SKBUFF_NF_DEFRAG_NEEDED
+	nf_conntrack_put_reasm(dst->nfct_reasm);
 #endif
 #ifdef CONFIG_BRIDGE_NETFILTER
 	nf_bridge_put(dst->nf_bridge);
@@ -2846,6 +2799,7 @@ static inline bool skb_is_gso(const struct sk_buff *skb)
 	return skb_shinfo(skb)->gso_size;
 }
 
+/* Note: Should be called only if skb_is_gso(skb) is true */
 static inline bool skb_is_gso_v6(const struct sk_buff *skb)
 {
 	return skb_shinfo(skb)->gso_type & SKB_GSO_TCPV6;

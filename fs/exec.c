@@ -1381,10 +1381,6 @@ int search_binary_handler(struct linux_binprm *bprm)
 	if (retval)
 		return retval;
 
-	retval = audit_bprm(bprm);
-	if (retval)
-		return retval;
-
 	/* Need to fetch pid before load_binary changes it */
 	old_pid = current->pid;
 	rcu_read_lock();
@@ -1405,6 +1401,7 @@ int search_binary_handler(struct linux_binprm *bprm)
 			retval = fn(bprm);
 			bprm->recursion_depth = depth;
 			if (retval >= 0) {
+				audit_bprm(bprm);
 				if (depth == 0) {
 					trace_sched_process_exec(current, old_pid, bprm);
 					ptrace_event(PTRACE_EVENT_EXEC, old_vpid);
@@ -1548,6 +1545,7 @@ static int do_execve_common(const char *filename,
 	current->fs->in_exec = 0;
 	current->in_execve = 0;
 	acct_update_integrals(current);
+	task_numa_free(current);
 	free_bprm(bprm);
 	if (displaced)
 		put_files_struct(displaced);
@@ -1669,12 +1667,6 @@ int __get_dumpable(unsigned long mm_flags)
 	return (ret > SUID_DUMP_USER) ? SUID_DUMP_ROOT : ret;
 }
 
-/*
- * This returns the actual value of the suid_dumpable flag. For things
- * that are using this for checking for privilege transitions, it must
- * test against SUID_DUMP_USER rather than treating it as a boolean
- * value.
- */
 int get_dumpable(struct mm_struct *mm)
 {
 	return __get_dumpable(mm->flags);

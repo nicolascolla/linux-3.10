@@ -2282,6 +2282,11 @@ static int kvm_ioctl_create_device(struct kvm *kvm,
 		ops = &kvm_xics_ops;
 		break;
 #endif
+#ifdef CONFIG_KVM_VFIO
+	case KVM_DEV_TYPE_VFIO:
+		ops = &kvm_vfio_ops;
+		break;
+#endif
 	default:
 		return -ENODEV;
 	}
@@ -2729,18 +2734,28 @@ static void hardware_disable_all_nolock(void)
 
 static void hardware_disable_all(void)
 {
+	int count;
+	char count_string[20];
+	char event_string[] = "EVENT=terminate";
+	char *envp[] = { event_string, count_string, NULL };
+
 	raw_spin_lock(&kvm_lock);
 	hardware_disable_all_nolock();
+	count = kvm_usage_count;
 	raw_spin_unlock(&kvm_lock);
+
+	sprintf(count_string, "COUNT=%d", count);
+	kobject_uevent_env(&kvm_dev.this_device->kobj, KOBJ_CHANGE, envp);
 }
 
 static int hardware_enable_all(void)
 {
 	int r = 0;
+	int count;
 
 	raw_spin_lock(&kvm_lock);
 
-	kvm_usage_count++;
+	count = ++kvm_usage_count;
 	if (kvm_usage_count == 1) {
 		atomic_set(&hardware_enable_failed, 0);
 		on_each_cpu(hardware_enable_nolock, NULL, 1);
@@ -2753,6 +2768,14 @@ static int hardware_enable_all(void)
 
 	raw_spin_unlock(&kvm_lock);
 
+	if (r == 0) {
+		char count_string[20];
+		char event_string[] = "EVENT=create";
+		char *envp[] = { event_string, count_string, NULL };
+
+		sprintf(count_string, "COUNT=%d", count);
+		kobject_uevent_env(&kvm_dev.this_device->kobj, KOBJ_CHANGE, envp);
+	}
 	return r;
 }
 
@@ -2926,7 +2949,8 @@ int kvm_io_bus_register_dev(struct kvm *kvm, enum kvm_bus bus_idx, gpa_t addr,
 	struct kvm_io_bus *new_bus, *bus;
 
 	bus = kvm->buses[bus_idx];
-	if (bus->dev_count > NR_IOBUS_DEVS - 1)
+	/* exclude ioeventfd which is limited by maximum fd */
+	if (bus->dev_count - bus->ioeventfd_count > NR_IOBUS_DEVS - 1)
 		return -ENOSPC;
 
 	new_bus = kzalloc(sizeof(*bus) + ((bus->dev_count + 1) *
@@ -3181,6 +3205,7 @@ int kvm_init(void *opaque, unsigned vcpu_size, unsigned vcpu_align,
 
 out_undebugfs:
 	unregister_syscore_ops(&kvm_syscore_ops);
+	misc_deregister(&kvm_dev);
 out_unreg:
 	kvm_async_pf_deinit();
 out_free:

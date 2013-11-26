@@ -88,6 +88,7 @@
 #include <linux/if_arp.h>
 #include <linux/rtnetlink.h>
 #include <linux/times.h>
+#include <linux/pkt_sched.h>
 
 #include <net/net_namespace.h>
 #include <net/arp.h>
@@ -315,6 +316,7 @@ static struct sk_buff *igmpv3_newpack(struct net_device *dev, int size)
 		if (size < 256)
 			return NULL;
 	}
+	skb->priority = TC_PRIO_CONTROL;
 	igmp_skb_size(skb) = size;
 
 	rt = ip_route_output_ports(net, &fl4, NULL, IGMPV3_ALL_MCR, 0,
@@ -343,7 +345,7 @@ static struct sk_buff *igmpv3_newpack(struct net_device *dev, int size)
 	pip->saddr    = fl4.saddr;
 	pip->protocol = IPPROTO_IGMP;
 	pip->tot_len  = 0;	/* filled in later */
-	ip_select_ident(skb, &rt->dst, NULL);
+	ip_select_ident(pip, &rt->dst, NULL);
 	((u8 *)&pip[1])[0] = IPOPT_RA;
 	((u8 *)&pip[1])[1] = 4;
 	((u8 *)&pip[1])[2] = 0;
@@ -363,7 +365,7 @@ static struct sk_buff *igmpv3_newpack(struct net_device *dev, int size)
 static int igmpv3_sendpack(struct sk_buff *skb)
 {
 	struct igmphdr *pig = igmp_hdr(skb);
-	const int igmplen = skb->tail - skb->transport_header;
+	const int igmplen = skb_tail_pointer(skb) - skb_transport_header(skb);
 
 	pig->csum = ip_compute_csum(igmp_hdr(skb), igmplen);
 
@@ -670,6 +672,7 @@ static int igmp_send_report(struct in_device *in_dev, struct ip_mc_list *pmc,
 		ip_rt_put(rt);
 		return -1;
 	}
+	skb->priority = TC_PRIO_CONTROL;
 
 	skb_dst_set(skb, &rt->dst);
 
@@ -687,7 +690,7 @@ static int igmp_send_report(struct in_device *in_dev, struct ip_mc_list *pmc,
 	iph->daddr    = dst;
 	iph->saddr    = fl4.saddr;
 	iph->protocol = IPPROTO_IGMP;
-	ip_select_ident(skb, &rt->dst, NULL);
+	ip_select_ident(iph, &rt->dst, NULL);
 	((u8 *)&iph[1])[0] = IPOPT_RA;
 	((u8 *)&iph[1])[1] = 4;
 	((u8 *)&iph[1])[2] = 0;

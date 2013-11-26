@@ -62,8 +62,8 @@ int create_user_ns(struct cred *new)
 	kgid_t group = new->egid;
 	int ret;
 
-	if (parent_ns->level > 32)
-		return -EUSERS;
+	/* Currently disabled in RHEL7 */
+	return -EINVAL;
 
 	/*
 	 * Verify that we can not violate the policy of which files
@@ -95,7 +95,6 @@ int create_user_ns(struct cred *new)
 	atomic_set(&ns->count, 1);
 	/* Leave the new->user_ns reference with the new user namespace. */
 	ns->parent = parent_ns;
-	ns->level = parent_ns->level + 1;
 	ns->owner = owner;
 	ns->group = group;
 
@@ -103,6 +102,9 @@ int create_user_ns(struct cred *new)
 
 	update_mnt_policy(ns);
 
+#ifdef CONFIG_PERSISTENT_KEYRINGS
+	init_rwsem(&ns->persistent_keyring_register_sem);
+#endif
 	return 0;
 }
 
@@ -132,6 +134,9 @@ void free_user_ns(struct user_namespace *ns)
 
 	do {
 		parent = ns->parent;
+#ifdef CONFIG_PERSISTENT_KEYRINGS
+		key_put(ns->persistent_keyring_register);
+#endif
 		proc_free_inum(ns->proc_inum);
 		kmem_cache_free(user_ns_cachep, ns);
 		ns = parent;

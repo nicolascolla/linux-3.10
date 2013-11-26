@@ -118,7 +118,8 @@ static struct elevator_type *elevator_get(const char *name, bool try_loading)
 	return e;
 }
 
-static char chosen_elevator[ELV_NAME_MAX];
+char chosen_elevator[ELV_NAME_MAX];
+EXPORT_SYMBOL(chosen_elevator);
 
 static int __init elevator_setup(char *str)
 {
@@ -185,12 +186,6 @@ int elevator_init(struct request_queue *q, char *name)
 {
 	struct elevator_type *e = NULL;
 	int err;
-
-	/*
-	 * q->sysfs_lock must be held to provide mutual exclusion between
-	 * elevator_switch() and here.
-	 */
-	lockdep_assert_held(&q->sysfs_lock);
 
 	if (unlikely(q->elevator))
 		return 0;
@@ -965,7 +960,7 @@ fail_init:
 /*
  * Switch this queue to the given IO scheduler.
  */
-static int __elevator_change(struct request_queue *q, const char *name)
+int elevator_change(struct request_queue *q, const char *name)
 {
 	char elevator_name[ELV_NAME_MAX];
 	struct elevator_type *e;
@@ -987,18 +982,6 @@ static int __elevator_change(struct request_queue *q, const char *name)
 
 	return elevator_switch(q, e);
 }
-
-int elevator_change(struct request_queue *q, const char *name)
-{
-	int ret;
-
-	/* Protect q->elevator from elevator_init() */
-	mutex_lock(&q->sysfs_lock);
-	ret = __elevator_change(q, name);
-	mutex_unlock(&q->sysfs_lock);
-
-	return ret;
-}
 EXPORT_SYMBOL(elevator_change);
 
 ssize_t elv_iosched_store(struct request_queue *q, const char *name,
@@ -1009,7 +992,7 @@ ssize_t elv_iosched_store(struct request_queue *q, const char *name,
 	if (!q->elevator)
 		return count;
 
-	ret = __elevator_change(q, name);
+	ret = elevator_change(q, name);
 	if (!ret)
 		return count;
 

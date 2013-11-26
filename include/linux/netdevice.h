@@ -324,12 +324,15 @@ struct napi_struct {
 	struct sk_buff		*gro_list;
 	struct sk_buff		*skb;
 	struct list_head	dev_list;
+	struct hlist_node	napi_hash_node;
+	unsigned int		napi_id;
 };
 
 enum {
 	NAPI_STATE_SCHED,	/* Poll is scheduled */
 	NAPI_STATE_DISABLE,	/* Disable pending */
 	NAPI_STATE_NPSVC,	/* Netpoll - don't dequeue from poll_list */
+	NAPI_STATE_HASHED,	/* In NAPI hash */
 };
 
 enum gro_result {
@@ -444,6 +447,32 @@ static inline bool napi_reschedule(struct napi_struct *napi)
  */
 extern void __napi_complete(struct napi_struct *n);
 extern void napi_complete(struct napi_struct *n);
+
+/**
+ *	napi_by_id - lookup a NAPI by napi_id
+ *	@napi_id: hashed napi_id
+ *
+ * lookup @napi_id in napi_hash table
+ * must be called under rcu_read_lock()
+ */
+extern struct napi_struct *napi_by_id(unsigned int napi_id);
+
+/**
+ *	napi_hash_add - add a NAPI to global hashtable
+ *	@napi: napi context
+ *
+ * generate a new napi_id and store a @napi under it in napi_hash
+ */
+extern void napi_hash_add(struct napi_struct *napi);
+
+/**
+ *	napi_hash_del - remove a NAPI from global table
+ *	@napi: napi context
+ *
+ * Warning: caller must observe rcu grace period
+ * before freeing memory containing @napi
+ */
+extern void napi_hash_del(struct napi_struct *napi);
 
 /**
  *	napi_disable - prevent NAPI from scheduling
@@ -699,6 +728,16 @@ struct netdev_fcoe_hbainfo {
 };
 #endif
 
+#define MAX_PHYS_PORT_ID_LEN 32
+
+/* This structure holds a unique identifier to identify the
+ * physical port used by a netdevice.
+ */
+struct netdev_phys_port_id {
+	unsigned char id[MAX_PHYS_PORT_ID_LEN];
+	unsigned char id_len;
+};
+
 /*
  * This structure defines the management hooks for network devices.
  * The following hooks can be defined; unless noted otherwise, they are
@@ -800,6 +839,7 @@ struct netdev_fcoe_hbainfo {
  * int (*ndo_set_vf_spoofchk)(struct net_device *dev, int vf, bool setting);
  * int (*ndo_get_vf_config)(struct net_device *dev,
  *			    int vf, struct ifla_vf_info *ivf);
+ * int (*ndo_set_vf_link_state)(struct net_device *dev, int vf, int link_state);
  * int (*ndo_set_vf_port)(struct net_device *dev, int vf,
  *			  struct nlattr *port[]);
  * int (*ndo_get_vf_port)(struct net_device *dev, int vf, struct sk_buff *skb);
@@ -902,6 +942,12 @@ struct netdev_fcoe_hbainfo {
  *	that determine carrier state from physical hardware properties (eg
  *	network cables) or protocol-dependent mechanisms (eg
  *	USB_CDC_NOTIFY_NETWORK_CONNECTION) should NOT implement this function.
+ *
+ * int (*ndo_get_phys_port_id)(struct net_device *dev,
+ *			       struct netdev_phys_port_id *ppid);
+ *	Called to get ID of physical port of this device. If driver does
+ *	not implement this, it is assumed that the hw is not able to have
+ *	multiple net devices on single physical port.
  */
 struct net_device_ops {
 	int			(*ndo_init)(struct net_device *dev);
@@ -943,6 +989,9 @@ struct net_device_ops {
 						     gfp_t gfp);
 	void			(*ndo_netpoll_cleanup)(struct net_device *dev);
 #endif
+#ifdef CONFIG_NET_LL_RX_POLL
+	int			(*ndo_busy_poll)(struct napi_struct *dev);
+#endif
 	int			(*ndo_set_vf_mac)(struct net_device *dev,
 						  int queue, u8 *mac);
 	int			(*ndo_set_vf_vlan)(struct net_device *dev,
@@ -954,6 +1003,8 @@ struct net_device_ops {
 	int			(*ndo_get_vf_config)(struct net_device *dev,
 						     int vf,
 						     struct ifla_vf_info *ivf);
+	int			(*ndo_set_vf_link_state)(struct net_device *dev,
+							 int vf, int link_state);
 	int			(*ndo_set_vf_port)(struct net_device *dev,
 						   int vf,
 						   struct nlattr *port[]);
@@ -1025,6 +1076,34 @@ struct net_device_ops {
 						      struct nlmsghdr *nlh);
 	int			(*ndo_change_carrier)(struct net_device *dev,
 						      bool new_carrier);
+	int			(*ndo_get_phys_port_id)(struct net_device *dev,
+							struct netdev_phys_port_id *ppid);
+
+	/* RHEL SPECIFIC
+	 *
+	 * The following padding has been inserted before ABI freeze to
+	 * allow extending the structure while preserve ABI. Feel free
+	 * to replace reserved slots with required structure field
+	 * additions of your backport.
+	 */
+#ifndef __GENKSYMS__
+	void			(*rh_reserved1)(void);
+	void			(*rh_reserved2)(void);
+	void			(*rh_reserved3)(void);
+	void			(*rh_reserved4)(void);
+	void			(*rh_reserved5)(void);
+	void			(*rh_reserved6)(void);
+	void			(*rh_reserved7)(void);
+	void			(*rh_reserved8)(void);
+	void			(*rh_reserved9)(void);
+	void			(*rh_reserved10)(void);
+	void			(*rh_reserved11)(void);
+	void			(*rh_reserved12)(void);
+	void			(*rh_reserved13)(void);
+	void			(*rh_reserved14)(void);
+	void			(*rh_reserved15)(void);
+	void			(*rh_reserved16)(void);
+#endif
 };
 
 /*
@@ -1088,6 +1167,8 @@ struct net_device {
 	 * need to set them appropriately.
 	 */
 	netdev_features_t	hw_enc_features;
+	/* mask of fetures inheritable by MPLS */
+	netdev_features_t	mpls_features;
 
 	/* Interface index. Unique device identifier	*/
 	int			ifindex;
@@ -1335,6 +1416,32 @@ struct net_device {
 	int group;
 
 	struct pm_qos_request	pm_qos_req;
+
+	/* RHEL SPECIFIC
+	 *
+	 * The following padding has been inserted before ABI freeze to
+	 * allow extending the structure while preserve ABI. Feel free
+	 * to replace reserved slots with required structure field
+	 * additions of your backport.
+	 */
+#ifndef __GENKSYMS__
+	void			(*rh_reserved1)(void);
+	void			(*rh_reserved2)(void);
+	void			(*rh_reserved3)(void);
+	void			(*rh_reserved4)(void);
+	void			(*rh_reserved5)(void);
+	void			(*rh_reserved6)(void);
+	void			(*rh_reserved7)(void);
+	void			(*rh_reserved8)(void);
+	void			(*rh_reserved9)(void);
+	void			(*rh_reserved10)(void);
+	void			(*rh_reserved11)(void);
+	void			(*rh_reserved12)(void);
+	void			(*rh_reserved13)(void);
+	void			(*rh_reserved14)(void);
+	void			(*rh_reserved15)(void);
+	void			(*rh_reserved16)(void);
+#endif
 };
 #define to_net_dev(d) container_of(d, struct net_device, dev)
 
@@ -2236,6 +2343,8 @@ extern int		dev_set_mac_address(struct net_device *,
 					    struct sockaddr *);
 extern int		dev_change_carrier(struct net_device *,
 					   bool new_carrier);
+extern int		dev_get_phys_port_id(struct net_device *dev,
+					     struct netdev_phys_port_id *ppid);
 extern int		dev_hard_start_xmit(struct sk_buff *skb,
 					    struct net_device *dev,
 					    struct netdev_queue *txq);

@@ -304,6 +304,7 @@ static struct net_device *__ip_tunnel_create(struct net *net,
 
 	tunnel = netdev_priv(dev);
 	tunnel->parms = *parms;
+	tunnel->net = net;
 
 	err = register_netdevice(dev);
 	if (err)
@@ -402,19 +403,12 @@ static struct ip_tunnel *ip_tunnel_create(struct net *net,
 }
 
 int ip_tunnel_rcv(struct ip_tunnel *tunnel, struct sk_buff *skb,
-		  const struct tnl_ptk_info *tpi, int hdr_len, bool log_ecn_error)
+		  const struct tnl_ptk_info *tpi, bool log_ecn_error)
 {
 	struct pcpu_tstats *tstats;
 	const struct iphdr *iph = ip_hdr(skb);
 	int err;
 
-	secpath_reset(skb);
-
-	skb->protocol = tpi->proto;
-
-	skb->mac_header = skb->network_header;
-	__pskb_pull(skb, hdr_len);
-	skb_postpull_rcsum(skb, skb_transport_header(skb), tunnel->hlen);
 #ifdef CONFIG_NET_IPGRE_BROADCAST
 	if (ipv4_is_multicast(iph->daddr)) {
 		/* Looped back packet, drop it! */
@@ -442,23 +436,6 @@ int ip_tunnel_rcv(struct ip_tunnel *tunnel, struct sk_buff *skb,
 		tunnel->i_seqno = ntohl(tpi->seq) + 1;
 	}
 
-	/* Warning: All skb pointers will be invalidated! */
-	if (tunnel->dev->type == ARPHRD_ETHER) {
-		if (!pskb_may_pull(skb, ETH_HLEN)) {
-			tunnel->dev->stats.rx_length_errors++;
-			tunnel->dev->stats.rx_errors++;
-			goto drop;
-		}
-
-		iph = ip_hdr(skb);
-		skb->protocol = eth_type_trans(skb, tunnel->dev);
-		skb_postpull_rcsum(skb, eth_hdr(skb), ETH_HLEN);
-	}
-
-	skb->pkt_type = PACKET_HOST;
-	__skb_tunnel_rx(skb, tunnel->dev);
-
-	skb_reset_network_header(skb);
 	err = IP_ECN_decapsulate(iph, skb);
 	if (unlikely(err)) {
 		if (log_ecn_error)
@@ -477,6 +454,15 @@ int ip_tunnel_rcv(struct ip_tunnel *tunnel, struct sk_buff *skb,
 	tstats->rx_bytes += skb->len;
 	u64_stats_update_end(&tstats->syncp);
 
+	if (tunnel->net != dev_net(tunnel->dev))
+		skb_scrub_packet(skb);
+
+	if (tunnel->dev->type == ARPHRD_ETHER) {
+		skb->protocol = eth_type_trans(skb, tunnel->dev);
+		skb_postpull_rcsum(skb, eth_hdr(skb), ETH_HLEN);
+	} else {
+		skb->dev = tunnel->dev;
+	}
 	gro_cells_receive(&tunnel->gro_cells, skb);
 	return 0;
 
@@ -505,6 +491,7 @@ static int tnl_update_pmtu(struct net_device *dev, struct sk_buff *skb,
 	if (skb->protocol == htons(ETH_P_IP)) {
 		if (!skb_is_gso(skb) &&
 		    (df & htons(IP_DF)) && mtu < pkt_size) {
+			memset(IPCB(skb), 0, sizeof(*IPCB(skb)));
 			icmp_send(skb, ICMP_DEST_UNREACH, ICMP_FRAG_NEEDED, htonl(mtu));
 			return -E2BIG;
 		}
@@ -534,22 +521,20 @@ static int tnl_update_pmtu(struct net_device *dev, struct sk_buff *skb,
 }
 
 void ip_tunnel_xmit(struct sk_buff *skb, struct net_device *dev,
-		    const struct iphdr *tnl_params)
+		    const struct iphdr *tnl_params, const u8 protocol)
 {
 	struct ip_tunnel *tunnel = netdev_priv(dev);
 	const struct iphdr *inner_iph;
-	struct iphdr *iph;
 	struct flowi4 fl4;
 	u8     tos, ttl;
 	__be16 df;
 	struct rtable *rt;		/* Route to the other host */
-	struct net_device *tdev;	/* Device to other host */
 	unsigned int max_headroom;	/* The extra header space needed */
 	__be32 dst;
+	int err;
 
 	inner_iph = (const struct iphdr *)skb_inner_network_header(skb);
 
-	memset(IPCB(skb), 0, sizeof(*IPCB(skb)));
 	dst = tnl_params->daddr;
 	if (dst == 0) {
 		/* NBMA tunnel */
@@ -607,8 +592,8 @@ void ip_tunnel_xmit(struct sk_buff *skb, struct net_device *dev,
 			tos = ipv6_get_dsfield((const struct ipv6hdr *)inner_iph);
 	}
 
-	rt = ip_route_output_tunnel(dev_net(dev), &fl4,
-				    tunnel->parms.iph.protocol,
+	rt = ip_route_output_tunnel(tunnel->net, &fl4,
+				    protocol,
 				    dst, tnl_params->saddr,
 				    tunnel->parms.o_key,
 				    RT_TOS(tos),
@@ -617,19 +602,19 @@ void ip_tunnel_xmit(struct sk_buff *skb, struct net_device *dev,
 		dev->stats.tx_carrier_errors++;
 		goto tx_error;
 	}
-	tdev = rt->dst.dev;
-
-	if (tdev == dev) {
+	if (rt->dst.dev == dev) {
 		ip_rt_put(rt);
 		dev->stats.collisions++;
 		goto tx_error;
 	}
 
-
 	if (tnl_update_pmtu(dev, skb, rt, tnl_params->frag_off)) {
 		ip_rt_put(rt);
 		goto tx_error;
 	}
+
+	if (tunnel->net != dev_net(dev))
+		skb_scrub_packet(skb);
 
 	if (tunnel->err_count > 0) {
 		if (time_before(jiffies,
@@ -657,38 +642,22 @@ void ip_tunnel_xmit(struct sk_buff *skb, struct net_device *dev,
 	if (skb->protocol == htons(ETH_P_IP))
 		df |= (inner_iph->frag_off&htons(IP_DF));
 
-	max_headroom = LL_RESERVED_SPACE(tdev) + sizeof(struct iphdr)
-					       + rt->dst.header_len;
-	if (max_headroom > dev->needed_headroom)
+	max_headroom = LL_RESERVED_SPACE(rt->dst.dev) + sizeof(struct iphdr)
+			+ rt->dst.header_len;
+	if (max_headroom > dev->needed_headroom) {
 		dev->needed_headroom = max_headroom;
-
-	if (skb_cow_head(skb, dev->needed_headroom)) {
-		dev->stats.tx_dropped++;
-		dev_kfree_skb(skb);
-		return;
+		if (skb_cow_head(skb, dev->needed_headroom)) {
+			dev->stats.tx_dropped++;
+			dev_kfree_skb(skb);
+			return;
+		}
 	}
 
-	skb_dst_drop(skb);
-	skb_dst_set(skb, &rt->dst);
+	err = iptunnel_xmit(dev_net(dev), rt, skb,
+			    fl4.saddr, fl4.daddr, protocol,
+			    ip_tunnel_ecn_encap(tos, inner_iph, skb), ttl, df);
+	iptunnel_xmit_stats(err, &dev->stats, dev->tstats);
 
-	/* Push down and install the IP header. */
-	skb_push(skb, sizeof(struct iphdr));
-	skb_reset_network_header(skb);
-
-	iph = ip_hdr(skb);
-	inner_iph = (const struct iphdr *)skb_inner_network_header(skb);
-
-	iph->version	=	4;
-	iph->ihl	=	sizeof(struct iphdr) >> 2;
-	iph->frag_off	=	df;
-	iph->protocol	=	tnl_params->protocol;
-	iph->tos	=	ip_tunnel_ecn_encap(tos, inner_iph, skb);
-	iph->daddr	=	fl4.daddr;
-	iph->saddr	=	fl4.saddr;
-	iph->ttl	=	ttl;
-	__ip_select_ident(iph, &rt->dst, (skb_shinfo(skb)->gso_segs ?: 1) - 1);
-
-	iptunnel_xmit(skb, dev);
 	return;
 
 #if IS_ENABLED(CONFIG_IPV6)
@@ -869,15 +838,16 @@ int ip_tunnel_init_net(struct net *net, int ip_tnl_net_id,
 {
 	struct ip_tunnel_net *itn = net_generic(net, ip_tnl_net_id);
 	struct ip_tunnel_parm parms;
+	unsigned int i;
 
-	itn->tunnels = kzalloc(IP_TNL_HASH_SIZE * sizeof(struct hlist_head), GFP_KERNEL);
-	if (!itn->tunnels)
-		return -ENOMEM;
+	for (i = 0; i < IP_TNL_HASH_SIZE; i++)
+		INIT_HLIST_HEAD(&itn->tunnels[i]);
 
 	if (!ops) {
 		itn->fb_tunnel_dev = NULL;
 		return 0;
 	}
+
 	memset(&parms, 0, sizeof(parms));
 	if (devname)
 		strlcpy(parms.name, devname, IFNAMSIZ);
@@ -885,10 +855,9 @@ int ip_tunnel_init_net(struct net *net, int ip_tnl_net_id,
 	rtnl_lock();
 	itn->fb_tunnel_dev = __ip_tunnel_create(net, ops, &parms);
 	rtnl_unlock();
-	if (IS_ERR(itn->fb_tunnel_dev)) {
-		kfree(itn->tunnels);
+
+	if (IS_ERR(itn->fb_tunnel_dev))
 		return PTR_ERR(itn->fb_tunnel_dev);
-	}
 
 	return 0;
 }
@@ -918,7 +887,6 @@ void ip_tunnel_delete_net(struct ip_tunnel_net *itn)
 	ip_tunnel_destroy(itn, &list);
 	unregister_netdevice_many(&list);
 	rtnl_unlock();
-	kfree(itn->tunnels);
 }
 EXPORT_SYMBOL_GPL(ip_tunnel_delete_net);
 
@@ -937,6 +905,7 @@ int ip_tunnel_newlink(struct net_device *dev, struct nlattr *tb[],
 	if (ip_tunnel_find(itn, p, dev->type))
 		return -EEXIST;
 
+	nt->net = net;
 	nt->parms = *p;
 	err = register_netdevice(dev);
 	if (err)

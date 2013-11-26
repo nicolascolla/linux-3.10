@@ -332,10 +332,6 @@ static inline void arch_pick_mmap_layout(struct mm_struct *mm) {}
 extern void set_dumpable(struct mm_struct *mm, int value);
 extern int get_dumpable(struct mm_struct *mm);
 
-#define SUID_DUMP_DISABLE	0	/* No setuid dumping */
-#define SUID_DUMP_USER		1	/* Dump as user of process */
-#define SUID_DUMP_ROOT		2	/* Dump as root */
-
 /* mm flags */
 /* dumpable bits */
 #define MMF_DUMPABLE      0  /* core dump is permitted */
@@ -782,6 +778,7 @@ enum cpu_idle_type {
 #define SD_ASYM_PACKING		0x0800  /* Place busy groups earlier in the domain */
 #define SD_PREFER_SIBLING	0x1000	/* Prefer to place tasks in a sibling domain */
 #define SD_OVERLAP		0x2000	/* sched_domains of this level overlap */
+#define SD_NUMA			0x4000	/* cross-node balancing */
 
 extern int __weak arch_sd_sibiling_asym_packing(void);
 
@@ -1045,6 +1042,11 @@ struct task_struct {
 #ifdef CONFIG_SMP
 	struct llist_node wake_entry;
 	int on_cpu;
+	struct task_struct *last_wakee;
+	unsigned long wakee_flips;
+	unsigned long wakee_flip_decay_ts;
+
+	int wake_cpu;
 #endif
 	int on_rq;
 
@@ -1340,10 +1342,41 @@ struct task_struct {
 #endif
 #ifdef CONFIG_NUMA_BALANCING
 	int numa_scan_seq;
-	int numa_migrate_seq;
 	unsigned int numa_scan_period;
+	unsigned int numa_scan_period_max;
+	int numa_preferred_nid;
+	int numa_migrate_deferred;
+	unsigned long numa_migrate_retry;
 	u64 node_stamp;			/* migration stamp  */
 	struct callback_head numa_work;
+
+	struct list_head numa_entry;
+	struct numa_group *numa_group;
+
+	/*
+	 * Exponential decaying average of faults on a per-node basis.
+	 * Scheduling placement decisions are made based on the these counts.
+	 * The values remain static for the duration of a PTE scan
+	 */
+	unsigned long *numa_faults;
+	unsigned long total_numa_faults;
+
+	/*
+	 * numa_faults_buffer records faults per node during the current
+	 * scan window. When the scan completes, the counts in numa_faults
+	 * decay and these values are copied.
+	 */
+	unsigned long *numa_faults_buffer;
+
+	/*
+	 * numa_faults_locality tracks if faults recorded during the last
+	 * scan window were remote/local. The task scan period is adapted
+	 * based on the locality of the faults with different weights
+	 * depending on whether they were shared or private faults
+	 */
+	unsigned long numa_faults_locality[2];
+
+	unsigned long numa_pages_migrated;
 #endif /* CONFIG_NUMA_BALANCING */
 
 	struct rcu_head rcu;
@@ -1425,14 +1458,31 @@ struct task_struct {
 /* Future-safe accessor for struct task_struct's cpus_allowed. */
 #define tsk_cpus_allowed(tsk) (&(tsk)->cpus_allowed)
 
+#define TNF_MIGRATED	0x01
+#define TNF_NO_GROUP	0x02
+#define TNF_SHARED	0x04
+#define TNF_FAULT_LOCAL	0x08
+
 #ifdef CONFIG_NUMA_BALANCING
-extern void task_numa_fault(int node, int pages, bool migrated);
+extern void task_numa_fault(int last_node, int node, int pages, int flags);
+extern pid_t task_numa_group_id(struct task_struct *p);
 extern void set_numabalancing_state(bool enabled);
+extern void task_numa_free(struct task_struct *p);
+
+extern unsigned int sysctl_numa_balancing_migrate_deferred;
 #else
-static inline void task_numa_fault(int node, int pages, bool migrated)
+static inline void task_numa_fault(int last_node, int node, int pages,
+				   int flags)
 {
 }
+static inline pid_t task_numa_group_id(struct task_struct *p)
+{
+	return 0;
+}
 static inline void set_numabalancing_state(bool enabled)
+{
+}
+static inline void task_numa_free(struct task_struct *p)
 {
 }
 #endif
@@ -1546,6 +1596,8 @@ static inline pid_t task_pgrp_nr(struct task_struct *tsk)
  * Test if a process is not yet dead (at most zombie state)
  * If pid_alive fails, then pointers within the task structure
  * can be stale and must not be dereferenced.
+ *
+ * Return: 1 if the process is alive. 0 otherwise.
  */
 static inline int pid_alive(struct task_struct *p)
 {
@@ -1557,6 +1609,8 @@ static inline int pid_alive(struct task_struct *p)
  * @tsk: Task structure to be checked.
  *
  * Check if a task structure is the first user space task the kernel created.
+ *
+ * Return: 1 if the task structure is init. 0 otherwise.
  */
 static inline int is_global_init(struct task_struct *tsk)
 {
@@ -1642,6 +1696,7 @@ extern void thread_group_cputime_adjusted(struct task_struct *p, cputime_t *ut, 
 #define PF_MEMPOLICY	0x10000000	/* Non-default NUMA mempolicy */
 #define PF_MUTEX_TESTER	0x20000000	/* Thread belongs to the rt mutex tester */
 #define PF_FREEZER_SKIP	0x40000000	/* Freezer should not count it as freezable */
+#define PF_SUSPEND_TASK 0x80000000      /* this thread called freeze_processes and should not be frozen */
 
 /*
  * Only the _current_ task can read/write to tsk->flags, but other
@@ -1907,6 +1962,8 @@ extern struct task_struct *idle_task(int cpu);
 /**
  * is_idle_task - is the specified task an idle task?
  * @p: the task in question.
+ *
+ * Return: 1 if @p is an idle task. 0 otherwise.
  */
 static inline bool is_idle_task(const struct task_struct *p)
 {
@@ -1982,7 +2039,7 @@ extern void wake_up_new_task(struct task_struct *tsk);
 #else
  static inline void kick_process(struct task_struct *tsk) { }
 #endif
-extern void sched_fork(struct task_struct *p);
+extern void sched_fork(unsigned long clone_flags, struct task_struct *p);
 extern void sched_dead(struct task_struct *p);
 
 extern void proc_caches_init(void);
@@ -2473,98 +2530,34 @@ static inline int tsk_is_polling(struct task_struct *p)
 {
 	return task_thread_info(p)->status & TS_POLLING;
 }
-static inline void __current_set_polling(void)
+static inline void current_set_polling(void)
 {
 	current_thread_info()->status |= TS_POLLING;
 }
 
-static inline bool __must_check current_set_polling_and_test(void)
-{
-	__current_set_polling();
-
-	/*
-	 * Polling state must be visible before we test NEED_RESCHED,
-	 * paired by resched_task()
-	 */
-	smp_mb();
-
-	return unlikely(tif_need_resched());
-}
-
-static inline void __current_clr_polling(void)
+static inline void current_clr_polling(void)
 {
 	current_thread_info()->status &= ~TS_POLLING;
-}
-
-static inline bool __must_check current_clr_polling_and_test(void)
-{
-	__current_clr_polling();
-
-	/*
-	 * Polling state must be visible before we test NEED_RESCHED,
-	 * paired by resched_task()
-	 */
-	smp_mb();
-
-	return unlikely(tif_need_resched());
+	smp_mb__after_clear_bit();
 }
 #elif defined(TIF_POLLING_NRFLAG)
 static inline int tsk_is_polling(struct task_struct *p)
 {
 	return test_tsk_thread_flag(p, TIF_POLLING_NRFLAG);
 }
-
-static inline void __current_set_polling(void)
+static inline void current_set_polling(void)
 {
 	set_thread_flag(TIF_POLLING_NRFLAG);
 }
 
-static inline bool __must_check current_set_polling_and_test(void)
-{
-	__current_set_polling();
-
-	/*
-	 * Polling state must be visible before we test NEED_RESCHED,
-	 * paired by resched_task()
-	 *
-	 * XXX: assumes set/clear bit are identical barrier wise.
-	 */
-	smp_mb__after_clear_bit();
-
-	return unlikely(tif_need_resched());
-}
-
-static inline void __current_clr_polling(void)
+static inline void current_clr_polling(void)
 {
 	clear_thread_flag(TIF_POLLING_NRFLAG);
 }
-
-static inline bool __must_check current_clr_polling_and_test(void)
-{
-	__current_clr_polling();
-
-	/*
-	 * Polling state must be visible before we test NEED_RESCHED,
-	 * paired by resched_task()
-	 */
-	smp_mb__after_clear_bit();
-
-	return unlikely(tif_need_resched());
-}
-
 #else
 static inline int tsk_is_polling(struct task_struct *p) { return 0; }
-static inline void __current_set_polling(void) { }
-static inline void __current_clr_polling(void) { }
-
-static inline bool __must_check current_set_polling_and_test(void)
-{
-	return unlikely(tif_need_resched());
-}
-static inline bool __must_check current_clr_polling_and_test(void)
-{
-	return unlikely(tif_need_resched());
-}
+static inline void current_set_polling(void) { }
+static inline void current_clr_polling(void) { }
 #endif
 
 /*
@@ -2606,6 +2599,11 @@ static inline void ptrace_signal_wake_up(struct task_struct *t, bool resume)
 static inline unsigned int task_cpu(const struct task_struct *p)
 {
 	return task_thread_info(p)->cpu;
+}
+
+static inline int task_node(const struct task_struct *p)
+{
+	return cpu_to_node(task_cpu(p));
 }
 
 extern void set_task_cpu(struct task_struct *p, unsigned int cpu);

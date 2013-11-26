@@ -1282,8 +1282,10 @@ static void qeth_free_qdio_buffers(struct qeth_card *card)
 
 	qeth_free_cq(card);
 	cancel_delayed_work_sync(&card->buffer_reclaim_work);
-	for (j = 0; j < QDIO_MAX_BUFFERS_PER_Q; ++j)
-		dev_kfree_skb_any(card->qdio.in_q->bufs[j].rx_skb);
+	for (j = 0; j < QDIO_MAX_BUFFERS_PER_Q; ++j) {
+		if (card->qdio.in_q->bufs[j].rx_skb)
+			dev_kfree_skb_any(card->qdio.in_q->bufs[j].rx_skb);
+	}
 	kfree(card->qdio.in_q);
 	card->qdio.in_q = NULL;
 	/* inbound buffer pool */
@@ -1729,14 +1731,14 @@ static void qeth_configure_blkt_default(struct qeth_card *card, char *prcd)
 	QETH_DBF_TEXT(SETUP, 2, "cfgblkt");
 
 	if (prcd[74] == 0xF0 && prcd[75] == 0xF0 &&
-	    (prcd[76] == 0xF5 || prcd[76] == 0xF6)) {
-		card->info.blkt.time_total = 250;
-		card->info.blkt.inter_packet = 5;
-		card->info.blkt.inter_packet_jumbo = 15;
-	} else {
+	    prcd[76] >= 0xF1 && prcd[76] <= 0xF4) {
 		card->info.blkt.time_total = 0;
 		card->info.blkt.inter_packet = 0;
 		card->info.blkt.inter_packet_jumbo = 0;
+	} else {
+		card->info.blkt.time_total = 250;
+		card->info.blkt.inter_packet = 5;
+		card->info.blkt.inter_packet_jumbo = 15;
 	}
 }
 
@@ -4448,7 +4450,7 @@ int qeth_snmp_command(struct qeth_card *card, char __user *udata)
 	struct qeth_cmd_buffer *iob;
 	struct qeth_ipa_cmd *cmd;
 	struct qeth_snmp_ureq *ureq;
-	unsigned int req_len;
+	int req_len;
 	struct qeth_arp_query_info qinfo = {0, };
 	int rc = 0;
 
@@ -4464,10 +4466,6 @@ int qeth_snmp_command(struct qeth_card *card, char __user *udata)
 	/* skip 4 bytes (data_len struct member) to get req_len */
 	if (copy_from_user(&req_len, udata + sizeof(int), sizeof(int)))
 		return -EFAULT;
-	if (req_len > (QETH_BUFSIZE - IPA_PDU_HEADER_SIZE -
-		       sizeof(struct qeth_ipacmd_hdr) -
-		       sizeof(struct qeth_ipacmd_setadpparms_hdr)))
-		return -EINVAL;
 	ureq = memdup_user(udata, req_len + sizeof(struct qeth_snmp_ureq_hdr));
 	if (IS_ERR(ureq)) {
 		QETH_CARD_TEXT(card, 2, "snmpnome");

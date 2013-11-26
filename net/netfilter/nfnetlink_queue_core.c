@@ -444,7 +444,10 @@ nfqnl_build_packet_message(struct nfqnl_instance *queue,
 	if (indev && entskb->dev &&
 	    entskb->mac_header != entskb->network_header) {
 		struct nfqnl_msg_packet_hw phw;
-		int len = dev_parse_header(entskb, phw.hw_addr);
+		int len;
+
+		memset(&phw, 0, sizeof(phw));
+		len = dev_parse_header(entskb, phw.hw_addr);
 		if (len) {
 			phw.hw_addrlen = htons(len);
 			if (nla_put(skb, NFQA_HWADDR, sizeof(phw), &phw))
@@ -509,10 +512,6 @@ __nfqnl_enqueue_packet(struct net *net, struct nfqnl_instance *queue,
 	}
 	spin_lock_bh(&queue->lock);
 
-	if (!queue->peer_portid) {
-		err = -EINVAL;
-		goto err_out_free_nskb;
-	}
 	if (queue->queue_total >= queue->queue_maxlen) {
 		if (queue->flags & NFQA_CFG_F_FAIL_OPEN) {
 			failopen = 1;
@@ -848,6 +847,7 @@ static const struct nla_policy nfqa_verdict_policy[NFQA_MAX+1] = {
 	[NFQA_MARK]		= { .type = NLA_U32 },
 	[NFQA_PAYLOAD]		= { .type = NLA_UNSPEC },
 	[NFQA_CT]		= { .type = NLA_UNSPEC },
+	[NFQA_EXP]		= { .type = NLA_UNSPEC },
 };
 
 static const struct nla_policy nfqa_verdict_batch_policy[NFQA_MAX+1] = {
@@ -977,8 +977,14 @@ nfqnl_recv_verdict(struct sock *ctnl, struct sk_buff *skb,
 		return -ENOENT;
 
 	rcu_read_lock();
-	if (nfqa[NFQA_CT] && (queue->flags & NFQA_CFG_F_CONNTRACK))
+	if (nfqa[NFQA_CT] && (queue->flags & NFQA_CFG_F_CONNTRACK)) {
 		ct = nfqnl_ct_parse(entry->skb, nfqa[NFQA_CT], &ctinfo);
+		if (ct && nfqa[NFQA_EXP]) {
+			nfqnl_attach_expect(ct, nfqa[NFQA_EXP],
+					    NETLINK_CB(skb).portid,
+					    nlmsg_report(nlh));
+		}
+	}
 
 	if (nfqa[NFQA_PAYLOAD]) {
 		u16 payload_len = nla_len(nfqa[NFQA_PAYLOAD]);

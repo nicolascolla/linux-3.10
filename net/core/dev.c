@@ -129,6 +129,7 @@
 #include <linux/inetdevice.h>
 #include <linux/cpu_rmap.h>
 #include <linux/static_key.h>
+#include <linux/hashtable.h>
 
 #include "net-sysfs.h"
 
@@ -165,6 +166,12 @@ static struct list_head offload_base __read_mostly;
  */
 DEFINE_RWLOCK(dev_base_lock);
 EXPORT_SYMBOL(dev_base_lock);
+
+/* protects napi_hash addition/deletion and napi_gen_id */
+static DEFINE_SPINLOCK(napi_hash_lock);
+
+static unsigned int napi_gen_id;
+static DEFINE_HASHTABLE(napi_hash, 8);
 
 seqcount_t devnet_rename_seq;
 
@@ -1655,23 +1662,13 @@ int dev_forward_skb(struct net_device *dev, struct sk_buff *skb)
 		}
 	}
 
-	skb_orphan(skb);
-
 	if (unlikely(!is_skb_forwardable(dev, skb))) {
 		atomic_long_inc(&dev->rx_dropped);
 		kfree_skb(skb);
 		return NET_RX_DROP;
 	}
-	skb->skb_iif = 0;
-	skb->dev = dev;
-	skb_dst_drop(skb);
-	skb->tstamp.tv64 = 0;
-	skb->pkt_type = PACKET_HOST;
+	skb_scrub_packet(skb);
 	skb->protocol = eth_type_trans(skb, dev);
-	skb->mark = 0;
-	secpath_reset(skb);
-	nf_reset(skb);
-	nf_reset_trace(skb);
 	return netif_rx(skb);
 }
 EXPORT_SYMBOL_GPL(dev_forward_skb);
@@ -1736,7 +1733,7 @@ static void dev_queue_xmit_nit(struct sk_buff *skb, struct net_device *dev)
 			skb_reset_mac_header(skb2);
 
 			if (skb_network_header(skb2) < skb2->data ||
-			    skb2->network_header > skb2->tail) {
+			    skb_network_header(skb2) > skb_tail_pointer(skb2)) {
 				net_crit_ratelimited("protocol %04x is buggy, dev %s\n",
 						     ntohs(skb2->protocol),
 						     dev->name);
@@ -2454,10 +2451,10 @@ static int dev_gso_segment(struct sk_buff *skb, netdev_features_t features)
 }
 
 static netdev_features_t harmonize_features(struct sk_buff *skb,
-	__be16 protocol, netdev_features_t features)
+	netdev_features_t features)
 {
 	if (skb->ip_summed != CHECKSUM_NONE &&
-	    !can_checksum_protocol(features, protocol)) {
+	    !can_checksum_protocol(features, skb_network_protocol(skb))) {
 		features &= ~NETIF_F_ALL_CSUM;
 	} else if (illegal_highdma(skb->dev, skb)) {
 		features &= ~NETIF_F_SG;
@@ -2478,20 +2475,18 @@ netdev_features_t netif_skb_features(struct sk_buff *skb)
 		struct vlan_ethhdr *veh = (struct vlan_ethhdr *)skb->data;
 		protocol = veh->h_vlan_encapsulated_proto;
 	} else if (!vlan_tx_tag_present(skb)) {
-		return harmonize_features(skb, protocol, features);
+		return harmonize_features(skb, features);
 	}
 
 	features &= (skb->dev->vlan_features | NETIF_F_HW_VLAN_CTAG_TX |
 					       NETIF_F_HW_VLAN_STAG_TX);
 
-	if (protocol != htons(ETH_P_8021Q) && protocol != htons(ETH_P_8021AD)) {
-		return harmonize_features(skb, protocol, features);
-	} else {
+	if (protocol == htons(ETH_P_8021Q) || protocol == htons(ETH_P_8021AD))
 		features &= NETIF_F_SG | NETIF_F_HIGHDMA | NETIF_F_FRAGLIST |
 				NETIF_F_GEN_CSUM | NETIF_F_HW_VLAN_CTAG_TX |
 				NETIF_F_HW_VLAN_STAG_TX;
-		return harmonize_features(skb, protocol, features);
-	}
+
+	return harmonize_features(skb, features);
 }
 EXPORT_SYMBOL(netif_skb_features);
 
@@ -3869,7 +3864,7 @@ static void skb_gro_reset_offset(struct sk_buff *skb)
 	NAPI_GRO_CB(skb)->frag0 = NULL;
 	NAPI_GRO_CB(skb)->frag0_len = 0;
 
-	if (skb->mac_header == skb->tail &&
+	if (skb_mac_header(skb) == skb_tail_pointer(skb) &&
 	    pinfo->nr_frags &&
 	    !PageHighMem(skb_frag_page(frag0))) {
 		NAPI_GRO_CB(skb)->frag0 = skb_frag_address(frag0);
@@ -4112,6 +4107,58 @@ void napi_complete(struct napi_struct *n)
 	local_irq_restore(flags);
 }
 EXPORT_SYMBOL(napi_complete);
+
+/* must be called under rcu_read_lock(), as we dont take a reference */
+struct napi_struct *napi_by_id(unsigned int napi_id)
+{
+	unsigned int hash = napi_id % HASH_SIZE(napi_hash);
+	struct napi_struct *napi;
+
+	hlist_for_each_entry_rcu(napi, &napi_hash[hash], napi_hash_node)
+		if (napi->napi_id == napi_id)
+			return napi;
+
+	return NULL;
+}
+EXPORT_SYMBOL_GPL(napi_by_id);
+
+void napi_hash_add(struct napi_struct *napi)
+{
+	if (!test_and_set_bit(NAPI_STATE_HASHED, &napi->state)) {
+
+		spin_lock(&napi_hash_lock);
+
+		/* 0 is not a valid id, we also skip an id that is taken
+		 * we expect both events to be extremely rare
+		 */
+		napi->napi_id = 0;
+		while (!napi->napi_id) {
+			napi->napi_id = ++napi_gen_id;
+			if (napi_by_id(napi->napi_id))
+				napi->napi_id = 0;
+		}
+
+		hlist_add_head_rcu(&napi->napi_hash_node,
+			&napi_hash[napi->napi_id % HASH_SIZE(napi_hash)]);
+
+		spin_unlock(&napi_hash_lock);
+	}
+}
+EXPORT_SYMBOL_GPL(napi_hash_add);
+
+/* Warning : caller is responsible to make sure rcu grace period
+ * is respected before freeing memory containing @napi
+ */
+void napi_hash_del(struct napi_struct *napi)
+{
+	spin_lock(&napi_hash_lock);
+
+	if (test_and_clear_bit(NAPI_STATE_HASHED, &napi->state))
+		hlist_del_rcu(&napi->napi_hash_node);
+
+	spin_unlock(&napi_hash_lock);
+}
+EXPORT_SYMBOL_GPL(napi_hash_del);
 
 void netif_napi_add(struct net_device *dev, struct napi_struct *napi,
 		    int (*poll)(struct napi_struct *, int), int weight)
@@ -4478,7 +4525,7 @@ static void dev_change_rx_flags(struct net_device *dev, int flags)
 {
 	const struct net_device_ops *ops = dev->netdev_ops;
 
-	if (ops->ndo_change_rx_flags)
+	if ((dev->flags & IFF_UP) && ops->ndo_change_rx_flags)
 		ops->ndo_change_rx_flags(dev, flags);
 }
 
@@ -4862,6 +4909,24 @@ int dev_change_carrier(struct net_device *dev, bool new_carrier)
 	return ops->ndo_change_carrier(dev, new_carrier);
 }
 EXPORT_SYMBOL(dev_change_carrier);
+
+/**
+ *	dev_get_phys_port_id - Get device physical port ID
+ *	@dev: device
+ *	@ppid: port ID
+ *
+ *	Get device physical port ID
+ */
+int dev_get_phys_port_id(struct net_device *dev,
+			 struct netdev_phys_port_id *ppid)
+{
+	const struct net_device_ops *ops = dev->netdev_ops;
+
+	if (!ops->ndo_get_phys_port_id)
+		return -EOPNOTSUPP;
+	return ops->ndo_get_phys_port_id(dev, ppid);
+}
+EXPORT_SYMBOL(dev_get_phys_port_id);
 
 /**
  *	dev_new_index	-	allocate an ifindex
@@ -5275,6 +5340,10 @@ int register_netdevice(struct net_device *dev)
 	/* Make NETIF_F_SG inheritable to tunnel devices.
 	 */
 	dev->hw_enc_features |= NETIF_F_SG;
+
+	/* Make NETIF_F_SG inheritable to MPLS.
+	 */
+	dev->mpls_features |= NETIF_F_SG;
 
 	ret = call_netdevice_notifiers(NETDEV_POST_INIT, dev);
 	ret = notifier_to_errno(ret);

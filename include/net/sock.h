@@ -229,6 +229,8 @@ struct cg_proto;
   *	@sk_omem_alloc: "o" is "option" or "other"
   *	@sk_wmem_queued: persistent queue size
   *	@sk_forward_alloc: space allocated forward
+  *	@sk_napi_id: id of the last napi context to receive data for sk
+  *	@sk_ll_usec: usecs to busypoll when there is no data
   *	@sk_allocation: allocation mode
   *	@sk_pacing_rate: Pacing rate (if supported by transport/packet scheduler)
   *	@sk_sndbuf: size of send buffer in bytes
@@ -326,6 +328,10 @@ struct sock {
 #ifdef CONFIG_RPS
 	__u32			sk_rxhash;
 #endif
+#ifdef CONFIG_NET_LL_RX_POLL
+	unsigned int		sk_napi_id;
+	unsigned int		sk_ll_usec;
+#endif
 	atomic_t		sk_drops;
 	int			sk_rcvbuf;
 
@@ -401,6 +407,24 @@ struct sock {
 	int			(*sk_backlog_rcv)(struct sock *sk,
 						  struct sk_buff *skb);
 	void                    (*sk_destruct)(struct sock *sk);
+
+	/* RHEL SPECIFIC
+	 *
+	 * The following padding has been inserted before ABI freeze to
+	 * allow extending the structure while preserve ABI. Feel free
+	 * to replace reserved slots with required structure field
+	 * additions of your backport.
+	 */
+#ifndef __GENKSYMS__
+	void			(*rh_reserved1)(void);
+	void			(*rh_reserved2)(void);
+	void			(*rh_reserved3)(void);
+	void			(*rh_reserved4)(void);
+	void			(*rh_reserved5)(void);
+	void			(*rh_reserved6)(void);
+	void			(*rh_reserved7)(void);
+	void			(*rh_reserved8)(void);
+#endif
 };
 
 /*

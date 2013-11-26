@@ -1,8 +1,11 @@
 VERSION = 3
 PATCHLEVEL = 10
-SUBLEVEL = 24
+SUBLEVEL = 0
 EXTRAVERSION =
-NAME = TOSSUG Baby Fish
+NAME = Unicycling Gorilla
+RHEL_MAJOR = 7
+RHEL_MINOR = 0
+RHEL_RELEASE = 54.0.1
 
 # *DOCUMENTATION*
 # To see a list of typical targets execute "make help"
@@ -766,6 +769,10 @@ vmlinux-deps := $(KBUILD_LDS) $(KBUILD_VMLINUX_INIT) $(KBUILD_VMLINUX_MAIN)
       cmd_link-vmlinux = $(CONFIG_SHELL) $< $(LD) $(LDFLAGS) $(LDFLAGS_vmlinux)
 quiet_cmd_link-vmlinux = LINK    $@
 
+ifdef AFTER_LINK
+      cmd_link-vmlinux += ; $(AFTER_LINK)
+endif
+
 # Include targets which we want to
 # execute if the rest of the kernel build went well.
 vmlinux: scripts/link-vmlinux.sh $(vmlinux-deps) FORCE
@@ -855,7 +862,13 @@ endef
 define filechk_version.h
 	(echo \#define LINUX_VERSION_CODE $(shell                         \
 	expr $(VERSION) \* 65536 + 0$(PATCHLEVEL) \* 256 + 0$(SUBLEVEL)); \
-	echo '#define KERNEL_VERSION(a,b,c) (((a) << 16) + ((b) << 8) + (c))';)
+	echo '#define KERNEL_VERSION(a,b,c) (((a) << 16) + ((b) << 8) + (c))'; \
+	echo '#define RHEL_MAJOR $(RHEL_MAJOR)'; \
+	echo '#define RHEL_MINOR $(RHEL_MINOR)'; \
+	echo '#define RHEL_RELEASE_VERSION(a,b) (((a) << 8) + (b))'; \
+	echo '#define RHEL_RELEASE_CODE \
+		$(shell expr $(RHEL_MAJOR) \* 256 + $(RHEL_MINOR))'; \
+	echo '#define RHEL_RELEASE "$(RHEL_RELEASE)"';)
 endef
 
 $(version_h): $(srctree)/Makefile FORCE

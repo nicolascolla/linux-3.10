@@ -571,6 +571,9 @@ tcp_limit_output_bytes - INTEGER
 	typical pfifo_fast qdiscs.
 	tcp_limit_output_bytes limits the number of bytes on qdisc
 	or device to reduce artificial RTT/cwnd and reduce bufferbloat.
+	Note: For GSO/TSO enabled flows, we try to have at least two
+	packets in flight. Reducing tcp_limit_output_bytes might also
+	reduce the size of individual GSO packet (64KB being the max)
 	Default: 131072
 
 tcp_challenge_ack_limit - INTEGER
@@ -1019,7 +1022,15 @@ disable_policy - BOOLEAN
 disable_xfrm - BOOLEAN
 	Disable IPSEC encryption on this interface, whatever the policy
 
+igmpv2_unsolicited_report_interval - INTEGER
+	The interval in milliseconds in which the next unsolicited
+	IGMPv1 or IGMPv2 report retransmit will take place.
+	Default: 10000 (10 seconds)
 
+igmpv3_unsolicited_report_interval - INTEGER
+	The interval in milliseconds in which the next unsolicited
+	IGMPv3 report retransmit will take place.
+	Default: 1000 (1 seconds)
 
 tag - INTEGER
 	Allows you to write a number, which can be used as required.
@@ -1310,6 +1321,16 @@ ndisc_notify - BOOLEAN
 	0 - (default): do nothing
 	1 - Generate unsolicited neighbour advertisements when device is brought
 	    up or hardware address changes.
+
+mldv1_unsolicited_report_interval - INTEGER
+	The interval in milliseconds in which the next unsolicited
+	MLDv1 report retransmit will take place.
+	Default: 10000 (10 seconds)
+
+mldv2_unsolicited_report_interval - INTEGER
+	The interval in milliseconds in which the next unsolicited
+	MLDv2 report retransmit will take place.
+	Default: 1000 (1 second)
 
 icmp/*:
 ratelimit - INTEGER

@@ -114,6 +114,7 @@
 #include <linux/mount.h>
 #include <net/checksum.h>
 #include <linux/security.h>
+#include <linux/freezer.h>
 
 struct hlist_head unix_socket_table[2 * UNIX_HASH_SIZE];
 EXPORT_SYMBOL_GPL(unix_socket_table);
@@ -1761,6 +1762,7 @@ static void unix_copy_addr(struct msghdr *msg, struct sock *sk)
 {
 	struct unix_sock *u = unix_sk(sk);
 
+	msg->msg_namelen = 0;
 	if (u->addr) {
 		msg->msg_namelen = u->addr->len;
 		memcpy(msg->msg_name, u->addr->name, u->addr->len);
@@ -1783,6 +1785,8 @@ static int unix_dgram_recvmsg(struct kiocb *iocb, struct socket *sock,
 	err = -EOPNOTSUPP;
 	if (flags&MSG_OOB)
 		goto out;
+
+	msg->msg_namelen = 0;
 
 	err = mutex_lock_interruptible(&u->readlock);
 	if (err) {
@@ -1886,7 +1890,7 @@ static long unix_stream_data_wait(struct sock *sk, long timeo,
 
 		set_bit(SOCK_ASYNC_WAITDATA, &sk->sk_socket->flags);
 		unix_state_unlock(sk);
-		timeo = schedule_timeout(timeo);
+		timeo = freezable_schedule_timeout(timeo);
 		unix_state_lock(sk);
 		clear_bit(SOCK_ASYNC_WAITDATA, &sk->sk_socket->flags);
 	}
@@ -1922,6 +1926,8 @@ static int unix_stream_recvmsg(struct kiocb *iocb, struct socket *sock,
 
 	target = sock_rcvlowat(sk, flags&MSG_WAITALL, size);
 	timeo = sock_rcvtimeo(sk, flags&MSG_DONTWAIT);
+
+	msg->msg_namelen = 0;
 
 	/* Lock the socket to prevent queue disordering
 	 * while sleeps in memcpy_tomsg

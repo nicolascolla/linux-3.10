@@ -157,7 +157,8 @@ enum {
 	MLX4_DEV_CAP_FLAGS2_REASSIGN_MAC_EN	= 1LL <<  4,
 	MLX4_DEV_CAP_FLAG2_TS			= 1LL <<  5,
 	MLX4_DEV_CAP_FLAG2_VLAN_CONTROL		= 1LL <<  6,
-	MLX4_DEV_CAP_FLAG2_FSM			= 1LL <<  7
+	MLX4_DEV_CAP_FLAG2_FSM			= 1LL <<  7,
+	MLX4_DEV_CAP_FLAG2_UPDATE_QP		= 1LL <<  8
 };
 
 enum {
@@ -206,6 +207,7 @@ enum mlx4_event {
 	MLX4_EVENT_TYPE_CMD		   = 0x0a,
 	MLX4_EVENT_TYPE_VEP_UPDATE	   = 0x19,
 	MLX4_EVENT_TYPE_COMM_CHANNEL	   = 0x18,
+	MLX4_EVENT_TYPE_OP_REQUIRED	   = 0x1a,
 	MLX4_EVENT_TYPE_FATAL_WARNING	   = 0x1b,
 	MLX4_EVENT_TYPE_FLR_EVENT	   = 0x1c,
 	MLX4_EVENT_TYPE_PORT_MNG_CHG_EVENT = 0x1d,
@@ -1049,11 +1051,6 @@ struct _rule_hw {
 		struct mlx4_net_trans_rule_hw_ipv4 ipv4;
 		struct mlx4_net_trans_rule_hw_tcp_udp tcp_udp;
 	};
-};
-
-/* translating DMFS verbs sniffer rule to the FW API would need two reg IDs */
-struct mlx4_flow_handle {
-	u64 reg_id[2];
 };
 
 int mlx4_flow_steer_promisc_add(struct mlx4_dev *dev, u8 port, u32 qpn,

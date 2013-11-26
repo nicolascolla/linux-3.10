@@ -125,6 +125,7 @@ static inline bool is_error_page(struct page *page)
 #define KVM_REQ_MCLOCK_INPROGRESS 19
 #define KVM_REQ_EPR_EXIT          20
 #define KVM_REQ_SCAN_IOAPIC       21
+#define KVM_REQ_GLOBAL_CLOCK_UPDATE 22
 
 #define KVM_USERSPACE_IRQ_SOURCE_ID		0
 #define KVM_IRQFD_RESAMPLE_IRQ_SOURCE_ID	1
@@ -145,7 +146,8 @@ struct kvm_io_range {
 #define NR_IOBUS_DEVS 1000
 
 struct kvm_io_bus {
-	int                   dev_count;
+	int dev_count;
+	int ioeventfd_count;
 	struct kvm_io_range range[];
 };
 
@@ -655,6 +657,25 @@ static inline void kvm_arch_free_vm(struct kvm *kvm)
 }
 #endif
 
+#ifdef __KVM_HAVE_ARCH_NONCOHERENT_DMA
+void kvm_arch_register_noncoherent_dma(struct kvm *kvm);
+void kvm_arch_unregister_noncoherent_dma(struct kvm *kvm);
+bool kvm_arch_has_noncoherent_dma(struct kvm *kvm);
+#else
+static inline void kvm_arch_register_noncoherent_dma(struct kvm *kvm)
+{
+}
+
+static inline void kvm_arch_unregister_noncoherent_dma(struct kvm *kvm)
+{
+}
+
+static inline bool kvm_arch_has_noncoherent_dma(struct kvm *kvm)
+{
+	return false;
+}
+#endif
+
 static inline wait_queue_head_t *kvm_arch_vcpu_wq(struct kvm_vcpu *vcpu)
 {
 #ifdef __KVM_HAVE_ARCH_WQP
@@ -730,9 +751,6 @@ void kvm_unregister_irq_ack_notifier(struct kvm *kvm,
 				   struct kvm_irq_ack_notifier *kian);
 int kvm_request_irq_source_id(struct kvm *kvm);
 void kvm_free_irq_source_id(struct kvm *kvm, int irq_source_id);
-
-/* For vcpu->arch.iommu_flags */
-#define KVM_IOMMU_CACHE_COHERENCY	0x1
 
 #ifdef CONFIG_KVM_DEVICE_ASSIGNMENT
 int kvm_iommu_map_pages(struct kvm *kvm, struct kvm_memory_slot *slot);
@@ -1050,6 +1068,7 @@ struct kvm_device *kvm_device_from_filp(struct file *filp);
 
 extern struct kvm_device_ops kvm_mpic_ops;
 extern struct kvm_device_ops kvm_xics_ops;
+extern struct kvm_device_ops kvm_vfio_ops;
 
 #ifdef CONFIG_HAVE_KVM_CPU_RELAX_INTERCEPT
 

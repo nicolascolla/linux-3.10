@@ -380,6 +380,7 @@ struct address_space_operations {
 	int (*launder_page) (struct page *);
 	int (*is_partially_uptodate) (struct page *, read_descriptor_t *,
 					unsigned long);
+	void (*is_dirty_writeback) (struct page *, bool *, bool *);
 	int (*error_remove_page)(struct address_space *, struct page *);
 
 	/* swapfile support */
@@ -908,6 +909,7 @@ struct file_lock_operations {
 
 struct lock_manager_operations {
 	int (*lm_compare_owner)(struct file_lock *, struct file_lock *);
+	unsigned long (*lm_owner_key)(struct file_lock *);
 	void (*lm_notify)(struct file_lock *);	/* unblock callback */
 	int (*lm_grant)(struct file_lock *, struct file_lock *, int);
 	void (*lm_break)(struct file_lock *);
@@ -926,14 +928,33 @@ int locks_in_grace(struct net *);
 /* that will die - we need it for nfs_lock_info */
 #include <linux/nfs_fs_i.h>
 
+/*
+ * struct file_lock represents a generic "file lock". It's used to represent
+ * POSIX byte range locks, BSD (flock) locks, and leases. It's important to
+ * note that the same struct is used to represent both a request for a lock and
+ * the lock itself, but the same object is never used for both.
+ *
+ * FIXME: should we create a separate "struct lock_request" to help distinguish
+ * these two uses?
+ *
+ * The i_flock list is ordered by:
+ *
+ * 1) lock type -- FL_LEASEs first, then FL_FLOCK, and finally FL_POSIX
+ * 2) lock owner
+ * 3) lock range start
+ * 4) lock range end
+ *
+ * Obviously, the last two criteria only matter for POSIX locks.
+ */
 struct file_lock {
 	struct file_lock *fl_next;	/* singly linked list for this inode  */
-	struct list_head fl_link;	/* doubly linked list of all locks */
+	struct hlist_node fl_link;	/* node in global lists */
 	struct list_head fl_block;	/* circular list of blocked processes */
 	fl_owner_t fl_owner;
 	unsigned int fl_flags;
 	unsigned char fl_type;
 	unsigned int fl_pid;
+	int fl_link_cpu;		/* what cpu's list is this on? */
 	struct pid *fl_nspid;
 	wait_queue_head_t fl_wait;
 	struct file *fl_file;
@@ -994,7 +1015,7 @@ extern void locks_release_private(struct file_lock *);
 extern void posix_test_lock(struct file *, struct file_lock *);
 extern int posix_lock_file(struct file *, struct file_lock *, struct file_lock *);
 extern int posix_lock_file_wait(struct file *, struct file_lock *);
-extern int posix_unblock_lock(struct file *, struct file_lock *);
+extern int posix_unblock_lock(struct file_lock *);
 extern int vfs_test_lock(struct file *, struct file_lock *);
 extern int vfs_lock_file(struct file *, unsigned int, struct file_lock *, struct file_lock *);
 extern int vfs_cancel_lock(struct file *filp, struct file_lock *fl);
@@ -1006,9 +1027,6 @@ extern int vfs_setlease(struct file *, long, struct file_lock **);
 extern int lease_modify(struct file_lock **, int);
 extern int lock_may_read(struct inode *, loff_t start, unsigned long count);
 extern int lock_may_write(struct inode *, loff_t start, unsigned long count);
-extern void locks_delete_block(struct file_lock *waiter);
-extern void lock_flocks(void);
-extern void unlock_flocks(void);
 #else /* !CONFIG_FILE_LOCKING */
 static inline int fcntl_getlk(struct file *file, struct flock __user *user)
 {
@@ -1084,8 +1102,7 @@ static inline int posix_lock_file_wait(struct file *filp, struct file_lock *fl)
 	return -ENOLCK;
 }
 
-static inline int posix_unblock_lock(struct file *filp,
-				     struct file_lock *waiter)
+static inline int posix_unblock_lock(struct file_lock *waiter)
 {
 	return -ENOENT;
 }
@@ -1150,19 +1167,6 @@ static inline int lock_may_write(struct inode *inode, loff_t start,
 {
 	return 1;
 }
-
-static inline void locks_delete_block(struct file_lock *waiter)
-{
-}
-
-static inline void lock_flocks(void)
-{
-}
-
-static inline void unlock_flocks(void)
-{
-}
-
 #endif /* !CONFIG_FILE_LOCKING */
 
 
@@ -2422,6 +2426,8 @@ extern loff_t no_llseek(struct file *file, loff_t offset, int whence);
 extern loff_t generic_file_llseek(struct file *file, loff_t offset, int whence);
 extern loff_t generic_file_llseek_size(struct file *file, loff_t offset,
 		int whence, loff_t maxsize, loff_t eof);
+extern loff_t fixed_size_llseek(struct file *file, loff_t offset,
+		int whence, loff_t size);
 extern int generic_file_open(struct inode * inode, struct file * filp);
 extern int nonseekable_open(struct inode * inode, struct file * filp);
 
@@ -2449,6 +2455,9 @@ enum {
 
 	/* filesystem does not support filling holes */
 	DIO_SKIP_HOLES	= 0x02,
+
+	/* inode/fs/bdev does not need truncate protection */
+	DIO_IGNORE_TRUNCATE = 0x04,
 };
 
 void dio_end_io(struct bio *bio, int error);
@@ -2469,6 +2478,7 @@ static inline ssize_t blockdev_direct_IO(int rw, struct kiocb *iocb,
 #endif
 
 void inode_dio_wait(struct inode *inode);
+void __inode_dio_done(struct inode *inode);
 void inode_dio_done(struct inode *inode);
 
 extern const struct file_operations generic_ro_fops;

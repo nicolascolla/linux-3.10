@@ -302,7 +302,6 @@ config HOTPLUG_CPU
 	def_bool y
 	prompt "Support for hot-pluggable CPUs"
 	depends on SMP
-	select HOTPLUG
 	help
 	  Say Y here to be able to turn CPUs off and on. CPUs
 	  can be controlled through /sys/devices/system/cpu/cpu#.
@@ -512,10 +511,25 @@ endmenu
 
 menu "Dump support"
 
+config KEXEC_AUTO_RESERVE
+	bool "automatically reserve memory for kexec kernel"
+	depends on KEXEC
+	default y
+	---help---
+	  Automatically reserve memory for a kexec kernel, so that you don't
+	  need to specify numbers for the "crashkernel=X@Y" boot option,
+	  instead you can use "crashkernel=auto". This option works for
+	  systems that have at least 4 GiB memory. Then 128 MiB plus a small
+	  amount of additional memory that grows linearly with the 1st kernel
+	  memory size is reserved. When "crashkernel=auto" is used for
+	  systems with less than 4 GiB memory, no crashkernel memory will be
+	  reserved.
+
 config CRASH_DUMP
 	bool "kernel crash dumps"
 	depends on 64BIT && SMP
 	select KEXEC
+	select ZFCPDUMP
 	help
 	  Generate crash dump after being started by kexec.
 	  Crash dump kernels are loaded in the main kernel with kexec-tools
@@ -526,7 +540,7 @@ config CRASH_DUMP
 config ZFCPDUMP
 	def_bool n
 	prompt "zfcpdump support"
-	select SMP
+	depends on SMP
 	help
 	  Select this option if you want to build an zfcpdump enabled kernel.
 	  Refer to <file:Documentation/s390/zfcpdump.txt> for more details on this.

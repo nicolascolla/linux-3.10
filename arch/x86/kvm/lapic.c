@@ -706,7 +706,10 @@ out:
 		break;
 
 	case APIC_DM_REMRD:
-		apic_debug("Ignoring delivery mode 3\n");
+		result = 1;
+		vcpu->arch.pv.pv_unhalted = 1;
+		kvm_make_request(KVM_REQ_EVENT, vcpu);
+		kvm_vcpu_kick(vcpu);
 		break;
 
 	case APIC_DM_SMI:
@@ -1608,8 +1611,8 @@ void kvm_inject_apic_timer_irqs(struct kvm_vcpu *vcpu)
 		return;
 
 	if (atomic_read(&apic->lapic_timer.pending) > 0) {
-		if (kvm_apic_local_deliver(apic, APIC_LVTT))
-			atomic_dec(&apic->lapic_timer.pending);
+		kvm_apic_local_deliver(apic, APIC_LVTT);
+		atomic_set(&apic->lapic_timer.pending, 0);
 	}
 }
 

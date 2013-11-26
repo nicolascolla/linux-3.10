@@ -47,6 +47,8 @@
 #include <net/udp.h>
 #include <net/tcp.h>
 
+#include <trace/events/sunrpc.h>
+
 #include "sunrpc.h"
 
 static void xs_close(struct rpc_xprt *xprt);
@@ -87,7 +89,7 @@ static struct ctl_table_header *sunrpc_table_header;
  * FIXME: changing the UDP slot table size should also resize the UDP
  *        socket buffers for existing UDP transports
  */
-static ctl_table xs_tunables_table[] = {
+static struct ctl_table xs_tunables_table[] = {
 	{
 		.procname	= "udp_slot_table_entries",
 		.data		= &xprt_udp_slot_table_entries,
@@ -143,7 +145,7 @@ static ctl_table xs_tunables_table[] = {
 	{ },
 };
 
-static ctl_table sunrpc_table[] = {
+static struct ctl_table sunrpc_table[] = {
 	{
 		.procname	= "sunrpc",
 		.mode		= 0555,
@@ -391,10 +393,8 @@ static int xs_send_kvec(struct socket *sock, struct sockaddr *addr, int addrlen,
 	return kernel_sendmsg(sock, &msg, NULL, 0, 0);
 }
 
-static int xs_send_pagedata(struct socket *sock, struct xdr_buf *xdr, unsigned int base, int more, bool zerocopy)
+static int xs_send_pagedata(struct socket *sock, struct xdr_buf *xdr, unsigned int base, int more)
 {
-	ssize_t (*do_sendpage)(struct socket *sock, struct page *page,
-			int offset, size_t size, int flags);
 	struct page **ppage;
 	unsigned int remainder;
 	int err, sent = 0;
@@ -403,9 +403,6 @@ static int xs_send_pagedata(struct socket *sock, struct xdr_buf *xdr, unsigned i
 	base += xdr->page_base;
 	ppage = xdr->pages + (base >> PAGE_SHIFT);
 	base &= ~PAGE_MASK;
-	do_sendpage = sock->ops->sendpage;
-	if (!zerocopy)
-		do_sendpage = sock_no_sendpage;
 	for(;;) {
 		unsigned int len = min_t(unsigned int, PAGE_SIZE - base, remainder);
 		int flags = XS_SENDMSG_FLAGS;
@@ -413,7 +410,7 @@ static int xs_send_pagedata(struct socket *sock, struct xdr_buf *xdr, unsigned i
 		remainder -= len;
 		if (remainder != 0 || more)
 			flags |= MSG_MORE;
-		err = do_sendpage(sock, *ppage, base, len, flags);
+		err = sock->ops->sendpage(sock, *ppage, base, len, flags);
 		if (remainder == 0 || err != len)
 			break;
 		sent += err;
@@ -434,10 +431,9 @@ static int xs_send_pagedata(struct socket *sock, struct xdr_buf *xdr, unsigned i
  * @addrlen: UDP only -- length of destination address
  * @xdr: buffer containing this request
  * @base: starting position in the buffer
- * @zerocopy: true if it is safe to use sendpage()
  *
  */
-static int xs_sendpages(struct socket *sock, struct sockaddr *addr, int addrlen, struct xdr_buf *xdr, unsigned int base, bool zerocopy)
+static int xs_sendpages(struct socket *sock, struct sockaddr *addr, int addrlen, struct xdr_buf *xdr, unsigned int base)
 {
 	unsigned int remainder = xdr->len - base;
 	int err, sent = 0;
@@ -465,7 +461,7 @@ static int xs_sendpages(struct socket *sock, struct sockaddr *addr, int addrlen,
 	if (base < xdr->page_len) {
 		unsigned int len = xdr->page_len - base;
 		remainder -= len;
-		err = xs_send_pagedata(sock, xdr, base, remainder != 0, zerocopy);
+		err = xs_send_pagedata(sock, xdr, base, remainder != 0);
 		if (remainder == 0 || err != len)
 			goto out;
 		sent += err;
@@ -568,7 +564,7 @@ static int xs_local_send_request(struct rpc_task *task)
 			req->rq_svec->iov_base, req->rq_svec->iov_len);
 
 	status = xs_sendpages(transport->sock, NULL, 0,
-						xdr, req->rq_bytes_sent, true);
+						xdr, req->rq_bytes_sent);
 	dprintk("RPC:       %s(%u) = %d\n",
 			__func__, xdr->len - req->rq_bytes_sent, status);
 	if (likely(status >= 0)) {
@@ -624,7 +620,7 @@ static int xs_udp_send_request(struct rpc_task *task)
 	status = xs_sendpages(transport->sock,
 			      xs_addr(xprt),
 			      xprt->addrlen, xdr,
-			      req->rq_bytes_sent, true);
+			      req->rq_bytes_sent);
 
 	dprintk("RPC:       xs_udp_send_request(%u) = %d\n",
 			xdr->len - req->rq_bytes_sent, status);
@@ -671,8 +667,10 @@ static void xs_tcp_shutdown(struct rpc_xprt *xprt)
 	struct sock_xprt *transport = container_of(xprt, struct sock_xprt, xprt);
 	struct socket *sock = transport->sock;
 
-	if (sock != NULL)
+	if (sock != NULL) {
 		kernel_sock_shutdown(sock, SHUT_WR);
+		trace_rpc_socket_shutdown(xprt, sock);
+	}
 }
 
 /**
@@ -695,7 +693,6 @@ static int xs_tcp_send_request(struct rpc_task *task)
 	struct rpc_xprt *xprt = req->rq_xprt;
 	struct sock_xprt *transport = container_of(xprt, struct sock_xprt, xprt);
 	struct xdr_buf *xdr = &req->rq_snd_buf;
-	bool zerocopy = true;
 	int status;
 
 	xs_encode_stream_record_marker(&req->rq_snd_buf);
@@ -703,20 +700,13 @@ static int xs_tcp_send_request(struct rpc_task *task)
 	xs_pktdump("packet data:",
 				req->rq_svec->iov_base,
 				req->rq_svec->iov_len);
-	/* Don't use zero copy if this is a resend. If the RPC call
-	 * completes while the socket holds a reference to the pages,
-	 * then we may end up resending corrupted data.
-	 */
-	if (task->tk_flags & RPC_TASK_SENT)
-		zerocopy = false;
 
 	/* Continue transmitting the packet/record. We must be careful
 	 * to cope with writespace callbacks arriving _after_ we have
 	 * called sendmsg(). */
 	while (1) {
 		status = xs_sendpages(transport->sock,
-					NULL, 0, xdr, req->rq_bytes_sent,
-					zerocopy);
+					NULL, 0, xdr, req->rq_bytes_sent);
 
 		dprintk("RPC:       xs_tcp_send_request(%u) = %d\n",
 				xdr->len - req->rq_bytes_sent, status);
@@ -825,6 +815,7 @@ static void xs_reset_transport(struct sock_xprt *transport)
 
 	sk->sk_no_check = 0;
 
+	trace_rpc_socket_close(&transport->xprt, sock);
 	sock_release(sock);
 }
 
@@ -1506,6 +1497,7 @@ static void xs_tcp_state_change(struct sock *sk)
 			sock_flag(sk, SOCK_ZAPPED),
 			sk->sk_shutdown);
 
+	trace_rpc_socket_state_change(xprt, sk->sk_socket);
 	switch (sk->sk_state) {
 	case TCP_ESTABLISHED:
 		spin_lock(&xprt->transport_lock);
@@ -1910,6 +1902,7 @@ static int xs_local_setup_socket(struct sock_xprt *transport)
 			xprt, xprt->address_strings[RPC_DISPLAY_ADDR]);
 
 	status = xs_local_finish_connecting(xprt, sock);
+	trace_rpc_socket_connect(xprt, sock, status);
 	switch (status) {
 	case 0:
 		dprintk("RPC:       xprt %p connected to %s\n",
@@ -2053,6 +2046,7 @@ static void xs_udp_setup_socket(struct work_struct *work)
 			xprt->address_strings[RPC_DISPLAY_PORT]);
 
 	xs_udp_finish_connecting(xprt, sock);
+	trace_rpc_socket_connect(xprt, sock, 0);
 	status = 0;
 out:
 	xprt_clear_connecting(xprt);
@@ -2078,6 +2072,8 @@ static void xs_abort_connection(struct sock_xprt *transport)
 	memset(&any, 0, sizeof(any));
 	any.sa_family = AF_UNSPEC;
 	result = kernel_connect(transport->sock, &any, sizeof(any), 0);
+	trace_rpc_socket_reset_connection(&transport->xprt,
+			transport->sock, result);
 	if (!result)
 		xs_sock_reset_connection_flags(&transport->xprt);
 	dprintk("RPC:       AF_UNSPEC connect return code %d\n", result);
@@ -2208,6 +2204,7 @@ static void xs_tcp_setup_socket(struct work_struct *work)
 			xprt->address_strings[RPC_DISPLAY_PORT]);
 
 	status = xs_tcp_finish_connecting(xprt, sock);
+	trace_rpc_socket_connect(xprt, sock, status);
 	dprintk("RPC:       %p connect status %d connected %d sock state %d\n",
 			xprt, -status, xprt_connected(xprt),
 			sock->sk->sk_state);
@@ -2548,7 +2545,6 @@ static struct rpc_xprt_ops bc_tcp_ops = {
 	.reserve_xprt		= xprt_reserve_xprt,
 	.release_xprt		= xprt_release_xprt,
 	.alloc_slot		= xprt_alloc_slot,
-	.rpcbind		= xs_local_rpcbind,
 	.buf_alloc		= bc_malloc,
 	.buf_free		= bc_free,
 	.send_request		= bc_send_request,

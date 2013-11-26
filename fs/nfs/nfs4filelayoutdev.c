@@ -185,6 +185,7 @@ nfs4_ds_connect(struct nfs_server *mds_srv, struct nfs4_pnfs_ds *ds)
 	if (status)
 		goto out_put;
 
+	smp_wmb();
 	ds->ds_clp = clp;
 	dprintk("%s [new] addr: %s\n", __func__, ds->ds_remotestr);
 out:
@@ -668,7 +669,10 @@ decode_and_add_device(struct inode *inode, struct pnfs_device *dev, gfp_t gfp_fl
  * of available devices, and return it.
  */
 struct nfs4_file_layout_dsaddr *
-filelayout_get_device_info(struct inode *inode, struct nfs4_deviceid *dev_id, gfp_t gfp_flags)
+filelayout_get_device_info(struct inode *inode,
+		struct nfs4_deviceid *dev_id,
+		struct rpc_cred *cred,
+		gfp_t gfp_flags)
 {
 	struct pnfs_device *pdev = NULL;
 	u32 max_resp_sz;
@@ -708,8 +712,9 @@ filelayout_get_device_info(struct inode *inode, struct nfs4_deviceid *dev_id, gf
 	pdev->pgbase = 0;
 	pdev->pglen = max_resp_sz;
 	pdev->mincount = 0;
+	pdev->maxcount = max_resp_sz - nfs41_maxgetdevinfo_overhead;
 
-	rc = nfs4_proc_getdeviceinfo(server, pdev);
+	rc = nfs4_proc_getdeviceinfo(server, pdev, cred);
 	dprintk("%s getdevice info returns %d\n", __func__, rc);
 	if (rc)
 		goto out_free;
@@ -799,14 +804,18 @@ nfs4_fl_prepare_ds(struct pnfs_layout_segment *lseg, u32 ds_idx)
 	struct nfs4_deviceid_node *devid = FILELAYOUT_DEVID_NODE(lseg);
 	struct nfs4_pnfs_ds *ret = ds;
 
+	if (filelayout_test_devid_unavailable(devid))
+		return NULL;
+
 	if (ds == NULL) {
 		printk(KERN_ERR "NFS: %s: No data server for offset index %d\n",
 			__func__, ds_idx);
 		filelayout_mark_devid_invalid(devid);
 		goto out;
 	}
+	smp_rmb();
 	if (ds->ds_clp)
-		goto out_test_devid;
+		goto out;
 
 	if (test_and_set_bit(NFS4DS_CONNECTING, &ds->ds_state) == 0) {
 		struct nfs_server *s = NFS_SERVER(lseg->pls_layout->plh_inode);
@@ -820,7 +829,6 @@ nfs4_fl_prepare_ds(struct pnfs_layout_segment *lseg, u32 ds_idx)
 		/* Either ds is connected, or ds is NULL */
 		nfs4_wait_ds_connect(ds);
 	}
-out_test_devid:
 	if (filelayout_test_devid_unavailable(devid))
 		ret = NULL;
 out:

@@ -95,13 +95,6 @@ struct audit_aux_data {
 /* Number of target pids per aux struct. */
 #define AUDIT_AUX_PIDS	16
 
-struct audit_aux_data_execve {
-	struct audit_aux_data	d;
-	int argc;
-	int envc;
-	struct mm_struct *mm;
-};
-
 struct audit_aux_data_pids {
 	struct audit_aux_data	d;
 	pid_t			target_pid[AUDIT_AUX_PIDS];
@@ -119,12 +112,6 @@ struct audit_aux_data_bprm_fcaps {
 	unsigned int		fcap_ver;
 	struct audit_cap_data	old_pcap;
 	struct audit_cap_data	new_pcap;
-};
-
-struct audit_aux_data_capset {
-	struct audit_aux_data	d;
-	pid_t			pid;
-	struct audit_cap_data	cap;
 };
 
 struct audit_tree_refs {
@@ -943,8 +930,10 @@ int audit_alloc(struct task_struct *tsk)
 		return 0; /* Return if not auditing. */
 
 	state = audit_filter_task(tsk, &key);
-	if (state == AUDIT_DISABLED)
+	if (state == AUDIT_DISABLED) {
+		clear_tsk_thread_flag(tsk, TIF_SYSCALL_AUDIT);
 		return 0;
+	}
 
 	if (!(context = audit_alloc_context(state))) {
 		kfree(key);
@@ -1149,20 +1138,16 @@ static int audit_log_single_execve_arg(struct audit_context *context,
 }
 
 static void audit_log_execve_info(struct audit_context *context,
-				  struct audit_buffer **ab,
-				  struct audit_aux_data_execve *axi)
+				  struct audit_buffer **ab)
 {
 	int i, len;
 	size_t len_sent = 0;
 	const char __user *p;
 	char *buf;
 
-	if (axi->mm != current->mm)
-		return; /* execve failed, no additional info */
+	p = (const char __user *)current->mm->arg_start;
 
-	p = (const char __user *)axi->mm->arg_start;
-
-	audit_log_format(*ab, "argc=%d", axi->argc);
+	audit_log_format(*ab, "argc=%d", context->execve.argc);
 
 	/*
 	 * we need some kernel buffer to hold the userspace args.  Just
@@ -1176,7 +1161,7 @@ static void audit_log_execve_info(struct audit_context *context,
 		return;
 	}
 
-	for (i = 0; i < axi->argc; i++) {
+	for (i = 0; i < context->execve.argc; i++) {
 		len = audit_log_single_execve_arg(context, ab, i,
 						  &len_sent, p, buf);
 		if (len <= 0)
@@ -1279,6 +1264,9 @@ static void show_special(struct audit_context *context, int *call_panic)
 		audit_log_format(ab, "fd=%d flags=0x%x", context->mmap.fd,
 				 context->mmap.flags);
 		break; }
+	case AUDIT_EXECVE: {
+		audit_log_execve_info(context, &ab);
+		break; }
 	}
 	audit_log_end(ab);
 }
@@ -1324,11 +1312,6 @@ static void audit_log_exit(struct audit_context *context, struct task_struct *ts
 			continue; /* audit_panic has been called */
 
 		switch (aux->type) {
-
-		case AUDIT_EXECVE: {
-			struct audit_aux_data_execve *axi = (void *)aux;
-			audit_log_execve_info(context, &ab, axi);
-			break; }
 
 		case AUDIT_BPRM_FCAPS: {
 			struct audit_aux_data_bprm_fcaps *axs = (void *)aux;
@@ -2126,22 +2109,12 @@ void __audit_ipc_set_perm(unsigned long qbytes, uid_t uid, gid_t gid, umode_t mo
 	context->ipc.has_perm = 1;
 }
 
-int __audit_bprm(struct linux_binprm *bprm)
+void __audit_bprm(struct linux_binprm *bprm)
 {
-	struct audit_aux_data_execve *ax;
 	struct audit_context *context = current->audit_context;
 
-	ax = kmalloc(sizeof(*ax), GFP_KERNEL);
-	if (!ax)
-		return -ENOMEM;
-
-	ax->argc = bprm->argc;
-	ax->envc = bprm->envc;
-	ax->mm = bprm->mm;
-	ax->d.type = AUDIT_EXECVE;
-	ax->d.next = context->aux;
-	context->aux = (void *)ax;
-	return 0;
+	context->type = AUDIT_EXECVE;
+	context->execve.argc = bprm->argc;
 }
 
 

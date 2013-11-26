@@ -842,11 +842,11 @@ static ssize_t set_port_ib_mtu(struct device *dev,
 		return -EINVAL;
 	}
 
-	err = sscanf(buf, "%d", &mtu);
-	if (err > 0)
+	err = kstrtoint(buf, 0, &mtu);
+	if (!err)
 		ibta_mtu = int_to_ibta_mtu(mtu);
 
-	if (err <= 0 || ibta_mtu < 0) {
+	if (err || ibta_mtu < 0) {
 		mlx4_err(mdev, "%s is invalid IBTA mtu\n", buf);
 		return -EINVAL;
 	}
@@ -1692,11 +1692,19 @@ static int mlx4_setup_hca(struct mlx4_dev *dev)
 		goto err_xrcd_table_free;
 	}
 
+	if (!mlx4_is_slave(dev)) {
+		err = mlx4_init_mcg_table(dev);
+		if (err) {
+			mlx4_err(dev, "Failed to initialize multicast group table, aborting.\n");
+			goto err_mr_table_free;
+		}
+	}
+
 	err = mlx4_init_eq_table(dev);
 	if (err) {
 		mlx4_err(dev, "Failed to initialize "
 			 "event queue table, aborting.\n");
-		goto err_mr_table_free;
+		goto err_mcg_table_free;
 	}
 
 	err = mlx4_cmd_use_events(dev);
@@ -1746,19 +1754,10 @@ static int mlx4_setup_hca(struct mlx4_dev *dev)
 		goto err_srq_table_free;
 	}
 
-	if (!mlx4_is_slave(dev)) {
-		err = mlx4_init_mcg_table(dev);
-		if (err) {
-			mlx4_err(dev, "Failed to initialize "
-				 "multicast group table, aborting.\n");
-			goto err_qp_table_free;
-		}
-	}
-
 	err = mlx4_init_counters_table(dev);
 	if (err && err != -ENOENT) {
 		mlx4_err(dev, "Failed to initialize counters table, aborting.\n");
-		goto err_mcg_table_free;
+		goto err_qp_table_free;
 	}
 
 	if (!mlx4_is_slave(dev)) {
@@ -1803,9 +1802,6 @@ static int mlx4_setup_hca(struct mlx4_dev *dev)
 err_counters_table_free:
 	mlx4_cleanup_counters_table(dev);
 
-err_mcg_table_free:
-	mlx4_cleanup_mcg_table(dev);
-
 err_qp_table_free:
 	mlx4_cleanup_qp_table(dev);
 
@@ -1820,6 +1816,10 @@ err_cmd_poll:
 
 err_eq_table_free:
 	mlx4_cleanup_eq_table(dev);
+
+err_mcg_table_free:
+	if (!mlx4_is_slave(dev))
+		mlx4_cleanup_mcg_table(dev);
 
 err_mr_table_free:
 	mlx4_cleanup_mr_table(dev);
@@ -2080,6 +2080,11 @@ static int __mlx4_init_one(struct pci_dev *pdev, int pci_dev_data)
 		       num_vfs, MLX4_MAX_NUM_VF);
 		return -EINVAL;
 	}
+
+	if (num_vfs < 0) {
+		pr_err("num_vfs module parameter cannot be negative\n");
+		return -EINVAL;
+	}
 	/*
 	 * Check for BARs.
 	 */
@@ -2191,6 +2196,9 @@ static int __mlx4_init_one(struct pci_dev *pdev, int pci_dev_data)
 				dev->num_vfs = num_vfs;
 			}
 		}
+
+		atomic_set(&priv->opreq_count, 0);
+		INIT_WORK(&priv->opreq_task, mlx4_opreq_action);
 
 		/*
 		 * Now reset the HCA before we touch the PCI capabilities or
@@ -2310,12 +2318,12 @@ err_port:
 		mlx4_cleanup_port_info(&priv->port[port]);
 
 	mlx4_cleanup_counters_table(dev);
-	mlx4_cleanup_mcg_table(dev);
 	mlx4_cleanup_qp_table(dev);
 	mlx4_cleanup_srq_table(dev);
 	mlx4_cleanup_cq_table(dev);
 	mlx4_cmd_use_polling(dev);
 	mlx4_cleanup_eq_table(dev);
+	mlx4_cleanup_mcg_table(dev);
 	mlx4_cleanup_mr_table(dev);
 	mlx4_cleanup_xrcd_table(dev);
 	mlx4_cleanup_pd_table(dev);
@@ -2398,12 +2406,12 @@ static void mlx4_remove_one(struct pci_dev *pdev)
 						   RES_TR_FREE_SLAVES_ONLY);
 
 		mlx4_cleanup_counters_table(dev);
-		mlx4_cleanup_mcg_table(dev);
 		mlx4_cleanup_qp_table(dev);
 		mlx4_cleanup_srq_table(dev);
 		mlx4_cleanup_cq_table(dev);
 		mlx4_cmd_use_polling(dev);
 		mlx4_cleanup_eq_table(dev);
+		mlx4_cleanup_mcg_table(dev);
 		mlx4_cleanup_mr_table(dev);
 		mlx4_cleanup_xrcd_table(dev);
 		mlx4_cleanup_pd_table(dev);

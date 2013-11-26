@@ -611,6 +611,7 @@ static struct mountpoint *new_mountpoint(struct dentry *dentry)
 {
 	struct list_head *chain = mountpoint_hashtable + hash(NULL, dentry);
 	struct mountpoint *mp;
+	int ret;
 
 	list_for_each_entry(mp, chain, m_hash) {
 		if (mp->m_dentry == dentry) {
@@ -626,14 +627,12 @@ static struct mountpoint *new_mountpoint(struct dentry *dentry)
 	if (!mp)
 		return ERR_PTR(-ENOMEM);
 
-	spin_lock(&dentry->d_lock);
-	if (d_unlinked(dentry)) {
-		spin_unlock(&dentry->d_lock);
+	ret = d_set_mounted(dentry);
+	if (ret) {
 		kfree(mp);
-		return ERR_PTR(-ENOENT);
+		return ERR_PTR(ret);
 	}
-	dentry->d_flags |= DCACHE_MOUNTED;
-	spin_unlock(&dentry->d_lock);
+
 	mp->m_dentry = dentry;
 	mp->m_count = 1;
 	list_add(&mp->m_hash, chain);
@@ -1318,7 +1317,7 @@ SYSCALL_DEFINE2(umount, char __user *, name, int, flags)
 	if (!(flags & UMOUNT_NOFOLLOW))
 		lookup_flags |= LOOKUP_FOLLOW;
 
-	retval = user_path_at(AT_FDCWD, name, lookup_flags, &path);
+	retval = user_path_mountpoint_at(AT_FDCWD, name, lookup_flags, &path);
 	if (retval)
 		goto out;
 	mnt = real_mount(path.mnt);

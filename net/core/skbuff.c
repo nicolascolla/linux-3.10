@@ -199,9 +199,7 @@ struct sk_buff *__alloc_skb_head(gfp_t gfp_mask, int node)
 	skb->truesize = sizeof(struct sk_buff);
 	atomic_set(&skb->users, 1);
 
-#ifdef NET_SKBUFF_DATA_USES_OFFSET
-	skb->mac_header = ~0U;
-#endif
+	skb->mac_header = (typeof(skb->mac_header))~0U;
 out:
 	return skb;
 }
@@ -275,10 +273,8 @@ struct sk_buff *__alloc_skb(unsigned int size, gfp_t gfp_mask,
 	skb->data = data;
 	skb_reset_tail_pointer(skb);
 	skb->end = skb->tail + size;
-#ifdef NET_SKBUFF_DATA_USES_OFFSET
-	skb->mac_header = ~0U;
-	skb->transport_header = ~0U;
-#endif
+	skb->mac_header = (typeof(skb->mac_header))~0U;
+	skb->transport_header = (typeof(skb->transport_header))~0U;
 
 	/* make sure we initialize shinfo sequentially */
 	shinfo = skb_shinfo(skb);
@@ -344,10 +340,8 @@ struct sk_buff *build_skb(void *data, unsigned int frag_size)
 	skb->data = data;
 	skb_reset_tail_pointer(skb);
 	skb->end = skb->tail + size;
-#ifdef NET_SKBUFF_DATA_USES_OFFSET
-	skb->mac_header = ~0U;
-	skb->transport_header = ~0U;
-#endif
+	skb->mac_header = (typeof(skb->mac_header))~0U;
+	skb->transport_header = (typeof(skb->transport_header))~0U;
 
 	/* make sure we initialize shinfo sequentially */
 	shinfo = skb_shinfo(skb);
@@ -585,6 +579,9 @@ static void skb_release_head_state(struct sk_buff *skb)
 #if IS_ENABLED(CONFIG_NF_CONNTRACK)
 	nf_conntrack_put(skb->nfct);
 #endif
+#ifdef NET_SKBUFF_NF_DEFRAG_NEEDED
+	nf_conntrack_put_reasm(skb->nfct_reasm);
+#endif
 #ifdef CONFIG_BRIDGE_NETFILTER
 	nf_bridge_put(skb->nf_bridge);
 #endif
@@ -700,6 +697,7 @@ static void __copy_skb_header(struct sk_buff *new, const struct sk_buff *old)
 	new->transport_header	= old->transport_header;
 	new->network_header	= old->network_header;
 	new->mac_header		= old->mac_header;
+	new->inner_protocol	= old->inner_protocol;
 	new->inner_transport_header = old->inner_transport_header;
 	new->inner_network_header = old->inner_network_header;
 	new->inner_mac_header = old->inner_mac_header;
@@ -740,6 +738,10 @@ static void __copy_skb_header(struct sk_buff *new, const struct sk_buff *old)
 	new->vlan_tci		= old->vlan_tci;
 
 	skb_copy_secmark(new, old);
+
+#ifdef CONFIG_NET_LL_RX_POLL
+	new->napi_id	= old->napi_id;
+#endif
 }
 
 /*
@@ -912,18 +914,8 @@ static void skb_headers_offset_update(struct sk_buff *skb, int off)
 
 static void copy_skb_header(struct sk_buff *new, const struct sk_buff *old)
 {
-#ifndef NET_SKBUFF_DATA_USES_OFFSET
-	/*
-	 *	Shift between the two data areas in bytes
-	 */
-	unsigned long offset = new->data - old->data;
-#endif
-
 	__copy_skb_header(new, old);
 
-#ifndef NET_SKBUFF_DATA_USES_OFFSET
-	skb_headers_offset_update(new, offset);
-#endif
 	skb_shinfo(new)->gso_size = skb_shinfo(old)->gso_size;
 	skb_shinfo(new)->gso_segs = skb_shinfo(old)->gso_segs;
 	skb_shinfo(new)->gso_type = skb_shinfo(old)->gso_type;
@@ -1115,7 +1107,7 @@ int pskb_expand_head(struct sk_buff *skb, int nhead, int ntail,
 	skb->end      = skb->head + size;
 #endif
 	skb->tail	      += off;
-	skb_headers_offset_update(skb, off);
+	skb_headers_offset_update(skb, nhead);
 	/* Only adjust this if it actually is csum_start rather than csum */
 	if (skb->ip_summed == CHECKSUM_PARTIAL)
 		skb->csum_start += nhead;
@@ -1210,9 +1202,8 @@ struct sk_buff *skb_copy_expand(const struct sk_buff *skb,
 	off                  = newheadroom - oldheadroom;
 	if (n->ip_summed == CHECKSUM_PARTIAL)
 		n->csum_start += off;
-#ifdef NET_SKBUFF_DATA_USES_OFFSET
+
 	skb_headers_offset_update(n, off);
-#endif
 
 	return n;
 }
@@ -3500,3 +3491,26 @@ bool skb_try_coalesce(struct sk_buff *to, struct sk_buff *from,
 	return true;
 }
 EXPORT_SYMBOL(skb_try_coalesce);
+
+/**
+ * skb_scrub_packet - scrub an skb before sending it to another netns
+ *
+ * @skb: buffer to clean
+ *
+ * skb_scrub_packet can be used to clean an skb before injecting it in
+ * another namespace. We have to clear all information in the skb that
+ * could impact namespace isolation.
+ */
+void skb_scrub_packet(struct sk_buff *skb)
+{
+	skb_orphan(skb);
+	skb->tstamp.tv64 = 0;
+	skb->pkt_type = PACKET_HOST;
+	skb->skb_iif = 0;
+	skb_dst_drop(skb);
+	skb->mark = 0;
+	secpath_reset(skb);
+	nf_reset(skb);
+	nf_reset_trace(skb);
+}
+EXPORT_SYMBOL_GPL(skb_scrub_packet);

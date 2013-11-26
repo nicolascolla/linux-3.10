@@ -2096,6 +2096,8 @@ static void vmx_write_tsc_offset(struct kvm_vcpu *vcpu, u64 offset)
 			(nested_cpu_has(vmcs12, CPU_BASED_USE_TSC_OFFSETING) ?
 			 vmcs12->tsc_offset : 0));
 	} else {
+		trace_kvm_write_tsc_offset(vcpu->vcpu_id,
+					   vmcs_read64(TSC_OFFSET), offset);
 		vmcs_write64(TSC_OFFSET, offset);
 	}
 }
@@ -2103,11 +2105,14 @@ static void vmx_write_tsc_offset(struct kvm_vcpu *vcpu, u64 offset)
 static void vmx_adjust_tsc_offset(struct kvm_vcpu *vcpu, s64 adjustment, bool host)
 {
 	u64 offset = vmcs_read64(TSC_OFFSET);
+
 	vmcs_write64(TSC_OFFSET, offset + adjustment);
 	if (is_guest_mode(vcpu)) {
 		/* Even when running L2, the adjustment needs to apply to L1 */
 		to_vmx(vcpu)->nested.vmcs01_tsc_offset += adjustment;
-	}
+	} else
+		trace_kvm_write_tsc_offset(vcpu->vcpu_id, offset,
+					   offset + adjustment);
 }
 
 static u64 vmx_compute_tsc_offset(struct kvm_vcpu *vcpu, u64 target_tsc)
@@ -4183,10 +4188,10 @@ static void ept_set_mmio_spte_mask(void)
 	/*
 	 * EPT Misconfigurations can be generated if the value of bits 2:0
 	 * of an EPT paging-structure entry is 110b (write/execute).
-	 * Also, magic bits (0xffull << 49) is set to quickly identify mmio
+	 * Also, magic bits (0x3ull << 62) is set to quickly identify mmio
 	 * spte.
 	 */
-	kvm_mmu_set_mmio_spte_mask(0xffull << 49 | 0x6ull);
+	kvm_mmu_set_mmio_spte_mask((0x3ull << 62) | 0x6ull);
 }
 
 /*
@@ -5292,6 +5297,17 @@ static int handle_ept_violation(struct kvm_vcpu *vcpu)
 		return 0;
 	}
 
+	/*
+	 * EPT violation happened while executing iret from NMI,
+	 * "blocked by NMI" bit has to be set before next VM entry.
+	 * There are errata that may cause this bit to not be set:
+	 * AAK134, BY25.
+	 */
+	if (!(to_vmx(vcpu)->idt_vectoring_info & VECTORING_INFO_VALID_MASK) &&
+			cpu_has_virtual_nmis() &&
+			(exit_qualification & INTR_INFO_UNBLOCK_NMI))
+		vmcs_set_bits(GUEST_INTERRUPTIBILITY_INFO, GUEST_INTR_STATE_NMI);
+
 	gpa = vmcs_read64(GUEST_PHYSICAL_ADDRESS);
 	trace_kvm_page_fault(gpa, exit_qualification);
 
@@ -5373,10 +5389,14 @@ static int handle_ept_misconfig(struct kvm_vcpu *vcpu)
 	gpa = vmcs_read64(GUEST_PHYSICAL_ADDRESS);
 
 	ret = handle_mmio_page_fault_common(vcpu, gpa, true);
-	if (likely(ret == 1))
+	if (likely(ret == RET_MMIO_PF_EMULATE))
 		return x86_emulate_instruction(vcpu, gpa, 0, NULL, 0) ==
 					      EMULATE_DONE;
-	if (unlikely(!ret))
+
+	if (unlikely(ret == RET_MMIO_PF_INVALID))
+		return kvm_mmu_page_fault(vcpu, gpa, 0, NULL, 0);
+
+	if (unlikely(ret == RET_MMIO_PF_RETRY))
 		return 1;
 
 	/* It is the real ept misconfig */
@@ -7249,8 +7269,7 @@ static u64 vmx_get_mt_mask(struct kvm_vcpu *vcpu, gfn_t gfn, bool is_mmio)
 	 */
 	if (is_mmio)
 		ret = MTRR_TYPE_UNCACHABLE << VMX_EPT_MT_EPTE_SHIFT;
-	else if (vcpu->kvm->arch.iommu_domain &&
-		!(vcpu->kvm->arch.iommu_flags & KVM_IOMMU_CACHE_COHERENCY))
+	else if (kvm_arch_has_noncoherent_dma(vcpu->kvm))
 		ret = kvm_get_guest_memory_type(vcpu, gfn) <<
 		      VMX_EPT_MT_EPTE_SHIFT;
 	else

@@ -1292,10 +1292,7 @@ static bool tcp_shifted_skb(struct sock *sk, struct sk_buff *skb,
 		tp->lost_cnt_hint -= tcp_skb_pcount(prev);
 	}
 
-	TCP_SKB_CB(prev)->tcp_flags |= TCP_SKB_CB(skb)->tcp_flags;
-	if (TCP_SKB_CB(skb)->tcp_flags & TCPHDR_FIN)
-		TCP_SKB_CB(prev)->end_seq++;
-
+	TCP_SKB_CB(skb)->tcp_flags |= TCP_SKB_CB(prev)->tcp_flags;
 	if (skb == tcp_highest_sack(sk))
 		tcp_advance_highest_sack(sk, skb);
 
@@ -3345,7 +3342,7 @@ static void tcp_process_tlp_ack(struct sock *sk, u32 ack, int flag)
 			tcp_init_cwnd_reduction(sk, true);
 			tcp_set_ca_state(sk, TCP_CA_CWR);
 			tcp_end_cwnd_reduction(sk);
-			tcp_try_keep_open(sk);
+			tcp_set_ca_state(sk, TCP_CA_Open);
 			NET_INC_STATS_BH(sock_net(sk),
 					 LINUX_MIB_TCPLOSSPROBERECOVERY);
 		}
@@ -3816,6 +3813,7 @@ void tcp_reset(struct sock *sk)
 static void tcp_fin(struct sock *sk)
 {
 	struct tcp_sock *tp = tcp_sk(sk);
+	const struct dst_entry *dst;
 
 	inet_csk_schedule_ack(sk);
 
@@ -3827,7 +3825,9 @@ static void tcp_fin(struct sock *sk)
 	case TCP_ESTABLISHED:
 		/* Move to CLOSE_WAIT */
 		tcp_set_state(sk, TCP_CLOSE_WAIT);
-		inet_csk(sk)->icsk_ack.pingpong = 1;
+		dst = __sk_dst_get(sk);
+		if (!dst || !dst_metric(dst, RTAX_QUICKACK))
+			inet_csk(sk)->icsk_ack.pingpong = 1;
 		break;
 
 	case TCP_CLOSE_WAIT:
@@ -5768,8 +5768,6 @@ int tcp_rcv_state_process(struct sock *sk, struct sk_buff *skb,
 					tcp_rearm_rto(sk);
 				} else
 					tcp_init_metrics(sk);
-
-				tcp_update_pacing_rate(sk);
 
 				/* Prevent spurious tcp_cwnd_restart() on
 				 * first data packet.

@@ -48,6 +48,7 @@ struct perf_guest_info_callbacks {
 #include <linux/cpu.h>
 #include <linux/irq_work.h>
 #include <linux/static_key.h>
+#include <linux/jump_label_ratelimit.h>
 #include <linux/atomic.h>
 #include <linux/sysfs.h>
 #include <linux/perf_regs.h>
@@ -188,12 +189,13 @@ struct pmu {
 
 	struct device			*dev;
 	const struct attribute_group	**attr_groups;
-	char				*name;
+	const char			*name;
 	int				type;
 
 	int * __percpu			pmu_disable_count;
 	struct perf_cpu_context * __percpu pmu_cpu_context;
 	int				task_ctx_nr;
+	int				hrtimer_interval_ms;
 
 	/*
 	 * Fully disable/enable this PMU, can be used to protect from the PMI
@@ -500,8 +502,9 @@ struct perf_cpu_context {
 	struct perf_event_context	*task_ctx;
 	int				active_oncpu;
 	int				exclusive;
+	struct hrtimer			hrtimer;
+	ktime_t				hrtimer_interval;
 	struct list_head		rotation_list;
-	int				jiffies_interval;
 	struct pmu			*unique_pmu;
 	struct perf_cgroup		*cgrp;
 };
@@ -517,7 +520,7 @@ struct perf_output_handle {
 
 #ifdef CONFIG_PERF_EVENTS
 
-extern int perf_pmu_register(struct pmu *pmu, char *name, int type);
+extern int perf_pmu_register(struct pmu *pmu, const char *name, int type);
 extern void perf_pmu_unregister(struct pmu *pmu);
 
 extern int perf_num_counters(void);
@@ -695,10 +698,17 @@ static inline void perf_callchain_store(struct perf_callchain_entry *entry, u64 
 extern int sysctl_perf_event_paranoid;
 extern int sysctl_perf_event_mlock;
 extern int sysctl_perf_event_sample_rate;
+extern int sysctl_perf_cpu_time_max_percent;
+
+extern void perf_sample_event_took(u64 sample_len_ns);
 
 extern int perf_proc_update_handler(struct ctl_table *table, int write,
 		void __user *buffer, size_t *lenp,
 		loff_t *ppos);
+extern int perf_cpu_time_max_percent_handler(struct ctl_table *table, int write,
+		void __user *buffer, size_t *lenp,
+		loff_t *ppos);
+
 
 static inline bool perf_paranoid_tracepoint_raw(void)
 {
@@ -742,6 +752,7 @@ extern unsigned int perf_output_skip(struct perf_output_handle *handle,
 				     unsigned int len);
 extern int perf_swevent_get_recursion_context(void);
 extern void perf_swevent_put_recursion_context(int rctx);
+extern u64 perf_swevent_set_period(struct perf_event *event);
 extern void perf_event_enable(struct perf_event *event);
 extern void perf_event_disable(struct perf_event *event);
 extern int __perf_event_disable(void *info);
@@ -781,6 +792,7 @@ static inline void perf_event_fork(struct task_struct *tsk)		{ }
 static inline void perf_event_init(void)				{ }
 static inline int  perf_swevent_get_recursion_context(void)		{ return -1; }
 static inline void perf_swevent_put_recursion_context(int rctx)		{ }
+static inline u64 perf_swevent_set_period(struct perf_event *event)	{ return 0; }
 static inline void perf_event_enable(struct perf_event *event)		{ }
 static inline void perf_event_disable(struct perf_event *event)		{ }
 static inline int __perf_event_disable(void *info)			{ return -1; }
