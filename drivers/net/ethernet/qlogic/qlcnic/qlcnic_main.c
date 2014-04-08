@@ -1647,6 +1647,7 @@ int __qlcnic_up(struct qlcnic_adapter *adapter, struct net_device *netdev)
 	qlcnic_linkevent_request(adapter, 1);
 
 	adapter->ahw->reset_context = 0;
+	netif_tx_start_all_queues(netdev);
 	return 0;
 }
 
@@ -1860,7 +1861,6 @@ int qlcnic_diag_alloc_res(struct net_device *netdev, int test)
 	adapter->max_sds_rings = 1;
 	adapter->ahw->diag_test = test;
 	adapter->ahw->linkup = 0;
-	adapter->max_drv_tx_rings = 1;
 
 	ret = qlcnic_attach(adapter);
 	if (ret) {
@@ -2088,6 +2088,7 @@ int qlcnic_alloc_tx_rings(struct qlcnic_adapter *adapter,
 		}
 		memset(cmd_buf_arr, 0, TX_BUFF_RINGSIZE(tx_ring));
 		tx_ring->cmd_buf_arr = cmd_buf_arr;
+		spin_lock_init(&tx_ring->tx_clean_lock);
 	}
 
 	if (qlcnic_83xx_check(adapter) ||
@@ -2467,14 +2468,8 @@ static int qlcnic_open(struct net_device *netdev)
 
 	err = __qlcnic_up(adapter, netdev);
 	if (err)
-		goto err_out;
+		qlcnic_detach(adapter);
 
-	netif_tx_start_all_queues(netdev);
-
-	return 0;
-
-err_out:
-	qlcnic_detach(adapter);
 	return err;
 }
 
@@ -3524,7 +3519,7 @@ qlcnicvf_start_firmware(struct qlcnic_adapter *adapter)
 	return err;
 }
 
-int qlcnic_validate_max_tx_rings(struct qlcnic_adapter *adapter, int txq)
+int qlcnic_validate_max_tx_rings(struct qlcnic_adapter *adapter, u32 txq)
 {
 	struct net_device *netdev = adapter->netdev;
 	u8 max_hw = QLCNIC_MAX_TX_RINGS;

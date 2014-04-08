@@ -321,7 +321,8 @@ struct smb_version_operations {
 	/* async read from the server */
 	int (*async_readv)(struct cifs_readdata *);
 	/* async write to the server */
-	int (*async_writev)(struct cifs_writedata *);
+	int (*async_writev)(struct cifs_writedata *,
+			    void (*release)(struct kref *));
 	/* sync read from the server */
 	int (*sync_read)(const unsigned int, struct cifsFileInfo *,
 			 struct cifs_io_parms *, unsigned int *, char **,
@@ -490,7 +491,7 @@ struct cifs_mnt_data {
 static inline unsigned int
 get_rfc1002_length(void *buf)
 {
-	return be32_to_cpu(*((__be32 *)buf));
+	return be32_to_cpu(*((__be32 *)buf)) & 0xffffff;
 }
 
 static inline void
@@ -547,9 +548,6 @@ struct TCP_Server_Info {
 	unsigned int max_rw;	/* maxRw specifies the maximum */
 	/* message size the server can send or receive for */
 	/* SMB_COM_WRITE_RAW or SMB_COM_READ_RAW. */
-	unsigned int max_vcs;	/* maximum number of smb sessions, at least
-				   those that can be specified uniquely with
-				   vcnumbers */
 	unsigned int capabilities; /* selective disabling of caps by smb sess */
 	int timeAdj;  /* Adjust for difference in server time zone in sec */
 	__u64 CurrentMid;         /* multiplex id - rotating counter */
@@ -715,7 +713,6 @@ struct cifs_ses {
 	enum statusEnum status;
 	unsigned overrideSecFlg;  /* if non-zero override global sec flags */
 	__u16 ipc_tid;		/* special tid for connection to IPC share */
-	__u16 vcnum;
 	char *serverOS;		/* name of operating system underlying server */
 	char *serverNOS;	/* name of network operating system of server */
 	char *serverDomain;	/* security realm of server */
@@ -1024,7 +1021,7 @@ struct cifs_writedata {
 	unsigned int			pagesz;
 	unsigned int			tailsz;
 	unsigned int			nr_pages;
-	struct page			*pages[1];
+	struct page			*pages[];
 };
 
 /*

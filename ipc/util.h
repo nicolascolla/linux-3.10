@@ -148,9 +148,9 @@ int ipc_parse_version (int *cmd);
 #endif
 
 extern void free_msg(struct msg_msg *msg);
-extern struct msg_msg *load_msg(const void __user *src, int len);
+extern struct msg_msg *load_msg(const void __user *src, size_t len);
 extern struct msg_msg *copy_msg(struct msg_msg *src, struct msg_msg *dst);
-extern int store_msg(void __user *dest, struct msg_msg *msg, int len);
+extern int store_msg(void __user *dest, struct msg_msg *msg, size_t len);
 
 extern void recompute_msgmni(struct ipc_namespace *);
 
@@ -183,6 +183,19 @@ static inline void ipc_unlock(struct kern_ipc_perm *perm)
 {
 	ipc_unlock_object(perm);
 	rcu_read_unlock();
+}
+
+/*
+ * ipc_valid_object() - helper to sort out IPC_RMID races for codepaths
+ * where the respective ipc_ids.rwsem is not being held down.
+ * Checks whether the ipc object is still around or if it's gone already, as
+ * ipc_rmid() may have already freed the ID while the ipc lock was spinning.
+ * Needs to be called with kern_ipc_perm.lock held -- exception made for one
+ * checkpoint case at sys_semtimedop() as noted in code commentary.
+ */
+static inline bool ipc_valid_object(struct kern_ipc_perm *perm)
+{
+	return !perm->deleted;
 }
 
 struct kern_ipc_perm *ipc_obtain_object_check(struct ipc_ids *ids, int id);

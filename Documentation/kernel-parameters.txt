@@ -292,6 +292,9 @@ bytes respectively. Such letter suffixes can also be entirely omitted.
 			no: ACPI OperationRegions are not marked as reserved,
 			no further checks are performed.
 
+	acpi_no_memhotplug [ACPI] Disable memory hotplug.  Useful for kdump
+			   kernels.
+
 	add_efi_memmap	[EFI; X86] Include EFI memory map in
 			kernel's map of available physical RAM.
 
@@ -718,6 +721,15 @@ bytes respectively. Such letter suffixes can also be entirely omitted.
 
 	disable=	[IPV6]
 			See Documentation/networking/ipv6.txt.
+
+	disable_cpu_apicid= [X86,APIC,SMP]
+			Format: <int>
+			The number of initial APIC ID for the
+			corresponding CPU to be disabled at boot,
+			mostly used for the kdump 2nd kernel to
+			disable BSP to wake up multiple CPUs without
+			causing system reset or hang due to sending
+			INIT from AP to BSP.
 
 	disable_ddw     [PPC/PSERIES]
 			Disable Dynamic DMA Window support. Use this if
@@ -1163,6 +1175,8 @@ bytes respectively. Such letter suffixes can also be entirely omitted.
 
 	inport.irq=	[HW] Inport (ATI XL and Microsoft) busmouse driver
 			Format: <irq>
+
+	int_pln_enable  [x86] Enable power limit notification interrupt
 
 	intel_iommu=	[DMAR] Intel IOMMU driver (DMAR) option
 		on

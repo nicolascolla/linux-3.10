@@ -1174,23 +1174,16 @@ int evergreen_set_uvd_clocks(struct radeon_device *rdev, u32 vclk, u32 dclk)
 
 void evergreen_fix_pci_max_read_req_size(struct radeon_device *rdev)
 {
-	u16 ctl, v;
-	int err;
+	int readrq;
+	u16 v;
 
-	err = pcie_capability_read_word(rdev->pdev, PCI_EXP_DEVCTL, &ctl);
-	if (err)
-		return;
-
-	v = (ctl & PCI_EXP_DEVCTL_READRQ) >> 12;
-
+	readrq = pcie_get_readrq(rdev->pdev);
+	v = ffs(readrq) - 8;
 	/* if bios or OS sets MAX_READ_REQUEST_SIZE to an invalid value, fix it
 	 * to avoid hangs or perfomance issues
 	 */
-	if ((v == 0) || (v == 6) || (v == 7)) {
-		ctl &= ~PCI_EXP_DEVCTL_READRQ;
-		ctl |= (2 << 12);
-		pcie_capability_write_word(rdev->pdev, PCI_EXP_DEVCTL, ctl);
-	}
+	if ((v == 0) || (v == 6) || (v == 7))
+		pcie_set_readrq(rdev->pdev, 512);
 }
 
 static bool dce4_is_in_vblank(struct radeon_device *rdev, int crtc)
@@ -5124,12 +5117,14 @@ static int evergreen_startup(struct radeon_device *rdev)
 		return r;
 	}
 
-	r = uvd_v2_2_resume(rdev);
-	if (!r) {
-		r = radeon_fence_driver_start_ring(rdev,
-						   R600_RING_TYPE_UVD_INDEX);
-		if (r)
-			dev_err(rdev->dev, "UVD fences init error (%d).\n", r);
+	if (radeon_uvd == 1) {
+		r = uvd_v2_2_resume(rdev);
+		if (!r) {
+			r = radeon_fence_driver_start_ring(rdev,
+							   R600_RING_TYPE_UVD_INDEX);
+			if (r)
+				dev_err(rdev->dev, "UVD fences init error (%d).\n", r);
+		}
 	}
 
 	if (r)
@@ -5152,14 +5147,12 @@ static int evergreen_startup(struct radeon_device *rdev)
 
 	ring = &rdev->ring[RADEON_RING_TYPE_GFX_INDEX];
 	r = radeon_ring_init(rdev, ring, ring->ring_size, RADEON_WB_CP_RPTR_OFFSET,
-			     R600_CP_RB_RPTR, R600_CP_RB_WPTR,
 			     RADEON_CP_PACKET2);
 	if (r)
 		return r;
 
 	ring = &rdev->ring[R600_RING_TYPE_DMA_INDEX];
 	r = radeon_ring_init(rdev, ring, ring->ring_size, R600_WB_DMA_RPTR_OFFSET,
-			     DMA_RB_RPTR, DMA_RB_WPTR,
 			     DMA_PACKET(DMA_PACKET_NOP, 0, 0));
 	if (r)
 		return r;
@@ -5174,16 +5167,17 @@ static int evergreen_startup(struct radeon_device *rdev)
 	if (r)
 		return r;
 
-	ring = &rdev->ring[R600_RING_TYPE_UVD_INDEX];
-	if (ring->ring_size) {
-		r = radeon_ring_init(rdev, ring, ring->ring_size, 0,
-				     UVD_RBC_RB_RPTR, UVD_RBC_RB_WPTR,
-				     RADEON_CP_PACKET2);
-		if (!r)
-			r = uvd_v1_0_init(rdev);
+	if (radeon_uvd == 1) {
+		ring = &rdev->ring[R600_RING_TYPE_UVD_INDEX];
+		if (ring->ring_size) {
+			r = radeon_ring_init(rdev, ring, ring->ring_size, 0,
+					     RADEON_CP_PACKET2);
+			if (!r)
+				r = uvd_v1_0_init(rdev);
 
-		if (r)
-			DRM_ERROR("radeon: error initializing UVD (%d).\n", r);
+			if (r)
+				DRM_ERROR("radeon: error initializing UVD (%d).\n", r);
+		}
 	}
 
 	r = radeon_ib_pool_init(rdev);
@@ -5235,8 +5229,10 @@ int evergreen_resume(struct radeon_device *rdev)
 int evergreen_suspend(struct radeon_device *rdev)
 {
 	r600_audio_fini(rdev);
-	uvd_v1_0_fini(rdev);
-	radeon_uvd_suspend(rdev);
+	if (radeon_uvd == 1) {
+		uvd_v1_0_fini(rdev);
+		radeon_uvd_suspend(rdev);
+	}
 	r700_cp_stop(rdev);
 	r600_dma_stop(rdev);
 	evergreen_irq_suspend(rdev);
@@ -5316,11 +5312,13 @@ int evergreen_init(struct radeon_device *rdev)
 	rdev->ring[R600_RING_TYPE_DMA_INDEX].ring_obj = NULL;
 	r600_ring_init(rdev, &rdev->ring[R600_RING_TYPE_DMA_INDEX], 64 * 1024);
 
-	r = radeon_uvd_init(rdev);
-	if (!r) {
-		rdev->ring[R600_RING_TYPE_UVD_INDEX].ring_obj = NULL;
-		r600_ring_init(rdev, &rdev->ring[R600_RING_TYPE_UVD_INDEX],
-			       4096);
+	if (radeon_uvd == 1) {
+		r = radeon_uvd_init(rdev);
+		if (!r) {
+			rdev->ring[R600_RING_TYPE_UVD_INDEX].ring_obj = NULL;
+			r600_ring_init(rdev, &rdev->ring[R600_RING_TYPE_UVD_INDEX],
+				       4096);
+		}
 	}
 
 	rdev->ih.ring_obj = NULL;
@@ -5371,9 +5369,11 @@ void evergreen_fini(struct radeon_device *rdev)
 	radeon_wb_fini(rdev);
 	radeon_ib_pool_fini(rdev);
 	radeon_irq_kms_fini(rdev);
+	if (radeon_uvd == 1) {
+		uvd_v1_0_fini(rdev);
+		radeon_uvd_fini(rdev);
+	}
 	evergreen_pcie_gart_fini(rdev);
-	uvd_v1_0_fini(rdev);
-	radeon_uvd_fini(rdev);
 	r600_vram_scratch_fini(rdev);
 	radeon_gem_fini(rdev);
 	radeon_fence_driver_fini(rdev);

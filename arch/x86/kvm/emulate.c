@@ -3245,6 +3245,18 @@ static int em_cpuid(struct x86_emulate_ctxt *ctxt)
 	return X86EMUL_CONTINUE;
 }
 
+static int em_sahf(struct x86_emulate_ctxt *ctxt)
+{
+	u32 flags;
+
+	flags = EFLG_CF | EFLG_PF | EFLG_AF | EFLG_ZF | EFLG_SF;
+	flags &= *reg_rmw(ctxt, VCPU_REGS_RAX) >> 8;
+
+	ctxt->eflags &= ~0xffUL;
+	ctxt->eflags |= flags | X86_EFLAGS_FIXED;
+	return X86EMUL_CONTINUE;
+}
+
 static int em_lahf(struct x86_emulate_ctxt *ctxt)
 {
 	*reg_rmw(ctxt, VCPU_REGS_RAX) &= ~0xff00UL;
@@ -3611,6 +3623,10 @@ static const struct gprefix pfx_vmovntpx = {
 	I(0, em_mov), N, N, N,
 };
 
+static const struct gprefix pfx_0f_28_0f_29 = {
+	I(Aligned, em_mov), I(Aligned, em_mov), N, N,
+};
+
 static const struct escape escape_d9 = { {
 	N, N, N, N, N, N, N, I(DstMem, em_fnstcw),
 }, {
@@ -3739,7 +3755,8 @@ static const struct opcode opcode_table[256] = {
 	D(DstAcc | SrcNone), I(ImplicitOps | SrcAcc, em_cwd),
 	I(SrcImmFAddr | No64, em_call_far), N,
 	II(ImplicitOps | Stack, em_pushf, pushf),
-	II(ImplicitOps | Stack, em_popf, popf), N, I(ImplicitOps, em_lahf),
+	II(ImplicitOps | Stack, em_popf, popf),
+	I(ImplicitOps, em_sahf), I(ImplicitOps, em_lahf),
 	/* 0xA0 - 0xA7 */
 	I2bv(DstAcc | SrcMem | Mov | MemAbs, em_mov),
 	I2bv(DstMem | SrcAcc | Mov | MemAbs | PageTable, em_mov),
@@ -3811,7 +3828,9 @@ static const struct opcode twobyte_table[256] = {
 	IIP(ModRM | SrcMem | Priv | Op3264, em_cr_write, cr_write, check_cr_write),
 	IIP(ModRM | SrcMem | Priv | Op3264, em_dr_write, dr_write, check_dr_write),
 	N, N, N, N,
-	N, N, N, GP(ModRM | DstMem | SrcReg | Sse | Mov | Aligned, &pfx_vmovntpx),
+	GP(ModRM | DstReg | SrcMem | Mov | Sse, &pfx_0f_28_0f_29),
+	GP(ModRM | DstMem | SrcReg | Mov | Sse, &pfx_0f_28_0f_29),
+	N, GP(ModRM | DstMem | SrcReg | Sse | Mov | Aligned, &pfx_vmovntpx),
 	N, N, N, N,
 	/* 0x30 - 0x3F */
 	II(ImplicitOps | Priv, em_wrmsr, wrmsr),
@@ -4028,7 +4047,10 @@ static int decode_operand(struct x86_emulate_ctxt *ctxt, struct operand *op,
 	case OpMem8:
 		ctxt->memop.bytes = 1;
 		if (ctxt->memop.type == OP_REG) {
-			ctxt->memop.addr.reg = decode_register(ctxt, ctxt->modrm_rm, 1);
+			int highbyte_regs = ctxt->rex_prefix == 0;
+
+			ctxt->memop.addr.reg = decode_register(ctxt, ctxt->modrm_rm,
+					       highbyte_regs);
 			fetch_register_operand(&ctxt->memop);
 		}
 		goto mem_common;

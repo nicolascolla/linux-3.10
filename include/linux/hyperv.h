@@ -884,7 +884,7 @@ struct vmbus_channel_relid_released {
 struct vmbus_channel_initiate_contact {
 	struct vmbus_channel_message_header header;
 	u32 vmbus_version_requested;
-	u32 padding2;
+	u32 target_vcpu; /* The VCPU the host should respond to */
 	u64 interrupt_page;
 	u64 monitor_page1;
 	u64 monitor_page2;
@@ -1495,6 +1495,8 @@ void hv_kvp_onchannelcallback(void *);
 int hv_vss_init(struct hv_util_service *);
 void hv_vss_deinit(void);
 void hv_vss_onchannelcallback(void *);
+
+extern struct resource hyperv_mmio;
 
 /*
  * Negotiated version with the Host.

@@ -38,6 +38,7 @@
 
 #include "blk.h"
 #include "blk-cgroup.h"
+#include "blk-mq.h"
 
 EXPORT_TRACEPOINT_SYMBOL_GPL(block_bio_remap);
 EXPORT_TRACEPOINT_SYMBOL_GPL(block_rq_remap);
@@ -245,7 +246,16 @@ EXPORT_SYMBOL(blk_stop_queue);
 void blk_sync_queue(struct request_queue *q)
 {
 	del_timer_sync(&q->timeout);
-	cancel_delayed_work_sync(&q->delay_work);
+
+	if (q->mq_ops) {
+		struct blk_mq_hw_ctx *hctx;
+		int i;
+
+		queue_for_each_hw_ctx(q, hctx, i)
+			cancel_delayed_work_sync(&hctx->delayed_work);
+	} else {
+		cancel_delayed_work_sync(&q->delay_work);
+	}
 }
 EXPORT_SYMBOL(blk_sync_queue);
 
@@ -497,8 +507,13 @@ void blk_cleanup_queue(struct request_queue *q)
 	 * Drain all requests queued before DYING marking. Set DEAD flag to
 	 * prevent that q->request_fn() gets invoked after draining finished.
 	 */
-	spin_lock_irq(lock);
-	__blk_drain_queue(q, true);
+	if (q->mq_ops) {
+		blk_mq_drain_queue(q);
+		spin_lock_irq(lock);
+	} else {
+		spin_lock_irq(lock);
+		__blk_drain_queue(q, true);
+	}
 	queue_flag_set(QUEUE_FLAG_DEAD, q);
 	spin_unlock_irq(lock);
 
@@ -614,10 +629,12 @@ struct request_queue *blk_alloc_queue_node(gfp_t gfp_mask, int node_id)
 	init_waitqueue_head(&q->mq_freeze_wq);
 
 	if (blkcg_init_queue(q))
-		goto fail_id;
+		goto fail_bdi;
 
 	return q;
 
+fail_bdi:
+	bdi_destroy(&q->backing_dev_info);
 fail_id:
 	ida_simple_remove(&blk_queue_ida, q->id);
 fail_c:
@@ -691,12 +708,15 @@ blk_init_allocated_queue(struct request_queue *q, request_fn_proc *rfn,
 	if (!q)
 		return NULL;
 
-	if (blk_init_rl(&q->root_rl, q, GFP_KERNEL))
+	q->flush_rq = kzalloc(sizeof(struct request), GFP_KERNEL);
+	if (!q->flush_rq)
 		return NULL;
+
+	if (blk_init_rl(&q->root_rl, q, GFP_KERNEL))
+		goto fail;
 
 	q->request_fn		= rfn;
 	q->prep_rq_fn		= NULL;
-	q->unprep_rq_fn		= NULL;
 	q->queue_flags		|= QUEUE_FLAG_DEFAULT;
 
 	/* Override internal queue lock with supplied lock pointer */
@@ -710,10 +730,22 @@ blk_init_allocated_queue(struct request_queue *q, request_fn_proc *rfn,
 
 	q->sg_reserved_size = INT_MAX;
 
+	/* Protect q->elevator from elevator_change */
+	mutex_lock(&q->sysfs_lock);
+
 	/* init elevator */
-	if (elevator_init(q, NULL))
-		return NULL;
+	if (elevator_init(q, NULL)) {
+		mutex_unlock(&q->sysfs_lock);
+		goto fail;
+	}
+
+	mutex_unlock(&q->sysfs_lock);
+
 	return q;
+
+fail:
+	kfree(q->flush_rq);
+	return NULL;
 }
 EXPORT_SYMBOL(blk_init_allocated_queue);
 
@@ -1102,7 +1134,7 @@ static struct request *blk_old_get_request(struct request_queue *q, int rw,
 struct request *blk_get_request(struct request_queue *q, int rw, gfp_t gfp_mask)
 {
 	if (q->mq_ops)
-		return blk_mq_alloc_request(q, rw, gfp_mask, false);
+		return blk_mq_alloc_request(q, rw, gfp_mask);
 	else
 		return blk_old_get_request(q, rw, gfp_mask);
 }
@@ -1252,6 +1284,11 @@ void __blk_put_request(struct request_queue *q, struct request *req)
 {
 	if (unlikely(!q))
 		return;
+
+	if (q->mq_ops) {
+		blk_mq_free_request(req);
+		return;
+	}
 
 	blk_pm_put_request(req);
 
@@ -2254,6 +2291,7 @@ void blk_start_request(struct request *req)
 	if (unlikely(blk_bidi_rq(req)))
 		req->next_rq->resid_len = blk_rq_bytes(req->next_rq);
 
+	BUG_ON(test_bit(REQ_ATOM_COMPLETE, &req->atomic_flags));
 	blk_add_timer(req);
 }
 EXPORT_SYMBOL(blk_start_request);
@@ -2442,18 +2480,12 @@ static bool blk_update_bidi_request(struct request *rq, int error,
  * @req:	the request
  *
  * This function makes a request ready for complete resubmission (or
- * completion).  It happens only after all error handling is complete,
- * so represents the appropriate moment to deallocate any resources
- * that were allocated to the request in the prep_rq_fn.  The queue
- * lock is held when calling this.
+ * completion).  It happens only after all error handling is complete.
+ * The queue lock is held when calling this.
  */
 void blk_unprep_request(struct request *req)
 {
-	struct request_queue *q = req->q;
-
 	req->cmd_flags &= ~REQ_DONTPREP;
-	if (q->unprep_rq_fn)
-		q->unprep_rq_fn(q, req);
 }
 EXPORT_SYMBOL_GPL(blk_unprep_request);
 

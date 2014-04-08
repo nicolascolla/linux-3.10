@@ -24,7 +24,7 @@
 #define BHRB_MAX_ENTRIES	32
 #define BHRB_TARGET		0x0000000000000002
 #define BHRB_PREDICTION		0x0000000000000001
-#define BHRB_EA			0xFFFFFFFFFFFFFFFC
+#define BHRB_EA			0xFFFFFFFFFFFFFFFCUL
 
 struct cpu_hw_events {
 	int n_events;
@@ -1252,8 +1252,11 @@ nocheck:
 
 	ret = 0;
  out:
-	if (has_branch_stack(event))
+	if (has_branch_stack(event)) {
 		power_pmu_bhrb_enable(event);
+		cpuhw->bhrb_filter = ppmu->bhrb_filter_map(
+					event->attr.branch_sample_type);
+	}
 
 	perf_pmu_enable(event->pmu);
 	local_irq_restore(flags);

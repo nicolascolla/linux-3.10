@@ -3173,7 +3173,7 @@ static ssize_t wm8962_beep_set(struct device *dev,
 	long int time;
 	int ret;
 
-	ret = strict_strtol(buf, 10, &time);
+	ret = kstrtol(buf, 10, &time);
 	if (ret != 0)
 		return ret;
 
@@ -3685,6 +3685,8 @@ static int wm8962_i2c_probe(struct i2c_client *i2c,
 				     &soc_codec_dev_wm8962, &wm8962_dai, 1);
 	if (ret < 0)
 		goto err_enable;
+
+	regcache_cache_only(wm8962->regmap, true);
 
 	/* The drivers should power up as needed */
 	regulator_bulk_disable(ARRAY_SIZE(wm8962->supplies), wm8962->supplies);

@@ -215,10 +215,14 @@ void sysfs_delete_link(struct kobject *dir, struct kobject *targ,
 
 int __must_check sysfs_create_group(struct kobject *kobj,
 				    const struct attribute_group *grp);
+int __must_check sysfs_create_groups(struct kobject *kobj,
+				     const struct attribute_group **groups);
 int sysfs_update_group(struct kobject *kobj,
 		       const struct attribute_group *grp);
 void sysfs_remove_group(struct kobject *kobj,
 			const struct attribute_group *grp);
+void sysfs_remove_groups(struct kobject *kobj,
+			 const struct attribute_group **groups);
 int sysfs_add_file_to_group(struct kobject *kobj,
 			const struct attribute *attr, const char *group);
 void sysfs_remove_file_from_group(struct kobject *kobj,
@@ -343,6 +347,12 @@ static inline int sysfs_create_group(struct kobject *kobj,
 	return 0;
 }
 
+static inline int sysfs_create_groups(struct kobject *kobj,
+				      const struct attribute_group **groups)
+{
+	return 0;
+}
+
 static inline int sysfs_update_group(struct kobject *kobj,
 				const struct attribute_group *grp)
 {
@@ -351,6 +361,11 @@ static inline int sysfs_update_group(struct kobject *kobj,
 
 static inline void sysfs_remove_group(struct kobject *kobj,
 				      const struct attribute_group *grp)
+{
+}
+
+static inline void sysfs_remove_groups(struct kobject *kobj,
+				       const struct attribute_group **groups)
 {
 }
 

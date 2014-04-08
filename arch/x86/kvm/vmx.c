@@ -7153,8 +7153,8 @@ static void vmx_free_vcpu(struct kvm_vcpu *vcpu)
 	struct vcpu_vmx *vmx = to_vmx(vcpu);
 
 	free_vpid(vmx);
-	free_nested(vmx);
 	free_loaded_vmcs(vmx->loaded_vmcs);
+	free_nested(vmx);
 	kfree(vmx->guest_msrs);
 	kvm_vcpu_uninit(vcpu);
 	kmem_cache_free(kvm_vcpu_cache, vmx);
@@ -7815,7 +7815,7 @@ static void vmcs12_save_pending_event(struct kvm_vcpu *vcpu,
 		}
 
 		vmcs12->idt_vectoring_info_field = idt_vectoring;
-	} else if (vcpu->arch.nmi_pending) {
+	} else if (vcpu->arch.nmi_injected) {
 		vmcs12->idt_vectoring_info_field =
 			INTR_TYPE_NMI_INTR | INTR_INFO_VALID_MASK | NMI_VECTOR;
 	} else if (vcpu->arch.interrupt.pending) {
@@ -7968,7 +7968,7 @@ static void load_vmcs12_host_state(struct kvm_vcpu *vcpu,
 
 	kvm_register_write(vcpu, VCPU_REGS_RSP, vmcs12->host_rsp);
 	kvm_register_write(vcpu, VCPU_REGS_RIP, vmcs12->host_rip);
-	vmx_set_rflags(vcpu, X86_EFLAGS_BIT1);
+	vmx_set_rflags(vcpu, X86_EFLAGS_FIXED);
 	/*
 	 * Note that calling vmx_set_cr0 is important, even if cr0 hasn't
 	 * actually changed, because it depends on the current state of

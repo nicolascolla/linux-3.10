@@ -27,9 +27,7 @@ static inline void save_tar(struct thread_struct *prev) {}
 
 extern void giveup_fpu(struct task_struct *);
 extern void load_up_fpu(void);
-extern void disable_kernel_fp(void);
 extern void enable_kernel_fp(void);
-extern void flush_fp_to_thread(struct task_struct *);
 extern void enable_kernel_altivec(void);
 extern void load_up_altivec(struct task_struct *);
 extern int emulate_altivec(struct pt_regs *);
@@ -45,6 +43,12 @@ extern void discard_lazy_cpu_state(void);
 static inline void discard_lazy_cpu_state(void)
 {
 }
+#endif
+
+#ifdef CONFIG_PPC_FPU
+extern void flush_fp_to_thread(struct task_struct *);
+#else
+static inline void flush_fp_to_thread(struct task_struct *t) { }
 #endif
 
 #ifdef CONFIG_ALTIVEC

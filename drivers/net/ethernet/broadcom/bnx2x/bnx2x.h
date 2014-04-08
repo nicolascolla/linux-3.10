@@ -26,8 +26,8 @@
  * (you will need to reboot afterwards) */
 /* #define BNX2X_STOP_ON_ERROR */
 
-#define DRV_MODULE_VERSION      "1.78.17-0"
-#define DRV_MODULE_RELDATE      "2013/04/11"
+#define DRV_MODULE_VERSION      "1.78.19-0"
+#define DRV_MODULE_RELDATE      "2014/02/10"
 #define BNX2X_BC_VER            0x040200
 
 #if defined(CONFIG_DCB)
@@ -472,7 +472,7 @@ struct bnx2x_agg_info {
 	u16			vlan_tag;
 	u16			len_on_bd;
 	u32			rxhash;
-	bool			l4_rxhash;
+	enum pkt_hash_types	rxhash_type;
 	u16			gro_size;
 	u16			full_page;
 };
@@ -515,7 +515,7 @@ struct bnx2x_fastpath {
 
 	struct napi_struct	napi;
 
-#ifdef CONFIG_NET_LL_RX_POLL
+#ifdef CONFIG_NET_RX_BUSY_POLL
 	unsigned int state;
 #define BNX2X_FP_STATE_IDLE		      0
 #define BNX2X_FP_STATE_NAPI		(1 << 0)    /* NAPI owns this FP */
@@ -527,7 +527,7 @@ struct bnx2x_fastpath {
 #define BNX2X_FP_USER_PEND (BNX2X_FP_STATE_POLL | BNX2X_FP_STATE_POLL_YIELD)
 	/* protect state */
 	spinlock_t lock;
-#endif /* CONFIG_NET_LL_RX_POLL */
+#endif /* CONFIG_NET_RX_BUSY_POLL */
 
 	union host_hc_status_block	status_blk;
 	/* chip independent shortcuts into sb structure */
@@ -601,7 +601,7 @@ struct bnx2x_fastpath {
 #define bnx2x_fp_stats(bp, fp)	(&((bp)->fp_stats[(fp)->index]))
 #define bnx2x_fp_qstats(bp, fp)	(&((bp)->fp_stats[(fp)->index].eth_q_stats))
 
-#ifdef CONFIG_NET_LL_RX_POLL
+#ifdef CONFIG_NET_RX_BUSY_POLL
 static inline void bnx2x_fp_init_lock(struct bnx2x_fastpath *fp)
 {
 	spin_lock_init(&fp->lock);
@@ -709,7 +709,7 @@ static inline bool bnx2x_fp_ll_polling(struct bnx2x_fastpath *fp)
 {
 	return false;
 }
-#endif /* CONFIG_NET_LL_RX_POLL */
+#endif /* CONFIG_NET_RX_BUSY_POLL */
 
 /* Use 2500 as a mini-jumbo MTU for FCoE */
 #define BNX2X_FCOE_MINI_JUMBO_MTU	2500
@@ -1250,7 +1250,10 @@ struct bnx2x_slowpath {
 	 * Therefore, if they would have been defined in the same union,
 	 * data can get corrupted.
 	 */
-	struct afex_vif_list_ramrod_data func_afex_rdata;
+	union {
+		struct afex_vif_list_ramrod_data	viflist_data;
+		struct function_update_data		func_update;
+	} func_afex_rdata;
 
 	/* used by dmae command executer */
 	struct dmae_command		dmae[MAX_DMAE_C];
@@ -1376,7 +1379,6 @@ enum {
 	BNX2X_SP_RTNL_RX_MODE,
 	BNX2X_SP_RTNL_HYPERVISOR_VLAN,
 	BNX2X_SP_RTNL_TX_STOP,
-	BNX2X_SP_RTNL_TX_RESUME,
 };
 
 struct bnx2x_prev_path_list {
@@ -1540,6 +1542,7 @@ struct bnx2x {
 #define NO_ISCSI_FLAG			(1 << 14)
 #define NO_FCOE_FLAG			(1 << 15)
 #define BC_SUPPORTS_PFC_STATS		(1 << 17)
+#define TX_SWITCHING			(1 << 18)
 #define BC_SUPPORTS_FCOE_FEATURES	(1 << 19)
 #define USING_SINGLE_MSIX_FLAG		(1 << 20)
 #define BC_SUPPORTS_DCBX_MSG_NON_PMF	(1 << 21)
@@ -1547,6 +1550,7 @@ struct bnx2x {
 #define INTERRUPTS_ENABLED_FLAG		(1 << 23)
 #define BC_SUPPORTS_RMMOD_CMD		(1 << 24)
 #define HAS_PHYS_PORT_ID		(1 << 25)
+#define AER_ENABLED			(1 << 26)
 
 #define BP_NOMCP(bp)			((bp)->flags & NO_MCP_FLAG)
 
@@ -2054,7 +2058,6 @@ int bnx2x_del_all_macs(struct bnx2x *bp,
 void bnx2x_func_init(struct bnx2x *bp, struct bnx2x_func_init_params *p);
 void bnx2x_init_sb(struct bnx2x *bp, dma_addr_t mapping, int vfid,
 		    u8 vf_valid, int fw_sb_id, int igu_sb_id);
-u32 bnx2x_get_pretend_reg(struct bnx2x *bp);
 int bnx2x_get_gpio(struct bnx2x *bp, int gpio_num, u8 port);
 int bnx2x_set_gpio(struct bnx2x *bp, int gpio_num, u32 mode, u8 port);
 int bnx2x_set_mult_gpio(struct bnx2x *bp, u8 pins, u32 mode);
@@ -2437,7 +2440,8 @@ void bnx2x_igu_clear_sb_gen(struct bnx2x *bp, u8 func, u8 idu_sb_id,
 
 #define GOOD_ME_REG(me_reg) (((me_reg) & ME_REG_VF_VALID) && \
 			    (!((me_reg) & ME_REG_VF_ERR)))
-int bnx2x_nic_load_analyze_req(struct bnx2x *bp, u32 load_code);
+int bnx2x_compare_fw_ver(struct bnx2x *bp, u32 load_code, bool print_err);
+
 /* Congestion management fairness mode */
 #define CMNG_FNS_NONE			0
 #define CMNG_FNS_MINMAX			1
@@ -2499,5 +2503,7 @@ void bnx2x_set_local_cmng(struct bnx2x *bp);
 
 #define MCPR_SCRATCH_BASE(bp) \
 	(CHIP_IS_E1x(bp) ? MCP_REG_MCPR_SCRATCH : MCP_A_REG_MCPR_SCRATCH)
+
+#define E1H_MAX_MF_SB_COUNT (HC_SB_MAX_SB_E1X/(E1HVN_MAX * PORT_MAX))
 
 #endif /* bnx2x.h */

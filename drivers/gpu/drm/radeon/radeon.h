@@ -98,6 +98,7 @@ extern int radeon_lockup_timeout;
 extern int radeon_fastfb;
 extern int radeon_dpm;
 extern int radeon_aspm;
+extern int radeon_uvd;
 
 /*
  * Copy from radeon_drv.h so we don't have to include both and have conflicting
@@ -774,13 +775,11 @@ struct radeon_ring {
 	volatile uint32_t	*ring;
 	unsigned		rptr;
 	unsigned		rptr_offs;
-	unsigned		rptr_reg;
 	unsigned		rptr_save_reg;
 	u64			next_rptr_gpu_addr;
 	volatile u32		*next_rptr_cpu_addr;
 	unsigned		wptr;
 	unsigned		wptr_old;
-	unsigned		wptr_reg;
 	unsigned		ring_size;
 	unsigned		ring_free_dw;
 	int			count_dw;
@@ -940,7 +939,7 @@ unsigned radeon_ring_backup(struct radeon_device *rdev, struct radeon_ring *ring
 int radeon_ring_restore(struct radeon_device *rdev, struct radeon_ring *ring,
 			unsigned size, uint32_t *data);
 int radeon_ring_init(struct radeon_device *rdev, struct radeon_ring *cp, unsigned ring_size,
-		     unsigned rptr_offs, unsigned rptr_reg, unsigned wptr_reg, u32 nop);
+		     unsigned rptr_offs, u32 nop);
 void radeon_ring_fini(struct radeon_device *rdev, struct radeon_ring *cp);
 
 
@@ -1272,8 +1271,8 @@ struct radeon_blacklist_clocks
 struct radeon_clock_and_voltage_limits {
 	u32 sclk;
 	u32 mclk;
-	u32 vddc;
-	u32 vddci;
+	u16 vddc;
+	u16 vddci;
 };
 
 struct radeon_clock_array {
@@ -1930,7 +1929,7 @@ struct si_asic {
 	unsigned sc_earlyz_tile_fifo_size;
 
 	unsigned num_tile_pipes;
-	unsigned num_backends_per_se;
+	unsigned backend_enable_mask;
 	unsigned backend_disable_mask_per_asic;
 	unsigned backend_map;
 	unsigned num_texture_channel_caches;
@@ -1960,7 +1959,7 @@ struct cik_asic {
 	unsigned sc_earlyz_tile_fifo_size;
 
 	unsigned num_tile_pipes;
-	unsigned num_backends_per_se;
+	unsigned backend_enable_mask;
 	unsigned backend_disable_mask_per_asic;
 	unsigned backend_map;
 	unsigned num_texture_channel_caches;

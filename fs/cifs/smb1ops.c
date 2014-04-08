@@ -882,6 +882,33 @@ cifs_mand_lock(const unsigned int xid, struct cifsFileInfo *cfile, __u64 offset,
 }
 
 static int
+cifs_unix_dfs_readlink(const unsigned int xid, struct cifs_tcon *tcon,
+		       const unsigned char *searchName, char **symlinkinfo,
+		       const struct nls_table *nls_codepage)
+{
+#ifdef CONFIG_CIFS_DFS_UPCALL
+	int rc;
+	unsigned int num_referrals = 0;
+	struct dfs_info3_param *referrals = NULL;
+
+	rc = get_dfs_path(xid, tcon->ses, searchName, nls_codepage,
+			  &num_referrals, &referrals, 0);
+
+	if (!rc && num_referrals > 0) {
+		*symlinkinfo = kstrndup(referrals->node_name,
+					strlen(referrals->node_name),
+					GFP_KERNEL);
+		if (!*symlinkinfo)
+			rc = -ENOMEM;
+		free_dfs_info_array(referrals, num_referrals);
+	}
+	return rc;
+#else /* No DFS support */
+	return -EREMOTE;
+#endif
+}
+
+static int
 cifs_query_symlink(const unsigned int xid, struct cifs_tcon *tcon,
 		   const char *full_path, char **target_path,
 		   struct cifs_sb_info *cifs_sb)
@@ -892,23 +919,36 @@ cifs_query_symlink(const unsigned int xid, struct cifs_tcon *tcon,
 
 	cifs_dbg(FYI, "%s: path: %s\n", __func__, full_path);
 
+	/* Check for unix extensions */
+	if (cap_unix(tcon->ses)) {
+		rc = CIFSSMBUnixQuerySymLink(xid, tcon, full_path, target_path,
+					     cifs_sb->local_nls);
+		if (rc == -EREMOTE)
+			rc = cifs_unix_dfs_readlink(xid, tcon, full_path,
+						    target_path,
+						    cifs_sb->local_nls);
+
+		goto out;
+	}
+
 	rc = CIFSSMBOpen(xid, tcon, full_path, FILE_OPEN,
 			 FILE_READ_ATTRIBUTES, OPEN_REPARSE_POINT, &netfid,
 			 &oplock, NULL, cifs_sb->local_nls,
 			 cifs_sb->mnt_cifs_flags & CIFS_MOUNT_MAP_SPECIAL_CHR);
 	if (rc)
-		return rc;
+		goto out;
 
 	rc = CIFSSMBQuerySymLink(xid, tcon, netfid, target_path,
 				 cifs_sb->local_nls);
-	if (rc) {
-		CIFSSMBClose(xid, tcon, netfid);
-		return rc;
-	}
+	if (rc)
+		goto out_close;
 
 	convert_delimiter(*target_path, '/');
+out_close:
 	CIFSSMBClose(xid, tcon, netfid);
-	cifs_dbg(FYI, "%s: target path: %s\n", __func__, *target_path);
+out:
+	if (!rc)
+		cifs_dbg(FYI, "%s: target path: %s\n", __func__, *target_path);
 	return rc;
 }
 

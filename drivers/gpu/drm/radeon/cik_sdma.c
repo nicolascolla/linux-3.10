@@ -51,6 +51,75 @@ u32 cik_gpu_check_soft_reset(struct radeon_device *rdev);
  */
 
 /**
+ * cik_sdma_get_rptr - get the current read pointer
+ *
+ * @rdev: radeon_device pointer
+ * @ring: radeon ring pointer
+ *
+ * Get the current rptr from the hardware (CIK+).
+ */
+uint32_t cik_sdma_get_rptr(struct radeon_device *rdev,
+			   struct radeon_ring *ring)
+{
+	u32 rptr, reg;
+
+	if (rdev->wb.enabled) {
+		rptr = rdev->wb.wb[ring->rptr_offs/4];
+	} else {
+		if (ring->idx == R600_RING_TYPE_DMA_INDEX)
+			reg = SDMA0_GFX_RB_RPTR + SDMA0_REGISTER_OFFSET;
+		else
+			reg = SDMA0_GFX_RB_RPTR + SDMA1_REGISTER_OFFSET;
+
+		rptr = RREG32(reg);
+	}
+
+	return (rptr & 0x3fffc) >> 2;
+}
+
+/**
+ * cik_sdma_get_wptr - get the current write pointer
+ *
+ * @rdev: radeon_device pointer
+ * @ring: radeon ring pointer
+ *
+ * Get the current wptr from the hardware (CIK+).
+ */
+uint32_t cik_sdma_get_wptr(struct radeon_device *rdev,
+			   struct radeon_ring *ring)
+{
+	u32 reg;
+
+	if (ring->idx == R600_RING_TYPE_DMA_INDEX)
+		reg = SDMA0_GFX_RB_WPTR + SDMA0_REGISTER_OFFSET;
+	else
+		reg = SDMA0_GFX_RB_WPTR + SDMA1_REGISTER_OFFSET;
+
+	return (RREG32(reg) & 0x3fffc) >> 2;
+}
+
+/**
+ * cik_sdma_set_wptr - commit the write pointer
+ *
+ * @rdev: radeon_device pointer
+ * @ring: radeon ring pointer
+ *
+ * Write the wptr back to the hardware (CIK+).
+ */
+void cik_sdma_set_wptr(struct radeon_device *rdev,
+		       struct radeon_ring *ring)
+{
+	u32 reg;
+
+	if (ring->idx == R600_RING_TYPE_DMA_INDEX)
+		reg = SDMA0_GFX_RB_WPTR + SDMA0_REGISTER_OFFSET;
+	else
+		reg = SDMA0_GFX_RB_WPTR + SDMA1_REGISTER_OFFSET;
+
+	WREG32(reg, (ring->wptr << 2) & 0x3fffc);
+}
+
+/**
  * cik_sdma_ring_ib_execute - Schedule an IB on the DMA engine
  *
  * @rdev: radeon_device pointer
@@ -468,7 +537,7 @@ int cik_copy_dma(struct radeon_device *rdev,
 		radeon_ring_write(ring, 0); /* src/dst endian swap */
 		radeon_ring_write(ring, src_offset & 0xffffffff);
 		radeon_ring_write(ring, upper_32_bits(src_offset) & 0xffffffff);
-		radeon_ring_write(ring, dst_offset & 0xfffffffc);
+		radeon_ring_write(ring, dst_offset & 0xffffffff);
 		radeon_ring_write(ring, upper_32_bits(dst_offset) & 0xffffffff);
 		src_offset += cur_size_in_bytes;
 		dst_offset += cur_size_in_bytes;

@@ -4545,7 +4545,7 @@ lpfc_enable_pci_dev(struct lpfc_hba *phba)
 	pci_save_state(pdev);
 
 	/* PCIe EEH recovery on powerpc platforms needs fundamental reset */
-	if (pci_find_capability(pdev, PCI_CAP_ID_EXP))
+	if (pci_is_pcie(pdev))
 		pdev->needs_freset = 1;
 
 	return 0;
@@ -5061,6 +5061,9 @@ lpfc_sli4_driver_resource_setup(struct lpfc_hba *phba)
 
 	/* Set up the hba's configuration parameters. */
 	rc = lpfc_sli4_read_config(phba);
+	if (unlikely(rc))
+		goto out_free_bsmbx;
+	rc = lpfc_mem_alloc_active_rrq_pool_s4(phba);
 	if (unlikely(rc))
 		goto out_free_bsmbx;
 

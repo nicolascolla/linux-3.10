@@ -18,23 +18,23 @@
  */
 #include "xfs.h"
 #include "xfs_fs.h"
-#include "xfs_types.h"
+#include "xfs_format.h"
+#include "xfs_log_format.h"
+#include "xfs_trans_resv.h"
 #include "xfs_bit.h"
-#include "xfs_log.h"
-#include "xfs_trans.h"
 #include "xfs_sb.h"
 #include "xfs_ag.h"
 #include "xfs_mount.h"
+#include "xfs_da_format.h"
 #include "xfs_da_btree.h"
-#include "xfs_bmap_btree.h"
-#include "xfs_dinode.h"
 #include "xfs_inode.h"
-#include "xfs_dir2_format.h"
 #include "xfs_dir2.h"
 #include "xfs_dir2_priv.h"
 #include "xfs_error.h"
 #include "xfs_trace.h"
 #include "xfs_bmap.h"
+#include "xfs_trans.h"
+#include "xfs_dinode.h"
 
 /*
  * Directory file type support functions
@@ -121,9 +121,9 @@ xfs_dir2_sf_getdents(
 	 * mp->m_dirdatablk.
 	 */
 	dot_offset = xfs_dir2_db_off_to_dataptr(mp, mp->m_dirdatablk,
-					     XFS_DIR3_DATA_DOT_OFFSET(mp));
+						dp->d_ops->data_dot_offset);
 	dotdot_offset = xfs_dir2_db_off_to_dataptr(mp, mp->m_dirdatablk,
-						XFS_DIR3_DATA_DOTDOT_OFFSET(mp));
+						dp->d_ops->data_dotdot_offset);
 
 	/*
 	 * Put . entry unless we're starting past it.
@@ -139,7 +139,7 @@ xfs_dir2_sf_getdents(
 	 * Put .. entry unless we're starting past it.
 	 */
 	if (*offset <= dotdot_offset) {
-		ino = xfs_dir2_sf_get_parent_ino(sfp);
+		ino = dp->d_ops->sf_get_parent_ino(sfp);
 		if (filldir(dirent, "..", 2, dotdot_offset & 0x7fffffff, ino, DT_DIR)) {
 			*offset = dotdot_offset & 0x7fffffff;
 			return 0;
@@ -157,19 +157,19 @@ xfs_dir2_sf_getdents(
 				xfs_dir2_sf_get_offset(sfep));
 
 		if (*offset > off) {
-			sfep = xfs_dir3_sf_nextentry(mp, sfp, sfep);
+			sfep = dp->d_ops->sf_nextentry(sfp, sfep);
 			continue;
 		}
 
-		ino = xfs_dir3_sfe_get_ino(mp, sfp, sfep);
-		filetype = xfs_dir3_sfe_get_ftype(mp, sfp, sfep);
+		ino = dp->d_ops->sf_get_ino(sfp, sfep);
+		filetype = dp->d_ops->sf_get_ftype(sfep);
 		if (filldir(dirent, (char *)sfep->name, sfep->namelen,
 			    off & 0x7fffffff, ino,
 			    xfs_dir3_get_dtype(mp, filetype))) {
 			*offset = off & 0x7fffffff;
 			return 0;
 		}
-		sfep = xfs_dir3_sf_nextentry(mp, sfp, sfep);
+		sfep = dp->d_ops->sf_nextentry(sfp, sfep);
 	}
 
 	*offset = xfs_dir2_db_off_to_dataptr(mp, mp->m_dirdatablk + 1, 0) &
@@ -221,7 +221,7 @@ xfs_dir2_block_getdents(
 	 * Set up values for the loop.
 	 */
 	btp = xfs_dir2_block_tail_p(mp, hdr);
-	ptr = (char *)xfs_dir3_data_entry_p(hdr);
+	ptr = (char *)dp->d_ops->data_entry_p(hdr);
 	endptr = (char *)xfs_dir2_block_leaf_p(btp);
 
 	/*
@@ -245,7 +245,7 @@ xfs_dir2_block_getdents(
 		/*
 		 * Bump pointer for the next iteration.
 		 */
-		ptr += xfs_dir3_data_entsize(mp, dep->namelen);
+		ptr += dp->d_ops->data_entsize(dep->namelen);
 		/*
 		 * The entry is before the desired starting point, skip it.
 		 */
@@ -254,7 +254,7 @@ xfs_dir2_block_getdents(
 
 		cook = xfs_dir2_db_off_to_dataptr(mp, mp->m_dirdatablk,
 					    (char *)dep - (char *)hdr);
-		filetype = xfs_dir3_dirent_get_ftype(mp, dep);
+		filetype = dp->d_ops->data_get_ftype(dep);
 
 		/*
 		 * If it didn't fit, set the final offset to here & return.
@@ -588,13 +588,13 @@ xfs_dir2_leaf_getdents(
 			/*
 			 * Find our position in the block.
 			 */
-			ptr = (char *)xfs_dir3_data_entry_p(hdr);
+			ptr = (char *)dp->d_ops->data_entry_p(hdr);
 			byteoff = xfs_dir2_byte_to_off(mp, curoff);
 			/*
 			 * Skip past the header.
 			 */
 			if (byteoff == 0)
-				curoff += xfs_dir3_data_entry_offset(hdr);
+				curoff += dp->d_ops->data_entry_offset;
 			/*
 			 * Skip past entries until we reach our offset.
 			 */
@@ -611,7 +611,7 @@ xfs_dir2_leaf_getdents(
 					}
 					dep = (xfs_dir2_data_entry_t *)ptr;
 					length =
-					   xfs_dir3_data_entsize(mp, dep->namelen);
+					   dp->d_ops->data_entsize(dep->namelen);
 					ptr += length;
 				}
 				/*
@@ -642,8 +642,8 @@ xfs_dir2_leaf_getdents(
 		}
 
 		dep = (xfs_dir2_data_entry_t *)ptr;
-		length = xfs_dir3_data_entsize(mp, dep->namelen);
-		filetype = xfs_dir3_dirent_get_ftype(mp, dep);
+		length = dp->d_ops->data_entsize(dep->namelen);
+		filetype = dp->d_ops->data_get_ftype(dep);
 
 		if (filldir(dirent, (char *)dep->name, dep->namelen,
 			    xfs_dir2_byte_to_dataptr(mp, curoff) & 0x7fffffff,

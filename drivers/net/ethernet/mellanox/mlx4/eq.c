@@ -936,7 +936,6 @@ static int mlx4_create_eq(struct mlx4_dev *dev, int nent,
 	if (err)
 		goto err_out_free_mtt;
 
-	memset(eq_context, 0, sizeof *eq_context);
 	eq_context->flags	  = cpu_to_be32(MLX4_EQ_STATUS_OK   |
 						MLX4_EQ_STATE_ARMED);
 	eq_context->log_eq_size	  = ilog2(eq->nent);
@@ -964,7 +963,7 @@ err_out_free_mtt:
 	mlx4_mtt_cleanup(dev, &eq->mtt);
 
 err_out_free_eq:
-	mlx4_bitmap_free(&priv->eq_table.bitmap, eq->eqn);
+	mlx4_bitmap_free(&priv->eq_table.bitmap, eq->eqn, MLX4_USE_RR);
 
 err_out_free_pages:
 	for (i = 0; i < npages; ++i)
@@ -1019,7 +1018,7 @@ static void mlx4_free_eq(struct mlx4_dev *dev,
 				    eq->page_list[i].map);
 
 	kfree(eq->page_list);
-	mlx4_bitmap_free(&priv->eq_table.bitmap, eq->eqn);
+	mlx4_bitmap_free(&priv->eq_table.bitmap, eq->eqn, MLX4_USE_RR);
 	mlx4_free_cmd_mailbox(dev, mailbox);
 }
 

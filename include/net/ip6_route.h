@@ -133,6 +133,8 @@ extern void ip6_update_pmtu(struct sk_buff *skb, struct net *net, __be32 mtu,
 extern void ip6_sk_update_pmtu(struct sk_buff *skb, struct sock *sk,
 			       __be32 mtu);
 extern void ip6_redirect(struct sk_buff *skb, struct net *net, int oif, u32 mark);
+extern void ip6_redirect_no_header(struct sk_buff *skb, struct net *net, int oif,
+				   u32 mark);
 extern void ip6_sk_redirect(struct sk_buff *skb, struct sock *sk);
 
 struct netlink_callback;
@@ -192,11 +194,9 @@ static inline int ip6_skb_dst_mtu(struct sk_buff *skb)
 	       skb_dst(skb)->dev->mtu : dst_mtu(skb_dst(skb));
 }
 
-static inline struct in6_addr *rt6_nexthop(struct rt6_info *rt, struct in6_addr *dest)
+static inline struct in6_addr *rt6_nexthop(struct rt6_info *rt)
 {
-	if (rt->rt6i_flags & RTF_GATEWAY)
-		return &rt->rt6i_gateway;
-	return dest;
+	return &rt->rt6i_gateway;
 }
 
 #endif

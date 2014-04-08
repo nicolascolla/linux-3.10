@@ -117,7 +117,7 @@ static int hpp__color_##_type(struct perf_hpp_fmt *fmt __maybe_unused,		\
 			      struct perf_hpp *hpp, struct hist_entry *he) 	\
 {										\
 	return __hpp__fmt(hpp, he, he_get_##_field, " %6.2f%%",			\
-			  (hpp_snprint_fn)percent_color_snprintf, true);	\
+			  percent_color_snprintf, true);			\
 }
 
 #define __HPP_ENTRY_PERCENT_FN(_type, _field)					\
@@ -234,46 +234,6 @@ void perf_hpp__column_enable(unsigned col)
 {
 	BUG_ON(col >= PERF_HPP__MAX_INDEX);
 	perf_hpp__column_register(&perf_hpp__format[col]);
-}
-
-static inline void advance_hpp(struct perf_hpp *hpp, int inc)
-{
-	hpp->buf  += inc;
-	hpp->size -= inc;
-}
-
-int hist_entry__period_snprintf(struct perf_hpp *hpp, struct hist_entry *he,
-				bool color)
-{
-	const char *sep = symbol_conf.field_sep;
-	struct perf_hpp_fmt *fmt;
-	char *start = hpp->buf;
-	int ret;
-	bool first = true;
-
-	if (symbol_conf.exclude_other && !he->parent)
-		return 0;
-
-	perf_hpp__for_each_format(fmt) {
-		/*
-		 * If there's no field_sep, we still need
-		 * to display initial '  '.
-		 */
-		if (!sep || !first) {
-			ret = scnprintf(hpp->buf, hpp->size, "%s", sep ?: "  ");
-			advance_hpp(hpp, ret);
-		} else
-			first = false;
-
-		if (color && fmt->color)
-			ret = fmt->color(fmt, hpp, he);
-		else
-			ret = fmt->entry(fmt, hpp, he);
-
-		advance_hpp(hpp, ret);
-	}
-
-	return hpp->buf - start;
 }
 
 int hist_entry__sort_snprintf(struct hist_entry *he, char *s, size_t size,

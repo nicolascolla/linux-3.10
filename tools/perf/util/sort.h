@@ -29,6 +29,8 @@ extern const char *sort_order;
 extern const char default_parent_pattern[];
 extern const char *parent_pattern;
 extern const char default_sort_order[];
+extern regex_t ignore_callees_regex;
+extern int have_ignore_callees;
 extern int sort__need_collapse;
 extern int sort__has_parent;
 extern int sort__has_sym;
@@ -141,6 +143,8 @@ enum sort_type {
 	SORT_PARENT,
 	SORT_CPU,
 	SORT_SRCLINE,
+	SORT_LOCAL_WEIGHT,
+	SORT_GLOBAL_WEIGHT,
 
 	/* branch stack specific sort keys */
 	__SORT_BRANCH_STACK,
@@ -152,9 +156,7 @@ enum sort_type {
 
 	/* memory mode specific sort keys */
 	__SORT_MEMORY_MODE,
-	SORT_LOCAL_WEIGHT = __SORT_MEMORY_MODE,
-	SORT_GLOBAL_WEIGHT,
-	SORT_MEM_DADDR_SYMBOL,
+	SORT_MEM_DADDR_SYMBOL = __SORT_MEMORY_MODE,
 	SORT_MEM_DADDR_DSO,
 	SORT_MEM_LOCKED,
 	SORT_MEM_TLB,
@@ -185,5 +187,7 @@ extern struct list_head hist_entry__sort_list;
 int setup_sorting(void);
 extern int sort_dimension__add(const char *);
 void sort__setup_elide(FILE *fp);
+
+int report_parse_ignore_callees_opt(const struct option *opt, const char *arg, int unset);
 
 #endif	/* __PERF_SORT_H */

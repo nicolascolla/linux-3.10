@@ -64,6 +64,16 @@ struct ip_tunnel {
 	unsigned int		prl_count;	/* # of entries in PRL */
 	int			ip_tnl_net_id;
 	struct gro_cells	gro_cells;
+
+	/* Reserved slots. For Red Hat usage only. */
+	unsigned long rh_reserved1;
+	unsigned long rh_reserved2;
+	unsigned long rh_reserved3;
+	unsigned long rh_reserved4;
+	unsigned long rh_reserved5;
+	unsigned long rh_reserved6;
+	unsigned long rh_reserved7;
+	unsigned long rh_reserved8;
 };
 
 #define TUNNEL_CSUM	__cpu_to_be16(0x01)
@@ -150,6 +160,9 @@ int iptunnel_xmit(struct net *net, struct rtable *rt,
 		  struct sk_buff *skb,
 		  __be32 src, __be32 dst, __u8 proto,
 		  __u8 tos, __u8 ttl, __be16 df);
+
+struct sk_buff *iptunnel_handle_offloads(struct sk_buff *skb, bool gre_csum,
+					 int gso_type_mask);
 
 static inline void iptunnel_xmit_stats(int err,
 				       struct net_device_stats *err_stats,

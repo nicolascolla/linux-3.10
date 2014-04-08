@@ -40,6 +40,7 @@
 #include <net/net_namespace.h>
 #include <net/netns/generic.h>
 #include <net/vxlan.h>
+#include <net/protocol.h>
 #if IS_ENABLED(CONFIG_IPV6)
 #include <net/ipv6.h>
 #include <net/addrconf.h>
@@ -60,10 +61,6 @@
 
 #define VXLAN_N_VID	(1u << 24)
 #define VXLAN_VID_MASK	(VXLAN_N_VID - 1)
-/* IP header + UDP + VXLAN + Ethernet header */
-#define VXLAN_HEADROOM (20 + 8 + 8 + 14)
-/* IPv6 header + UDP + VXLAN + Ethernet header */
-#define VXLAN6_HEADROOM (40 + 8 + 8 + 14)
 #define VXLAN_HLEN (sizeof(struct udphdr) + sizeof(struct vxlanhdr))
 
 #define VXLAN_FLAGS 0x08000000	/* struct vxlanhdr.vx_flags required value. */
@@ -558,6 +555,135 @@ static int vxlan_fdb_append(struct vxlan_fdb *f,
 	return 1;
 }
 
+static struct sk_buff **vxlan_gro_receive(struct sk_buff **head, struct sk_buff *skb)
+{
+	struct sk_buff *p, **pp = NULL;
+	struct vxlanhdr *vh, *vh2;
+	struct ethhdr *eh, *eh2;
+	unsigned int hlen, off_vx, off_eth;
+	const struct packet_offload *ptype;
+	__be16 type;
+	int flush = 1;
+
+	off_vx = skb_gro_offset(skb);
+	hlen = off_vx + sizeof(*vh);
+	vh   = skb_gro_header_fast(skb, off_vx);
+	if (skb_gro_header_hard(skb, hlen)) {
+		vh = skb_gro_header_slow(skb, hlen, off_vx);
+		if (unlikely(!vh))
+			goto out;
+	}
+	skb_gro_pull(skb, sizeof(struct vxlanhdr)); /* pull vxlan header */
+
+	off_eth = skb_gro_offset(skb);
+	hlen = off_eth + sizeof(*eh);
+	eh   = skb_gro_header_fast(skb, off_eth);
+	if (skb_gro_header_hard(skb, hlen)) {
+		eh = skb_gro_header_slow(skb, hlen, off_eth);
+		if (unlikely(!eh))
+			goto out;
+	}
+
+	flush = 0;
+
+	for (p = *head; p; p = p->next) {
+		if (!NAPI_GRO_CB(p)->same_flow)
+			continue;
+
+		vh2 = (struct vxlanhdr *)(p->data + off_vx);
+		eh2 = (struct ethhdr   *)(p->data + off_eth);
+		if (vh->vx_vni != vh2->vx_vni || compare_ether_header(eh, eh2)) {
+			NAPI_GRO_CB(p)->same_flow = 0;
+			continue;
+		}
+	}
+
+	type = eh->h_proto;
+
+	rcu_read_lock();
+	ptype = gro_find_receive_by_type(type);
+	if (ptype == NULL) {
+		flush = 1;
+		goto out_unlock;
+	}
+
+	skb_gro_pull(skb, sizeof(*eh)); /* pull inner eth header */
+	pp = ptype->callbacks.gro_receive(head, skb);
+
+out_unlock:
+	rcu_read_unlock();
+out:
+	NAPI_GRO_CB(skb)->flush |= flush;
+
+	return pp;
+}
+
+static int vxlan_gro_complete(struct sk_buff *skb, int nhoff)
+{
+	struct ethhdr *eh;
+	struct packet_offload *ptype;
+	__be16 type;
+	int vxlan_len  = sizeof(struct vxlanhdr) + sizeof(struct ethhdr);
+	int err = -ENOSYS;
+
+	eh = (struct ethhdr *)(skb->data + nhoff + sizeof(struct vxlanhdr));
+	type = eh->h_proto;
+
+	rcu_read_lock();
+	ptype = gro_find_complete_by_type(type);
+	if (ptype != NULL)
+		err = ptype->callbacks.gro_complete(skb, nhoff + vxlan_len);
+
+	rcu_read_unlock();
+	return err;
+}
+
+/* Notify netdevs that UDP port started listening */
+static void vxlan_notify_add_rx_port(struct vxlan_sock *vs)
+{
+	struct net_device *dev;
+	struct sock *sk = vs->sock->sk;
+	struct net *net = sock_net(sk);
+	sa_family_t sa_family = sk->sk_family;
+	__be16 port = inet_sk(sk)->inet_sport;
+	int err;
+
+	if (sa_family == AF_INET) {
+		err = udp_add_offload(&vs->udp_offloads);
+		if (err)
+			pr_warn("vxlan: udp_add_offload failed with status %d\n", err);
+	}
+
+	rcu_read_lock();
+	for_each_netdev_rcu(net, dev) {
+		if (dev->netdev_ops->ndo_add_vxlan_port)
+			dev->netdev_ops->ndo_add_vxlan_port(dev, sa_family,
+							    port);
+	}
+	rcu_read_unlock();
+}
+
+/* Notify netdevs that UDP port is no more listening */
+static void vxlan_notify_del_rx_port(struct vxlan_sock *vs)
+{
+	struct net_device *dev;
+	struct sock *sk = vs->sock->sk;
+	struct net *net = sock_net(sk);
+	sa_family_t sa_family = sk->sk_family;
+	__be16 port = inet_sk(sk)->inet_sport;
+
+	rcu_read_lock();
+	for_each_netdev_rcu(net, dev) {
+		if (dev->netdev_ops->ndo_del_vxlan_port)
+			dev->netdev_ops->ndo_del_vxlan_port(dev, sa_family,
+							    port);
+	}
+	rcu_read_unlock();
+
+	if (sa_family == AF_INET)
+		udp_del_offload(&vs->udp_offloads);
+}
+
 /* Add new entry to forwarding table -- assumes lock held */
 static int vxlan_fdb_create(struct vxlan_dev *vxlan,
 			    const u8 *mac, union vxlan_addr *ip,
@@ -717,10 +843,9 @@ static int vxlan_fdb_parse(struct nlattr *tb[], struct vxlan_dev *vxlan,
 		if (nla_len(tb[NDA_IFINDEX]) != sizeof(u32))
 			return -EINVAL;
 		*ifindex = nla_get_u32(tb[NDA_IFINDEX]);
-		tdev = dev_get_by_index(net, *ifindex);
+		tdev = __dev_get_by_index(net, *ifindex);
 		if (!tdev)
 			return -EADDRNOTAVAIL;
-		dev_put(tdev);
 	} else {
 		*ifindex = 0;
 	}
@@ -915,13 +1040,17 @@ static void vxlan_sock_hold(struct vxlan_sock *vs)
 
 void vxlan_sock_release(struct vxlan_sock *vs)
 {
-	struct vxlan_net *vn = net_generic(sock_net(vs->sock->sk), vxlan_net_id);
+	struct sock *sk = vs->sock->sk;
+	struct net *net = sock_net(sk);
+	struct vxlan_net *vn = net_generic(net, vxlan_net_id);
 
 	if (!atomic_dec_and_test(&vs->refcnt))
 		return;
 
 	spin_lock(&vn->sock_lock);
 	hlist_del_rcu(&vs->hlist);
+	rcu_assign_sk_user_data(vs->sock->sk, NULL);
+	vxlan_notify_del_rx_port(vs);
 	spin_unlock(&vn->sock_lock);
 
 	queue_work(vxlan_wq, &vs->del_work);
@@ -1015,9 +1144,19 @@ static int vxlan_udp_encap_recv(struct sock *sk, struct sk_buff *skb)
 
 	port = inet_sk(sk)->inet_sport;
 
-	vs = vxlan_find_sock(sock_net(sk), port);
+	vs = rcu_dereference_sk_user_data(sk);
 	if (!vs)
 		goto drop;
+
+	/* If the NIC driver gave us an encapsulated packet
+	 * with the encapsulation mark, the device checksummed it
+	 * for us. Otherwise force the upper layers to verify it.
+	 */
+	if ((skb->ip_summed != CHECKSUM_UNNECESSARY && skb->ip_summed != CHECKSUM_PARTIAL) ||
+	    !skb->encapsulation)
+		skb->ip_summed = CHECKSUM_NONE;
+
+	skb->encapsulation = 0;
 
 	vs->rcv(vs, skb, vxh->vx_vni);
 	return 0;
@@ -1077,17 +1216,6 @@ static void vxlan_rcv(struct vxlan_sock *vs,
 		goto drop;
 
 	skb_reset_network_header(skb);
-
-	/* If the NIC driver gave us an encapsulated packet with
-	 * CHECKSUM_UNNECESSARY and Rx checksum feature is enabled,
-	 * leave the CHECKSUM_UNNECESSARY, the device checksummed it
-	 * for us. Otherwise force the upper layers to verify it.
-	 */
-	if (skb->ip_summed != CHECKSUM_UNNECESSARY || !skb->encapsulation ||
-	    !(vxlan->dev->features & NETIF_F_RXCSUM))
-		skb->ip_summed = CHECKSUM_NONE;
-
-	skb->encapsulation = 0;
 
 	if (oip6)
 		err = IP6_ECN_decapsulate(oip6, skb);
@@ -1339,20 +1467,6 @@ static bool route_shortcircuit(struct net_device *dev, struct sk_buff *skb)
 	return false;
 }
 
-static void vxlan_sock_put(struct sk_buff *skb)
-{
-	sock_put(skb->sk);
-}
-
-/* On transmit, associate with the tunnel socket */
-static void vxlan_set_owner(struct sock *sk, struct sk_buff *skb)
-{
-	skb_orphan(skb);
-	sock_hold(sk);
-	skb->sk = sk;
-	skb->destructor = vxlan_sock_put;
-}
-
 /* Compute source port for outgoing packet
  *   first choice to use L4 flow hash since it will spread
  *     better and maybe available from hardware
@@ -1471,8 +1585,6 @@ static int vxlan6_xmit_skb(struct net *net, struct vxlan_sock *vs,
 	ip6h->daddr	  = *daddr;
 	ip6h->saddr	  = *saddr;
 
-	vxlan_set_owner(vs->sock->sk, skb);
-
 	err = handle_offloads(skb);
 	if (err)
 		return err;
@@ -1528,8 +1640,6 @@ int vxlan_xmit_skb(struct net *net, struct vxlan_sock *vs,
 
 	uh->len = htons(skb->len);
 	uh->check = 0;
-
-	vxlan_set_owner(vs->sock->sk, skb);
 
 	err = handle_offloads(skb);
 	if (err)
@@ -1640,7 +1750,7 @@ static void vxlan_xmit_one(struct sk_buff *skb, struct net_device *dev,
 			netdev_dbg(dev, "circular route to %pI4\n",
 				   &dst->sin.sin_addr.s_addr);
 			dev->stats.collisions++;
-			goto tx_error;
+			goto rt_tx_error;
 		}
 
 		/* Bypass encapsulation if the destination is local */
@@ -1742,7 +1852,7 @@ static netdev_tx_t vxlan_xmit(struct sk_buff *skb, struct net_device *dev)
 	struct vxlan_dev *vxlan = netdev_priv(dev);
 	struct ethhdr *eth;
 	bool did_rsc = false;
-	struct vxlan_rdst *rdst;
+	struct vxlan_rdst *rdst, *fdst = NULL;
 	struct vxlan_fdb *f;
 
 	skb_reset_mac_header(skb);
@@ -1784,7 +1894,7 @@ static netdev_tx_t vxlan_xmit(struct sk_buff *skb, struct net_device *dev)
 				vxlan_fdb_miss(vxlan, eth->h_dest);
 
 			dev->stats.tx_dropped++;
-			dev_kfree_skb(skb);
+			kfree_skb(skb);
 			return NETDEV_TX_OK;
 		}
 	}
@@ -1792,12 +1902,19 @@ static netdev_tx_t vxlan_xmit(struct sk_buff *skb, struct net_device *dev)
 	list_for_each_entry_rcu(rdst, &f->remotes, list) {
 		struct sk_buff *skb1;
 
+		if (!fdst) {
+			fdst = rdst;
+			continue;
+		}
 		skb1 = skb_clone(skb, GFP_ATOMIC);
 		if (skb1)
 			vxlan_xmit_one(skb1, dev, rdst, did_rsc);
 	}
 
-	dev_kfree_skb(skb);
+	if (fdst)
+		vxlan_xmit_one(skb, dev, fdst, did_rsc);
+	else
+		kfree_skb(skb);
 	return NETDEV_TX_OK;
 }
 
@@ -1899,7 +2016,6 @@ static void vxlan_uninit(struct net_device *dev)
 /* Start ageing timer and join group when device is brought up */
 static int vxlan_open(struct net_device *dev)
 {
-	struct vxlan_net *vn = net_generic(dev_net(dev), vxlan_net_id);
 	struct vxlan_dev *vxlan = netdev_priv(dev);
 	struct vxlan_sock *vs = vxlan->vn_sock;
 
@@ -1907,8 +2023,7 @@ static int vxlan_open(struct net_device *dev)
 	if (!vs)
 		return -ENOTCONN;
 
-	if (vxlan_addr_multicast(&vxlan->default_dst.remote_ip) &&
-	    vxlan_group_used(vn, &vxlan->default_dst.remote_ip)) {
+	if (vxlan_addr_multicast(&vxlan->default_dst.remote_ip)) {
 		vxlan_sock_hold(vs);
 		dev_hold(dev);
 		queue_work(vxlan_wq, &vxlan->igmp_join);
@@ -1965,6 +2080,29 @@ static void vxlan_set_multicast_list(struct net_device *dev)
 {
 }
 
+static int vxlan_change_mtu(struct net_device *dev, int new_mtu)
+{
+	struct vxlan_dev *vxlan = netdev_priv(dev);
+	struct vxlan_rdst *dst = &vxlan->default_dst;
+	struct net_device *lowerdev;
+	int max_mtu;
+
+	lowerdev = __dev_get_by_index(dev_net(dev), dst->remote_ifindex);
+	if (lowerdev == NULL)
+		return eth_change_mtu(dev, new_mtu);
+
+	if (dst->remote_ip.sa.sa_family == AF_INET6)
+		max_mtu = lowerdev->mtu - VXLAN6_HEADROOM;
+	else
+		max_mtu = lowerdev->mtu - VXLAN_HEADROOM;
+
+	if (new_mtu < 68 || new_mtu > max_mtu)
+		return -EINVAL;
+
+	dev->mtu = new_mtu;
+	return 0;
+}
+
 static const struct net_device_ops vxlan_netdev_ops = {
 	.ndo_init		= vxlan_init,
 	.ndo_uninit		= vxlan_uninit,
@@ -1973,7 +2111,7 @@ static const struct net_device_ops vxlan_netdev_ops = {
 	.ndo_start_xmit		= vxlan_xmit,
 	.ndo_get_stats64	= ip_tunnel_get_stats64,
 	.ndo_set_rx_mode	= vxlan_set_multicast_list,
-	.ndo_change_mtu		= eth_change_mtu,
+	.ndo_change_mtu		= vxlan_change_mtu,
 	.ndo_validate_addr	= eth_validate_addr,
 	.ndo_set_mac_address	= eth_mac_addr,
 	.ndo_fdb_add		= vxlan_fdb_add,
@@ -1985,6 +2123,32 @@ static const struct net_device_ops vxlan_netdev_ops = {
 static struct device_type vxlan_type = {
 	.name = "vxlan",
 };
+
+/* Calls the ndo_add_vxlan_port of the caller in order to
+ * supply the listening VXLAN udp ports. Callers are expected
+ * to implement the ndo_add_vxlan_port.
+ */
+void vxlan_get_rx_port(struct net_device *dev)
+{
+	struct vxlan_sock *vs;
+	struct net *net = dev_net(dev);
+	struct vxlan_net *vn = net_generic(net, vxlan_net_id);
+	sa_family_t sa_family;
+	__be16 port;
+	unsigned int i;
+
+	spin_lock(&vn->sock_lock);
+	for (i = 0; i < PORT_HASH_SIZE; ++i) {
+		hlist_for_each_entry_rcu(vs, &vn->sock_list[i], hlist) {
+			port = inet_sk(vs->sock->sk)->inet_sport;
+			sa_family = vs->sock->sk->sk_family;
+			dev->netdev_ops->ndo_add_vxlan_port(dev, sa_family,
+							    port);
+		}
+	}
+	spin_unlock(&vn->sock_lock);
+}
+EXPORT_SYMBOL_GPL(vxlan_get_rx_port);
 
 /* Initialize the device structure. */
 static void vxlan_setup(struct net_device *dev)
@@ -2122,7 +2286,7 @@ static void vxlan_del_work(struct work_struct *work)
  * could be used for both IPv4 and IPv6 communications, but
  * users may set bindv6only=1.
  */
-static int create_v6_sock(struct net *net, __be16 port, struct socket **psock)
+static struct socket *create_v6_sock(struct net *net, __be16 port)
 {
 	struct sock *sk;
 	struct socket *sock;
@@ -2135,7 +2299,7 @@ static int create_v6_sock(struct net *net, __be16 port, struct socket **psock)
 	rc = sock_create_kern(AF_INET6, SOCK_DGRAM, IPPROTO_UDP, &sock);
 	if (rc < 0) {
 		pr_debug("UDPv6 socket create failed\n");
-		return rc;
+		return ERR_PTR(rc);
 	}
 
 	/* Put in proper namespace */
@@ -2150,28 +2314,27 @@ static int create_v6_sock(struct net *net, __be16 port, struct socket **psock)
 		pr_debug("bind for UDPv6 socket %pI6:%u (%d)\n",
 			 &vxlan_addr.sin6_addr, ntohs(vxlan_addr.sin6_port), rc);
 		sk_release_kernel(sk);
-		return rc;
+		return ERR_PTR(rc);
 	}
 	/* At this point, IPv6 module should have been loaded in
 	 * sock_create_kern().
 	 */
 	BUG_ON(!ipv6_stub);
 
-	*psock = sock;
 	/* Disable multicast loopback */
 	inet_sk(sk)->mc_loop = 0;
-	return 0;
+	return sock;
 }
 
 #else
 
-static int create_v6_sock(struct net *net, __be16 port, struct socket **psock)
+static struct socket *create_v6_sock(struct net *net, __be16 port)
 {
-		return -EPFNOSUPPORT;
+		return ERR_PTR(-EPFNOSUPPORT);
 }
 #endif
 
-static int create_v4_sock(struct net *net, __be16 port, struct socket **psock)
+static struct socket *create_v4_sock(struct net *net, __be16 port)
 {
 	struct sock *sk;
 	struct socket *sock;
@@ -2186,7 +2349,7 @@ static int create_v4_sock(struct net *net, __be16 port, struct socket **psock)
 	rc = sock_create_kern(AF_INET, SOCK_DGRAM, IPPROTO_UDP, &sock);
 	if (rc < 0) {
 		pr_debug("UDP socket create failed\n");
-		return rc;
+		return ERR_PTR(rc);
 	}
 
 	/* Put in proper namespace */
@@ -2199,13 +2362,12 @@ static int create_v4_sock(struct net *net, __be16 port, struct socket **psock)
 		pr_debug("bind for UDP socket %pI4:%u (%d)\n",
 			 &vxlan_addr.sin_addr, ntohs(vxlan_addr.sin_port), rc);
 		sk_release_kernel(sk);
-		return rc;
+		return ERR_PTR(rc);
 	}
 
-	*psock = sock;
 	/* Disable multicast loopback */
 	inet_sk(sk)->mc_loop = 0;
-	return 0;
+	return sock;
 }
 
 /* Create new listen socket if needed */
@@ -2216,10 +2378,9 @@ static struct vxlan_sock *vxlan_socket_create(struct net *net, __be16 port,
 	struct vxlan_sock *vs;
 	struct socket *sock;
 	struct sock *sk;
-	int rc = 0;
 	unsigned int h;
 
-	vs = kmalloc(sizeof(*vs), GFP_KERNEL);
+	vs = kzalloc(sizeof(*vs), GFP_KERNEL);
 	if (!vs)
 		return ERR_PTR(-ENOMEM);
 
@@ -2229,12 +2390,12 @@ static struct vxlan_sock *vxlan_socket_create(struct net *net, __be16 port,
 	INIT_WORK(&vs->del_work, vxlan_del_work);
 
 	if (ipv6)
-		rc = create_v6_sock(net, port, &sock);
+		sock = create_v6_sock(net, port);
 	else
-		rc = create_v4_sock(net, port, &sock);
-	if (rc < 0) {
+		sock = create_v4_sock(net, port);
+	if (IS_ERR(sock)) {
 		kfree(vs);
-		return ERR_PTR(rc);
+		return ERR_CAST(sock);
 	}
 
 	vs->sock = sock;
@@ -2242,9 +2403,16 @@ static struct vxlan_sock *vxlan_socket_create(struct net *net, __be16 port,
 	atomic_set(&vs->refcnt, 1);
 	vs->rcv = rcv;
 	vs->data = data;
+	rcu_assign_sk_user_data(vs->sock->sk, vs);
+
+	/* Initialize the vxlan udp offloads structure */
+	vs->udp_offloads.port = port;
+	vs->udp_offloads.callbacks.gro_receive  = vxlan_gro_receive;
+	vs->udp_offloads.callbacks.gro_complete = vxlan_gro_complete;
 
 	spin_lock(&vn->sock_lock);
 	hlist_add_head_rcu(&vs->hlist, vs_head(net, port));
+	vxlan_notify_add_rx_port(vs);
 	spin_unlock(&vn->sock_lock);
 
 	/* Mark socket as an encapsulation socket. */
@@ -2379,7 +2547,8 @@ static int vxlan_newlink(struct net *net, struct net_device *dev,
 		/* update header length based on lower device */
 		dev->hard_header_len = lowerdev->hard_header_len +
 				       (use_ipv6 ? VXLAN6_HEADROOM : VXLAN_HEADROOM);
-	}
+	} else if (use_ipv6)
+		vxlan->flags |= VXLAN_F_IPV6;
 
 	if (data[IFLA_VXLAN_TOS])
 		vxlan->tos  = nla_get_u8(data[IFLA_VXLAN_TOS]);
@@ -2427,15 +2596,19 @@ static int vxlan_newlink(struct net *net, struct net_device *dev,
 
 	SET_ETHTOOL_OPS(dev, &vxlan_ethtool_ops);
 
-	/* create an fdb entry for default destination */
-	err = vxlan_fdb_create(vxlan, all_zeros_mac,
-			       &vxlan->default_dst.remote_ip,
-			       NUD_REACHABLE|NUD_PERMANENT,
-			       NLM_F_EXCL|NLM_F_CREATE,
-			       vxlan->dst_port, vxlan->default_dst.remote_vni,
-			       vxlan->default_dst.remote_ifindex, NTF_SELF);
-	if (err)
-		return err;
+	/* create an fdb entry for a valid default destination */
+	if (!vxlan_addr_any(&vxlan->default_dst.remote_ip)) {
+		err = vxlan_fdb_create(vxlan, all_zeros_mac,
+				       &vxlan->default_dst.remote_ip,
+				       NUD_REACHABLE|NUD_PERMANENT,
+				       NLM_F_EXCL|NLM_F_CREATE,
+				       vxlan->dst_port,
+				       vxlan->default_dst.remote_vni,
+				       vxlan->default_dst.remote_ifindex,
+				       NTF_SELF);
+		if (err)
+			return err;
+	}
 
 	err = register_netdevice(dev);
 	if (err) {

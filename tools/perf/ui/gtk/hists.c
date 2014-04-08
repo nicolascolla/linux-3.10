@@ -109,8 +109,6 @@ __HPP_COLOR_PERCENT_FN(overhead_guest_us, period_guest_us)
 
 void perf_gtk__init_hpp(void)
 {
-	perf_hpp__column_enable(PERF_HPP__OVERHEAD);
-
 	perf_hpp__init();
 
 	perf_hpp__format[PERF_HPP__OVERHEAD].color =
@@ -125,6 +123,81 @@ void perf_gtk__init_hpp(void)
 				perf_gtk__hpp_color_overhead_guest_us;
 }
 
+static void callchain_list__sym_name(struct callchain_list *cl,
+				     char *bf, size_t bfsize)
+{
+	if (cl->ms.sym)
+		scnprintf(bf, bfsize, "%s", cl->ms.sym->name);
+	else
+		scnprintf(bf, bfsize, "%#" PRIx64, cl->ip);
+}
+
+static void perf_gtk__add_callchain(struct rb_root *root, GtkTreeStore *store,
+				    GtkTreeIter *parent, int col, u64 total)
+{
+	struct rb_node *nd;
+	bool has_single_node = (rb_first(root) == rb_last(root));
+
+	for (nd = rb_first(root); nd; nd = rb_next(nd)) {
+		struct callchain_node *node;
+		struct callchain_list *chain;
+		GtkTreeIter iter, new_parent;
+		bool need_new_parent;
+		double percent;
+		u64 hits, child_total;
+
+		node = rb_entry(nd, struct callchain_node, rb_node);
+
+		hits = callchain_cumul_hits(node);
+		percent = 100.0 * hits / total;
+
+		new_parent = *parent;
+		need_new_parent = !has_single_node && (node->val_nr > 1);
+
+		list_for_each_entry(chain, &node->val, list) {
+			char buf[128];
+
+			gtk_tree_store_append(store, &iter, &new_parent);
+
+			scnprintf(buf, sizeof(buf), "%5.2f%%", percent);
+			gtk_tree_store_set(store, &iter, 0, buf, -1);
+
+			callchain_list__sym_name(chain, buf, sizeof(buf));
+			gtk_tree_store_set(store, &iter, col, buf, -1);
+
+			if (need_new_parent) {
+				/*
+				 * Only show the top-most symbol in a callchain
+				 * if it's not the only callchain.
+				 */
+				new_parent = iter;
+				need_new_parent = false;
+			}
+		}
+
+		if (callchain_param.mode == CHAIN_GRAPH_REL)
+			child_total = node->children_hit;
+		else
+			child_total = total;
+
+		/* Now 'iter' contains info of the last callchain_list */
+		perf_gtk__add_callchain(&node->rb_root, store, &iter, col,
+					child_total);
+	}
+}
+
+static void on_row_activated(GtkTreeView *view, GtkTreePath *path,
+			     GtkTreeViewColumn *col __maybe_unused,
+			     gpointer user_data __maybe_unused)
+{
+	bool expanded = gtk_tree_view_row_expanded(view, path);
+
+	if (expanded)
+		gtk_tree_view_collapse_row(view, path);
+	else
+		gtk_tree_view_expand_row(view, path, FALSE);
+}
+
 static void perf_gtk__show_hists(GtkWidget *window, struct hists *hists,
 				 float min_pcnt)
 {
@@ -132,10 +205,11 @@ static void perf_gtk__show_hists(GtkWidget *window, struct hists *hists,
 	GType col_types[MAX_COLUMNS];
 	GtkCellRenderer *renderer;
 	struct sort_entry *se;
-	GtkListStore *store;
+	GtkTreeStore *store;
 	struct rb_node *nd;
 	GtkWidget *view;
 	int col_idx;
+	int sym_col = -1;
 	int nr_cols;
 	char s[512];
 
@@ -154,10 +228,13 @@ static void perf_gtk__show_hists(GtkWidget *window, struct hists *hists,
 		if (se->elide)
 			continue;
 
+		if (se == &sort_sym)
+			sym_col = nr_cols;
+
 		col_types[nr_cols++] = G_TYPE_STRING;
 	}
 
-	store = gtk_list_store_newv(nr_cols, col_types);
+	store = gtk_tree_store_newv(nr_cols, col_types);
 
 	view = gtk_tree_view_new();
 
@@ -184,6 +261,18 @@ static void perf_gtk__show_hists(GtkWidget *window, struct hists *hists,
 							    col_idx++, NULL);
 	}
 
+	for (col_idx = 0; col_idx < nr_cols; col_idx++) {
+		GtkTreeViewColumn *column;
+
+		column = gtk_tree_view_get_column(GTK_TREE_VIEW(view), col_idx);
+		gtk_tree_view_column_set_resizable(column, TRUE);
+
+		if (col_idx == sym_col) {
+			gtk_tree_view_set_expander_column(GTK_TREE_VIEW(view),
+							  column);
+		}
+	}
+
 	gtk_tree_view_set_model(GTK_TREE_VIEW(view), GTK_TREE_MODEL(store));
 
 	g_object_unref(GTK_TREE_MODEL(store));
@@ -200,7 +289,7 @@ static void perf_gtk__show_hists(GtkWidget *window, struct hists *hists,
 		if (percent < min_pcnt)
 			continue;
 
-		gtk_list_store_append(store, &iter);
+		gtk_tree_store_append(store, &iter, NULL);
 
 		col_idx = 0;
 
@@ -210,7 +299,7 @@ static void perf_gtk__show_hists(GtkWidget *window, struct hists *hists,
 			else
 				fmt->entry(fmt, &hpp, h);
 
-			gtk_list_store_set(store, &iter, col_idx++, s, -1);
+			gtk_tree_store_set(store, &iter, col_idx++, s, -1);
 		}
 
 		list_for_each_entry(se, &hist_entry__sort_list, list) {
@@ -220,10 +309,26 @@ static void perf_gtk__show_hists(GtkWidget *window, struct hists *hists,
 			se->se_snprintf(h, s, ARRAY_SIZE(s),
 					hists__col_len(hists, se->se_width_idx));
 
-			gtk_list_store_set(store, &iter, col_idx++, s, -1);
+			gtk_tree_store_set(store, &iter, col_idx++, s, -1);
+		}
+
+		if (symbol_conf.use_callchain && sort__has_sym) {
+			u64 total;
+
+			if (callchain_param.mode == CHAIN_GRAPH_REL)
+				total = h->stat.period;
+			else
+				total = hists->stats.total_period;
+
+			perf_gtk__add_callchain(&h->sorted_chain, store, &iter,
+						sym_col, total);
 		}
 	}
 
+	gtk_tree_view_set_rules_hint(GTK_TREE_VIEW(view), TRUE);
+
+	g_signal_connect(view, "row-activated",
+			 G_CALLBACK(on_row_activated), NULL);
 	gtk_container_add(GTK_CONTAINER(window), view);
 }
 

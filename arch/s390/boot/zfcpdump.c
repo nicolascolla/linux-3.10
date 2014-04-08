@@ -321,7 +321,9 @@ static int mount_dump_device(void)
 		return 0;
 	if (mount(dump_part, DUMP_DIR, "ext3", 0, NULL) == 0)
 		return 0;
-	if (mount(dump_part, DUMP_DIR, "ext2", 0, NULL) != 0) {
+	if (mount(dump_part, DUMP_DIR, "ext2", 0, NULL) == 0)
+		return 0;
+	if (mount(dump_part, DUMP_DIR, "xfs", 0, NULL) != 0) {
 		PRINT_PERR("mount failed\n");
 		return -1;
 	}

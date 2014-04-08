@@ -843,8 +843,8 @@ static void __init trim_low_memory_range(void)
 static void rh_check_supported(void)
 {
 	/* RHEL7 supports single cpu on guests only */
-	if ((cpumask_weight(cpu_present_mask) == 1) && !x86_hyper &&
-	    !cpu_has_hypervisor && !is_kdump_kernel()) {
+	if (((boot_cpu_data.x86_max_cores * smp_num_siblings) == 1) &&
+	    !x86_hyper && !cpu_has_hypervisor && !is_kdump_kernel()) {
 		pr_crit("Detected single cpu native boot.\n");
 		pr_crit("Important:  In Red Hat Enterprise Linux 7, single threaded, single CPU 64-bit physical systems are unsupported by Red Hat. Please contact your Red Hat support representative for a list of certified and supported systems.");
 	}
@@ -860,6 +860,36 @@ static void rh_check_supported(void)
 			boot_cpu_data.x86_model_id);
 		mark_hardware_unsupported("Processor");
 	}
+
+	/* Intel CPU family 6, model greater than 60 */
+	if ((boot_cpu_data.x86_vendor == X86_VENDOR_INTEL) &&
+	    ((boot_cpu_data.x86 == 6))) {
+		switch (boot_cpu_data.x86_model) {
+		case 77: /* Atom Avoton */
+		case 70: /* Crystal Well */
+		case 63: /* Grantley/Haswell EP */
+		case 62: /* Ivy Town */
+			break;
+		default:
+			if (boot_cpu_data.x86_model > 60) {
+				printk(KERN_CRIT
+				       "Detected CPU family %d model %d\n",
+				       boot_cpu_data.x86,
+				       boot_cpu_data.x86_model);
+				mark_hardware_unsupported("Intel CPU model");
+			}
+			break;
+		}
+	}
+
+	/*
+	 * Due to the complexity of x86 lapic & ioapic enumeration, and PCI IRQ
+	 * routing, ACPI is required for x86.  acpi=off is a valid debug kernel
+	 * parameter, so just print out a loud warning in case something
+	 * goes wrong (which is most of the time).
+	 */
+	if (acpi_disabled && !x86_hyper && !cpu_has_hypervisor)
+		pr_crit("ACPI has been disabled or is not available on this hardware.  This may result in a single cpu boot, incorrect PCI IRQ routing, or boot failure.\n");
 }
 
 /*

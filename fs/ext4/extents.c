@@ -1705,7 +1705,8 @@ static void ext4_ext_try_to_merge_up(handle_t *handle,
 
 	brelse(path[1].p_bh);
 	ext4_free_blocks(handle, inode, NULL, blk, 1,
-			 EXT4_FREE_BLOCKS_METADATA | EXT4_FREE_BLOCKS_FORGET);
+			 EXT4_FREE_BLOCKS_METADATA | EXT4_FREE_BLOCKS_FORGET |
+			 EXT4_FREE_BLOCKS_RESERVE);
 }
 
 /*
@@ -2125,7 +2126,8 @@ static int ext4_fill_fiemap_extents(struct inode *inode,
 		next_del = ext4_find_delayed_extent(inode, &es);
 		if (!exists && next_del) {
 			exists = 1;
-			flags |= FIEMAP_EXTENT_DELALLOC;
+			flags |= (FIEMAP_EXTENT_DELALLOC |
+				  FIEMAP_EXTENT_UNKNOWN);
 		}
 		up_read(&EXT4_I(inode)->i_data_sem);
 
@@ -2194,8 +2196,8 @@ ext4_ext_put_gap_in_cache(struct inode *inode, struct ext4_ext_path *path,
 				ext4_lblk_t block)
 {
 	int depth = ext_depth(inode);
-	unsigned long len;
-	ext4_lblk_t lblock;
+	unsigned long len = 0;
+	ext4_lblk_t lblock = 0;
 	struct ext4_extent *ex;
 
 	ex = path[depth].p_ext;
@@ -2232,7 +2234,6 @@ ext4_ext_put_gap_in_cache(struct inode *inode, struct ext4_ext_path *path,
 			ext4_es_insert_extent(inode, lblock, len, ~0,
 					      EXTENT_STATUS_HOLE);
 	} else {
-		lblock = len = 0;
 		BUG();
 	}
 
@@ -2813,6 +2814,9 @@ again:
 				err = -EIO;
 				break;
 			}
+			/* Yield here to deal with large extent trees.
+			 * Should be a no-op if we did IO above. */
+			cond_resched();
 			if (WARN_ON(i + 1 > depth)) {
 				err = -EIO;
 				break;
@@ -4363,7 +4367,7 @@ out2:
 	}
 
 out3:
-	trace_ext4_ext_map_blocks_exit(inode, map, err ? err : allocated);
+	trace_ext4_ext_map_blocks_exit(inode, flags, map, err ? err : allocated);
 
 	return err ? err : allocated;
 }
@@ -4452,6 +4456,13 @@ long ext4_fallocate(struct file *file, int mode, loff_t offset, loff_t len)
 	struct ext4_map_blocks map;
 	unsigned int credits, blkbits = inode->i_blkbits;
 
+	/*
+	 * currently supporting (pre)allocate mode for extent-based
+	 * files _only_
+	 */
+	if (!(ext4_test_inode_flag(inode, EXT4_INODE_EXTENTS)))
+		return -EOPNOTSUPP;
+
 	/* Return error if mode is not supported */
 	if (mode & ~(FALLOC_FL_KEEP_SIZE | FALLOC_FL_PUNCH_HOLE))
 		return -EOPNOTSUPP;
@@ -4462,13 +4473,6 @@ long ext4_fallocate(struct file *file, int mode, loff_t offset, loff_t len)
 	ret = ext4_convert_inline_data(inode);
 	if (ret)
 		return ret;
-
-	/*
-	 * currently supporting (pre)allocate mode for extent-based
-	 * files _only_
-	 */
-	if (!(ext4_test_inode_flag(inode, EXT4_INODE_EXTENTS)))
-		return -EOPNOTSUPP;
 
 	trace_ext4_fallocate_enter(inode, offset, len, mode);
 	map.m_lblk = offset >> blkbits;

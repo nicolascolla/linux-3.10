@@ -218,7 +218,6 @@ int btrfs_check_trunc_cache_free_space(struct btrfs_root *root,
 
 int btrfs_truncate_free_space_cache(struct btrfs_root *root,
 				    struct btrfs_trans_handle *trans,
-				    struct btrfs_path *path,
 				    struct inode *inode)
 {
 	loff_t oldsize;
@@ -1011,8 +1010,13 @@ static int __btrfs_write_out_cache(struct btrfs_root *root, struct inode *inode,
 	if (ret)
 		goto out;
 
-
-	btrfs_wait_ordered_range(inode, 0, (u64)-1);
+	ret = btrfs_wait_ordered_range(inode, 0, (u64)-1);
+	if (ret) {
+		clear_extent_bit(&BTRFS_I(inode)->io_tree, 0, inode->i_size - 1,
+				 EXTENT_DIRTY | EXTENT_DELALLOC, 0, 0, NULL,
+				 GFP_NOFS);
+		goto out;
+	}
 
 	key.objectid = BTRFS_FREE_SPACE_OBJECTID;
 	key.offset = offset;
@@ -2278,7 +2282,7 @@ u64 btrfs_alloc_from_cluster(struct btrfs_block_group_cache *block_group,
 		goto out;
 
 	entry = rb_entry(node, struct btrfs_free_space, offset_index);
-	while(1) {
+	while (1) {
 		if (entry->bytes < bytes && entry->bytes > *max_extent_size)
 			*max_extent_size = entry->bytes;
 
@@ -2969,17 +2973,13 @@ out:
 
 int btrfs_write_out_ino_cache(struct btrfs_root *root,
 			      struct btrfs_trans_handle *trans,
-			      struct btrfs_path *path)
+			      struct btrfs_path *path,
+			      struct inode *inode)
 {
 	struct btrfs_free_space_ctl *ctl = root->free_ino_ctl;
-	struct inode *inode;
 	int ret;
 
 	if (!btrfs_test_opt(root, INODE_MAP_CACHE))
-		return 0;
-
-	inode = lookup_free_ino_inode(root, path);
-	if (IS_ERR(inode))
 		return 0;
 
 	ret = __btrfs_write_out_cache(root, inode, ctl, NULL, trans, path, 0);
@@ -2992,7 +2992,6 @@ int btrfs_write_out_ino_cache(struct btrfs_root *root,
 #endif
 	}
 
-	iput(inode);
 	return ret;
 }
 

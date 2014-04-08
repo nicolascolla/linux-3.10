@@ -898,6 +898,7 @@ megasas_issue_polled(struct megasas_instance *instance, struct megasas_cmd *cmd)
  * megasas_issue_blocked_cmd -	Synchronous wrapper around regular FW cmds
  * @instance:			Adapter soft state
  * @cmd:			Command to be issued
+ * @timeout:			Timeout in seconds
  *
  * This function waits on an event for the command to be returned from ISR.
  * Max wait time is MEGASAS_INTERNAL_CMD_WAIT_TIME secs
@@ -905,13 +906,20 @@ megasas_issue_polled(struct megasas_instance *instance, struct megasas_cmd *cmd)
  */
 static int
 megasas_issue_blocked_cmd(struct megasas_instance *instance,
-			  struct megasas_cmd *cmd)
+			  struct megasas_cmd *cmd, int timeout)
 {
+	int ret = 0;
 	cmd->cmd_status = ENODATA;
 
 	instance->instancet->issue_dcmd(instance, cmd);
-
-	wait_event(instance->int_cmd_wait_q, cmd->cmd_status != ENODATA);
+	if (timeout) {
+		ret = wait_event_timeout(instance->int_cmd_wait_q,
+				cmd->cmd_status != ENODATA, timeout * HZ);
+		if (!ret)
+			return 1;
+	} else
+		wait_event(instance->int_cmd_wait_q,
+				cmd->cmd_status != ENODATA);
 
 	return 0;
 }
@@ -920,18 +928,20 @@ megasas_issue_blocked_cmd(struct megasas_instance *instance,
  * megasas_issue_blocked_abort_cmd -	Aborts previously issued cmd
  * @instance:				Adapter soft state
  * @cmd_to_abort:			Previously issued cmd to be aborted
+ * @timeout:				Timeout in seconds
  *
- * MFI firmware can abort previously issued AEN command (automatic event
+ * MFI firmware can abort previously issued AEN comamnd (automatic event
  * notification). The megasas_issue_blocked_abort_cmd() issues such abort
  * cmd and waits for return status.
  * Max wait time is MEGASAS_INTERNAL_CMD_WAIT_TIME secs
  */
 static int
 megasas_issue_blocked_abort_cmd(struct megasas_instance *instance,
-				struct megasas_cmd *cmd_to_abort)
+				struct megasas_cmd *cmd_to_abort, int timeout)
 {
 	struct megasas_cmd *cmd;
 	struct megasas_abort_frame *abort_fr;
+	int ret = 0;
 
 	cmd = megasas_get_cmd(instance);
 
@@ -957,10 +967,18 @@ megasas_issue_blocked_abort_cmd(struct megasas_instance *instance,
 
 	instance->instancet->issue_dcmd(instance, cmd);
 
-	/*
-	 * Wait for this cmd to complete
-	 */
-	wait_event(instance->abort_cmd_wait_q, cmd->cmd_status != 0xFF);
+	if (timeout) {
+		ret = wait_event_timeout(instance->abort_cmd_wait_q,
+				cmd->cmd_status != ENODATA, timeout * HZ);
+		if (!ret) {
+			dev_err(&instance->pdev->dev, "Command timedout"
+				"from %s\n", __func__);
+			return 1;
+		}
+	} else
+		wait_event(instance->abort_cmd_wait_q,
+				cmd->cmd_status != ENODATA);
+
 	cmd->sync_cmd = 0;
 
 	megasas_return_cmd(instance, cmd);
@@ -2148,6 +2166,7 @@ static struct scsi_host_template megasas_template = {
 	.bios_param = megasas_bios_param,
 	.use_clustering = ENABLE_CLUSTERING,
 	.change_queue_depth = megasas_change_queue_depth,
+	.no_write_same = 1,
 };
 
 /**
@@ -2697,16 +2716,14 @@ megasas_transition_to_ready(struct megasas_instance *instance, int ocr)
 	u32 cur_state;
 	u32 abs_state, curr_abs_state;
 
-	fw_state = instance->instancet->read_fw_status_reg(instance->reg_set) & MFI_STATE_MASK;
+	abs_state = instance->instancet->read_fw_status_reg(instance->reg_set);
+	fw_state = abs_state & MFI_STATE_MASK;
 
 	if (fw_state != MFI_STATE_READY)
 		printk(KERN_INFO "megasas: Waiting for FW to come to ready"
 		       " state\n");
 
 	while (fw_state != MFI_STATE_READY) {
-
-		abs_state =
-		instance->instancet->read_fw_status_reg(instance->reg_set);
 
 		switch (fw_state) {
 
@@ -2851,10 +2868,8 @@ megasas_transition_to_ready(struct megasas_instance *instance, int ocr)
 		 * The cur_state should not last for more than max_wait secs
 		 */
 		for (i = 0; i < (max_wait * 1000); i++) {
-			fw_state = instance->instancet->read_fw_status_reg(instance->reg_set) &
-					MFI_STATE_MASK ;
-		curr_abs_state =
-		instance->instancet->read_fw_status_reg(instance->reg_set);
+			curr_abs_state = instance->instancet->
+				read_fw_status_reg(instance->reg_set);
 
 			if (abs_state == curr_abs_state) {
 				msleep(1);
@@ -2870,6 +2885,9 @@ megasas_transition_to_ready(struct megasas_instance *instance, int ocr)
 			       "in %d secs\n", fw_state, max_wait);
 			return -ENODEV;
 		}
+
+		abs_state = curr_abs_state;
+		fw_state = curr_abs_state & MFI_STATE_MASK;
 	}
 	printk(KERN_INFO "megasas: FW now in Ready state\n");
 
@@ -3931,16 +3949,19 @@ megasas_get_seq_num(struct megasas_instance *instance,
 	dcmd->sgl.sge32[0].phys_addr = cpu_to_le32(el_info_h);
 	dcmd->sgl.sge32[0].length = cpu_to_le32(sizeof(struct megasas_evt_log_info));
 
-	megasas_issue_blocked_cmd(instance, cmd);
-
-	/*
-	 * Copy the data back into callers buffer
-	 */
-	eli->newest_seq_num = le32_to_cpu(el_info->newest_seq_num);
-	eli->oldest_seq_num = le32_to_cpu(el_info->oldest_seq_num);
-	eli->clear_seq_num = le32_to_cpu(el_info->clear_seq_num);
-	eli->shutdown_seq_num = le32_to_cpu(el_info->shutdown_seq_num);
-	eli->boot_seq_num = le32_to_cpu(el_info->boot_seq_num);
+	if (megasas_issue_blocked_cmd(instance, cmd, 30))
+		dev_err(&instance->pdev->dev, "Command timedout"
+			"from %s\n", __func__);
+	else {
+		/*
+		 * Copy the data back into callers buffer
+		 */
+		eli->newest_seq_num = le32_to_cpu(el_info->newest_seq_num);
+		eli->oldest_seq_num = le32_to_cpu(el_info->oldest_seq_num);
+		eli->clear_seq_num = le32_to_cpu(el_info->clear_seq_num);
+		eli->shutdown_seq_num = le32_to_cpu(el_info->shutdown_seq_num);
+		eli->boot_seq_num = le32_to_cpu(el_info->boot_seq_num);
+	}
 
 	pci_free_consistent(instance->pdev, sizeof(struct megasas_evt_log_info),
 			    el_info, el_info_h);
@@ -4016,7 +4037,7 @@ megasas_register_aen(struct megasas_instance *instance, u32 seq_num,
 			instance->aen_cmd->abort_aen = 1;
 			ret_val = megasas_issue_blocked_abort_cmd(instance,
 								  instance->
-								  aen_cmd);
+								  aen_cmd, 30);
 
 			if (ret_val) {
 				printk(KERN_DEBUG "megasas: Failed to abort "
@@ -4195,6 +4216,19 @@ megasas_set_dma_mask(struct pci_dev *pdev)
 		if (pci_set_dma_mask(pdev, DMA_BIT_MASK(32)) != 0)
 			goto fail_set_dma_mask;
 	}
+	/*
+	 * Ensure that all data structures are allocated in 32-bit
+	 * memory.
+	 */
+	if (pci_set_consistent_dma_mask(pdev, DMA_BIT_MASK(32)) != 0) {
+		/* Try 32bit DMA mask and 32 bit Consistent dma mask */
+		if (!pci_set_dma_mask(pdev, DMA_BIT_MASK(32))
+			&& !pci_set_consistent_dma_mask(pdev, DMA_BIT_MASK(32)))
+			dev_info(&pdev->dev, "set 32bit DMA mask"
+				"and 32 bit consistent mask\n");
+		else
+			goto fail_set_dma_mask;
+	}
 
 	return 0;
 
@@ -4210,7 +4244,7 @@ fail_set_dma_mask:
 static int megasas_probe_one(struct pci_dev *pdev,
 			     const struct pci_device_id *id)
 {
-	int rval, pos, i, j;
+	int rval, pos, i, j, cpu;
 	struct Scsi_Host *host;
 	struct megasas_instance *instance;
 	u16 control = 0;
@@ -4383,7 +4417,8 @@ retry_irq_register:
 	 * Register IRQ
 	 */
 	if (instance->msix_vectors) {
-		for (i = 0 ; i < instance->msix_vectors; i++) {
+		cpu = cpumask_first(cpu_online_mask);
+		for (i = 0; i < instance->msix_vectors; i++) {
 			instance->irq_context[i].instance = instance;
 			instance->irq_context[i].MSIxIndex = i;
 			if (request_irq(instance->msixentry[i].vector,
@@ -4392,14 +4427,22 @@ retry_irq_register:
 					&instance->irq_context[i])) {
 				printk(KERN_DEBUG "megasas: Failed to "
 				       "register IRQ for vector %d.\n", i);
-				for (j = 0 ; j < i ; j++)
+				for (j = 0; j < i; j++) {
+					irq_set_affinity_hint(
+						instance->msixentry[j].vector, NULL);
 					free_irq(
 						instance->msixentry[j].vector,
 						&instance->irq_context[j]);
+				}
 				/* Retry irq register for IO_APIC */
 				instance->msix_vectors = 0;
 				goto retry_irq_register;
 			}
+			if (irq_set_affinity_hint(instance->msixentry[i].vector,
+				get_cpu_mask(cpu)))
+				dev_err(&instance->pdev->dev, "Error setting"
+					"affinity hint for cpu %d\n", cpu);
+			cpu = cpumask_next(cpu, cpu_online_mask);
 		}
 	} else {
 		instance->irq_context[0].instance = instance;
@@ -4454,9 +4497,12 @@ retry_irq_register:
 	pci_set_drvdata(pdev, NULL);
 	instance->instancet->disable_intr(instance);
 	if (instance->msix_vectors)
-		for (i = 0 ; i < instance->msix_vectors; i++)
+		for (i = 0; i < instance->msix_vectors; i++) {
+			irq_set_affinity_hint(
+				instance->msixentry[i].vector, NULL);
 			free_irq(instance->msixentry[i].vector,
 				 &instance->irq_context[i]);
+		}
 	else
 		free_irq(instance->pdev->irq, &instance->irq_context[0]);
 fail_irq:
@@ -4521,7 +4567,9 @@ static void megasas_flush_cache(struct megasas_instance *instance)
 	dcmd->opcode = cpu_to_le32(MR_DCMD_CTRL_CACHE_FLUSH);
 	dcmd->mbox.b[0] = MR_FLUSH_CTRL_CACHE | MR_FLUSH_DISK_CACHE;
 
-	megasas_issue_blocked_cmd(instance, cmd);
+	if (megasas_issue_blocked_cmd(instance, cmd, 30))
+		dev_err(&instance->pdev->dev, "Command timedout"
+			" from %s\n", __func__);
 
 	megasas_return_cmd(instance, cmd);
 
@@ -4548,10 +4596,11 @@ static void megasas_shutdown_controller(struct megasas_instance *instance,
 		return;
 
 	if (instance->aen_cmd)
-		megasas_issue_blocked_abort_cmd(instance, instance->aen_cmd);
+		megasas_issue_blocked_abort_cmd(instance,
+			instance->aen_cmd, 30);
 	if (instance->map_update_cmd)
 		megasas_issue_blocked_abort_cmd(instance,
-						instance->map_update_cmd);
+			instance->map_update_cmd, 30);
 	dcmd = &cmd->frame->dcmd;
 
 	memset(dcmd->mbox.b, 0, MFI_MBOX_SIZE);
@@ -4565,7 +4614,9 @@ static void megasas_shutdown_controller(struct megasas_instance *instance,
 	dcmd->data_xfer_len = 0;
 	dcmd->opcode = cpu_to_le32(opcode);
 
-	megasas_issue_blocked_cmd(instance, cmd);
+	if (megasas_issue_blocked_cmd(instance, cmd, 30))
+		dev_err(&instance->pdev->dev, "Command timedout"
+			"from %s\n", __func__);
 
 	megasas_return_cmd(instance, cmd);
 
@@ -4605,9 +4656,12 @@ megasas_suspend(struct pci_dev *pdev, pm_message_t state)
 	instance->instancet->disable_intr(instance);
 
 	if (instance->msix_vectors)
-		for (i = 0 ; i < instance->msix_vectors; i++)
+		for (i = 0; i < instance->msix_vectors; i++) {
+			irq_set_affinity_hint(
+				instance->msixentry[i].vector, NULL);
 			free_irq(instance->msixentry[i].vector,
 				 &instance->irq_context[i]);
+		}
 	else
 		free_irq(instance->pdev->irq, &instance->irq_context[0]);
 	if (instance->msix_vectors)
@@ -4628,7 +4682,7 @@ megasas_suspend(struct pci_dev *pdev, pm_message_t state)
 static int
 megasas_resume(struct pci_dev *pdev)
 {
-	int rval, i, j;
+	int rval, i, j, cpu;
 	struct Scsi_Host *host;
 	struct megasas_instance *instance;
 
@@ -4700,6 +4754,7 @@ megasas_resume(struct pci_dev *pdev)
 	 * Register IRQ
 	 */
 	if (instance->msix_vectors) {
+		cpu = cpumask_first(cpu_online_mask);
 		for (i = 0 ; i < instance->msix_vectors; i++) {
 			instance->irq_context[i].instance = instance;
 			instance->irq_context[i].MSIxIndex = i;
@@ -4709,12 +4764,21 @@ megasas_resume(struct pci_dev *pdev)
 					&instance->irq_context[i])) {
 				printk(KERN_DEBUG "megasas: Failed to "
 				       "register IRQ for vector %d.\n", i);
-				for (j = 0 ; j < i ; j++)
+				for (j = 0; j < i; j++) {
+					irq_set_affinity_hint(
+						instance->msixentry[j].vector, NULL);
 					free_irq(
 						instance->msixentry[j].vector,
 						&instance->irq_context[j]);
+				}
 				goto fail_irq;
 			}
+
+			if (irq_set_affinity_hint(instance->msixentry[i].vector,
+				get_cpu_mask(cpu)))
+				dev_err(&instance->pdev->dev, "Error setting"
+					"affinity hint for cpu %d\n", cpu);
+			cpu = cpumask_next(cpu, cpu_online_mask);
 		}
 	} else {
 		instance->irq_context[0].instance = instance;
@@ -4792,6 +4856,9 @@ static void megasas_detach_one(struct pci_dev *pdev)
 		instance->ev = NULL;
 	}
 
+	/* cancel all wait events */
+	wake_up_all(&instance->int_cmd_wait_q);
+
 	tasklet_kill(&instance->isr_tasklet);
 
 	/*
@@ -4812,9 +4879,12 @@ static void megasas_detach_one(struct pci_dev *pdev)
 	instance->instancet->disable_intr(instance);
 
 	if (instance->msix_vectors)
-		for (i = 0 ; i < instance->msix_vectors; i++)
+		for (i = 0; i < instance->msix_vectors; i++) {
+			irq_set_affinity_hint(
+				instance->msixentry[i].vector, NULL);
 			free_irq(instance->msixentry[i].vector,
 				 &instance->irq_context[i]);
+		}
 	else
 		free_irq(instance->pdev->irq, &instance->irq_context[0]);
 	if (instance->msix_vectors)
@@ -4871,9 +4941,12 @@ static void megasas_shutdown(struct pci_dev *pdev)
 	megasas_shutdown_controller(instance, MR_DCMD_CTRL_SHUTDOWN);
 	instance->instancet->disable_intr(instance);
 	if (instance->msix_vectors)
-		for (i = 0 ; i < instance->msix_vectors; i++)
+		for (i = 0; i < instance->msix_vectors; i++) {
+			irq_set_affinity_hint(
+				instance->msixentry[i].vector, NULL);
 			free_irq(instance->msixentry[i].vector,
 				 &instance->irq_context[i]);
+		}
 	else
 		free_irq(instance->pdev->irq, &instance->irq_context[0]);
 	if (instance->msix_vectors)
@@ -5048,7 +5121,7 @@ megasas_mgmt_fw_ioctl(struct megasas_instance *instance,
 	 * cmd to the SCSI mid-layer
 	 */
 	cmd->sync_cmd = 1;
-	megasas_issue_blocked_cmd(instance, cmd);
+	megasas_issue_blocked_cmd(instance, cmd, 0);
 	cmd->sync_cmd = 0;
 
 	/*
