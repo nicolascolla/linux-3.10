@@ -689,8 +689,10 @@ static void sd_config_discard(struct scsi_disk *sdkp, unsigned int mode)
  * Will issue either UNMAP or WRITE SAME(16) depending on preference
  * indicated by target device.
  **/
-static int sd_setup_discard_cmnd(struct scsi_device *sdp, struct request *rq)
+static int sd_setup_discard_cmnd(struct scsi_cmnd *cmd)
 {
+	struct request *rq = cmd->request;
+	struct scsi_device *sdp = cmd->device;
 	struct scsi_disk *sdkp = scsi_disk(rq->rq_disk);
 	sector_t sector = blk_rq_pos(rq);
 	unsigned int nr_sectors = blk_rq_sectors(rq);
@@ -702,9 +704,6 @@ static int sd_setup_discard_cmnd(struct scsi_device *sdp, struct request *rq)
 
 	sector >>= ilog2(sdp->sector_size) - 9;
 	nr_sectors >>= ilog2(sdp->sector_size) - 9;
-	rq->timeout = SD_TIMEOUT;
-
-	memset(rq->cmd, 0, rq->cmd_len);
 
 	page = alloc_page(GFP_ATOMIC | __GFP_ZERO);
 	if (!page)
@@ -714,9 +713,9 @@ static int sd_setup_discard_cmnd(struct scsi_device *sdp, struct request *rq)
 	case SD_LBP_UNMAP:
 		buf = page_address(page);
 
-		rq->cmd_len = 10;
-		rq->cmd[0] = UNMAP;
-		rq->cmd[8] = 24;
+		cmd->cmd_len = 10;
+		cmd->cmnd[0] = UNMAP;
+		cmd->cmnd[8] = 24;
 
 		put_unaligned_be16(6 + 16, &buf[0]);
 		put_unaligned_be16(16, &buf[2]);
@@ -727,23 +726,23 @@ static int sd_setup_discard_cmnd(struct scsi_device *sdp, struct request *rq)
 		break;
 
 	case SD_LBP_WS16:
-		rq->cmd_len = 16;
-		rq->cmd[0] = WRITE_SAME_16;
-		rq->cmd[1] = 0x8; /* UNMAP */
-		put_unaligned_be64(sector, &rq->cmd[2]);
-		put_unaligned_be32(nr_sectors, &rq->cmd[10]);
+		cmd->cmd_len = 16;
+		cmd->cmnd[0] = WRITE_SAME_16;
+		cmd->cmnd[1] = 0x8; /* UNMAP */
+		put_unaligned_be64(sector, &cmd->cmnd[2]);
+		put_unaligned_be32(nr_sectors, &cmd->cmnd[10]);
 
 		len = sdkp->device->sector_size;
 		break;
 
 	case SD_LBP_WS10:
 	case SD_LBP_ZERO:
-		rq->cmd_len = 10;
-		rq->cmd[0] = WRITE_SAME;
+		cmd->cmd_len = 10;
+		cmd->cmnd[0] = WRITE_SAME;
 		if (sdkp->provisioning_mode == SD_LBP_WS10)
-			rq->cmd[1] = 0x8; /* UNMAP */
-		put_unaligned_be32(sector, &rq->cmd[2]);
-		put_unaligned_be16(nr_sectors, &rq->cmd[7]);
+			cmd->cmnd[1] = 0x8; /* UNMAP */
+		put_unaligned_be32(sector, &cmd->cmnd[2]);
+		put_unaligned_be16(nr_sectors, &cmd->cmnd[7]);
 
 		len = sdkp->device->sector_size;
 		break;
@@ -753,8 +752,21 @@ static int sd_setup_discard_cmnd(struct scsi_device *sdp, struct request *rq)
 		goto out;
 	}
 
+	rq->timeout = SD_TIMEOUT;
+
+	cmd->transfersize = len;
+	cmd->allowed = SD_MAX_RETRIES;
+
+	/*
+	 * Initially __data_len is set to the amount of data that needs to be
+	 * transferred to the target. This amount depends on whether WRITE SAME
+	 * or UNMAP is being used. After the scatterlist has been mapped by
+	 * scsi_init_io() we set __data_len to the size of the area to be
+	 * discarded on disk. This allows us to report completion on the full
+	 * amount of blocks described by the request.
+	 */
 	blk_add_request_payload(rq, page, len);
-	ret = scsi_setup_blk_pc_cmnd(sdp, rq);
+	ret = scsi_init_io(cmd, GFP_ATOMIC);
 	rq->buffer = page_address(page);
 	rq->__data_len = nr_bytes;
 
@@ -799,14 +811,15 @@ out:
 
 /**
  * sd_setup_write_same_cmnd - write the same data to multiple blocks
- * @sdp: scsi device to operate one
- * @rq: Request to prepare
+ * @cmd: command to prepare
  *
  * Will issue either WRITE SAME(10) or WRITE SAME(16) depending on
  * preference indicated by target device.
  **/
-static int sd_setup_write_same_cmnd(struct scsi_device *sdp, struct request *rq)
+static int sd_setup_write_same_cmnd(struct scsi_cmnd *cmd)
 {
+	struct request *rq = cmd->request;
+	struct scsi_device *sdp = cmd->device;
 	struct scsi_disk *sdkp = scsi_disk(rq->rq_disk);
 	struct bio *bio = rq->bio;
 	sector_t sector = blk_rq_pos(rq);
@@ -822,54 +835,56 @@ static int sd_setup_write_same_cmnd(struct scsi_device *sdp, struct request *rq)
 	sector >>= ilog2(sdp->sector_size) - 9;
 	nr_sectors >>= ilog2(sdp->sector_size) - 9;
 
-	rq->__data_len = sdp->sector_size;
 	rq->timeout = SD_WRITE_SAME_TIMEOUT;
-	memset(rq->cmd, 0, rq->cmd_len);
 
 	if (sdkp->ws16 || sector > 0xffffffff || nr_sectors > 0xffff) {
-		rq->cmd_len = 16;
-		rq->cmd[0] = WRITE_SAME_16;
-		put_unaligned_be64(sector, &rq->cmd[2]);
-		put_unaligned_be32(nr_sectors, &rq->cmd[10]);
+		cmd->cmd_len = 16;
+		cmd->cmnd[0] = WRITE_SAME_16;
+		put_unaligned_be64(sector, &cmd->cmnd[2]);
+		put_unaligned_be32(nr_sectors, &cmd->cmnd[10]);
 	} else {
-		rq->cmd_len = 10;
-		rq->cmd[0] = WRITE_SAME;
-		put_unaligned_be32(sector, &rq->cmd[2]);
-		put_unaligned_be16(nr_sectors, &rq->cmd[7]);
+		cmd->cmd_len = 10;
+		cmd->cmnd[0] = WRITE_SAME;
+		put_unaligned_be32(sector, &cmd->cmnd[2]);
+		put_unaligned_be16(nr_sectors, &cmd->cmnd[7]);
 	}
 
-	ret = scsi_setup_blk_pc_cmnd(sdp, rq);
-	rq->__data_len = nr_bytes;
+	cmd->transfersize = sdp->sector_size;
+	cmd->allowed = SD_MAX_RETRIES;
 
+	/*
+	 * For WRITE_SAME the data transferred in the DATA IN buffer is
+	 * different from the amount of data actually written to the target.
+	 *
+	 * We set up __data_len to the amount of data transferred from the
+	 * DATA IN buffer so that blk_rq_map_sg set up the proper S/G list
+	 * to transfer a single sector of data first, but then reset it to
+	 * the amount of data to be written right after so that the I/O path
+	 * knows how much to actually write.
+	 */
+	rq->__data_len = sdp->sector_size;
+	ret = scsi_init_io(cmd, GFP_ATOMIC);
+	rq->__data_len = nr_bytes;
 	return ret;
 }
 
-static int scsi_setup_flush_cmnd(struct scsi_device *sdp, struct request *rq)
+static int sd_setup_flush_cmnd(struct scsi_cmnd *cmd)
 {
+	struct request *rq = cmd->request;
+
+	/* flush requests don't perform I/O, zero the S/G table */
+	memset(&cmd->sdb, 0, sizeof(cmd->sdb));
+
+	cmd->cmnd[0] = SYNCHRONIZE_CACHE;
+	cmd->cmd_len = 10;
+	cmd->transfersize = 0;
+	cmd->allowed = SD_MAX_RETRIES;
+
 	rq->timeout = rq->q->rq_timeout * SD_FLUSH_TIMEOUT_MULTIPLIER;
-	rq->retries = SD_MAX_RETRIES;
-	rq->cmd[0] = SYNCHRONIZE_CACHE;
-	rq->cmd_len = 10;
-
-	return scsi_setup_blk_pc_cmnd(sdp, rq);
+	return BLKPREP_OK;
 }
 
-static void sd_uninit_command(struct scsi_cmnd *SCpnt)
-{
-	struct request *rq = SCpnt->request;
-
-	if (rq->cmd_flags & REQ_DISCARD) {
-		free_page((unsigned long)rq->buffer);
-		rq->buffer = NULL;
-	}
-	if (SCpnt->cmnd != rq->cmd) {
-		mempool_free(SCpnt->cmnd, sd_cdb_pool);
-		SCpnt->cmnd = NULL;
-		SCpnt->cmd_len = 0;
-	}
-}
-
-static int sd_init_command(struct scsi_cmnd *SCpnt)
+static int sd_setup_read_write_cmnd(struct scsi_cmnd *SCpnt)
 {
 	struct request *rq = SCpnt->request;
 	struct scsi_device *sdp = SCpnt->device;
@@ -881,21 +896,7 @@ static int sd_init_command(struct scsi_cmnd *SCpnt)
 	int ret, host_dif;
 	unsigned char protect;
 
-	/*
-	 * Discard request come in as REQ_TYPE_FS but we turn them into
-	 * block PC requests to make life easier.
-	 */
-	if (rq->cmd_flags & REQ_DISCARD) {
-		ret = sd_setup_discard_cmnd(sdp, rq);
-		goto out;
-	} else if (rq->cmd_flags & REQ_WRITE_SAME) {
-		ret = sd_setup_write_same_cmnd(sdp, rq);
-		goto out;
-	} else if (rq->cmd_flags & REQ_FLUSH) {
-		ret = scsi_setup_flush_cmnd(sdp, rq);
-		goto out;
-	}
-	ret = scsi_setup_fs_cmnd(sdp, rq);
+	ret = scsi_init_io(SCpnt, GFP_ATOMIC);
 	if (ret != BLKPREP_OK)
 		goto out;
 	SCpnt = rq->special;
@@ -995,14 +996,12 @@ static int sd_init_command(struct scsi_cmnd *SCpnt)
 			goto out;
 		}
 		SCpnt->cmnd[0] = WRITE_6;
-		SCpnt->sc_data_direction = DMA_TO_DEVICE;
 
 		if (blk_integrity_rq(rq))
 			sd_dif_prepare(rq, block, sdp->sector_size);
 
 	} else if (rq_data_dir(rq) == READ) {
 		SCpnt->cmnd[0] = READ_6;
-		SCpnt->sc_data_direction = DMA_FROM_DEVICE;
 	} else {
 		scmd_printk(KERN_ERR, SCpnt, "Unknown command %llx\n", (unsigned long long) rq->cmd_flags);
 		goto out;
@@ -1129,6 +1128,35 @@ static int sd_init_command(struct scsi_cmnd *SCpnt)
 	ret = BLKPREP_OK;
  out:
 	return ret;
+}
+
+static int sd_init_command(struct scsi_cmnd *cmd)
+{
+	struct request *rq = cmd->request;
+
+	if (rq->cmd_flags & REQ_DISCARD)
+		return sd_setup_discard_cmnd(cmd);
+	else if (rq->cmd_flags & REQ_WRITE_SAME)
+		return sd_setup_write_same_cmnd(cmd);
+	else if (rq->cmd_flags & REQ_FLUSH)
+		return sd_setup_flush_cmnd(cmd);
+	else
+		return sd_setup_read_write_cmnd(cmd);
+}
+
+static void sd_uninit_command(struct scsi_cmnd *SCpnt)
+{
+	struct request *rq = SCpnt->request;
+
+	if (rq->cmd_flags & REQ_DISCARD) {
+		free_page((unsigned long)rq->buffer);
+		rq->buffer = NULL;
+	}
+	if (SCpnt->cmnd != rq->cmd) {
+		mempool_free(SCpnt->cmnd, sd_cdb_pool);
+		SCpnt->cmnd = NULL;
+		SCpnt->cmd_len = 0;
+	}
 }
 
 /**

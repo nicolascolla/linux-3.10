@@ -961,8 +961,11 @@ int scsi_init_io(struct scsi_cmnd *cmd, gfp_t gfp_mask)
 {
 	struct scsi_device *sdev = cmd->device;
 	struct request *rq = cmd->request;
+	int error;
 
-	int error = scsi_init_sgtable(rq, &cmd->sdb, gfp_mask);
+	BUG_ON(!rq->nr_phys_segments);
+
+	error = scsi_init_sgtable(rq, &cmd->sdb, gfp_mask);
 	if (error)
 		goto err_exit;
 
@@ -1063,11 +1066,7 @@ int scsi_setup_blk_pc_cmnd(struct scsi_device *sdev, struct request *req)
 	 * submit a request without an attached bio.
 	 */
 	if (req->bio) {
-		int ret;
-
-		BUG_ON(!req->nr_phys_segments);
-
-		ret = scsi_init_io(cmd, GFP_ATOMIC);
+		int ret = scsi_init_io(cmd, GFP_ATOMIC);
 		if (unlikely(ret))
 			return ret;
 	} else {
@@ -1078,13 +1077,6 @@ int scsi_setup_blk_pc_cmnd(struct scsi_device *sdev, struct request *req)
 	}
 
 	cmd->cmd_len = req->cmd_len;
-	if (!blk_rq_bytes(req))
-		cmd->sc_data_direction = DMA_NONE;
-	else if (rq_data_dir(req) == WRITE)
-		cmd->sc_data_direction = DMA_TO_DEVICE;
-	else
-		cmd->sc_data_direction = DMA_FROM_DEVICE;
-	
 	cmd->transfersize = blk_rq_bytes(req);
 	cmd->allowed = req->retries;
 	return BLKPREP_OK;
@@ -1092,11 +1084,10 @@ int scsi_setup_blk_pc_cmnd(struct scsi_device *sdev, struct request *req)
 EXPORT_SYMBOL(scsi_setup_blk_pc_cmnd);
 
 /*
- * Setup a REQ_TYPE_FS command.  These are simple read/write request
- * from filesystems that still need to be translated to SCSI CDBs from
- * the ULD.
+ * Setup a REQ_TYPE_FS command.  These are simple request from filesystems
+ * that still need to be translated to SCSI CDBs from the ULD.
  */
-int scsi_setup_fs_cmnd(struct scsi_device *sdev, struct request *req)
+static int scsi_setup_fs_cmnd(struct scsi_device *sdev, struct request *req)
 {
 	struct scsi_cmnd *cmd = req->special;
 
@@ -1107,15 +1098,9 @@ int scsi_setup_fs_cmnd(struct scsi_device *sdev, struct request *req)
 			return ret;
 	}
 
-	/*
-	 * Filesystem requests must transfer data.
-	 */
-	BUG_ON(!req->nr_phys_segments);
-
 	memset(cmd->cmnd, 0, BLK_MAX_CDB);
-	return scsi_init_io(cmd, GFP_ATOMIC);
+	return scsi_cmd_to_driver(cmd)->init_command(cmd);
 }
-EXPORT_SYMBOL(scsi_setup_fs_cmnd);
 
 static int
 scsi_prep_state_check(struct scsi_device *sdev, struct request *req)
@@ -1220,12 +1205,23 @@ static int scsi_prep_fn(struct request_queue *q, struct request *req)
 		goto out;
 	}
 
-	if (req->cmd_type == REQ_TYPE_FS)
-		ret = scsi_cmd_to_driver(cmd)->init_command(cmd);
-	else if (req->cmd_type == REQ_TYPE_BLOCK_PC)
-		ret = scsi_setup_blk_pc_cmnd(sdev, req);
+	if (!blk_rq_bytes(req))
+		cmd->sc_data_direction = DMA_NONE;
+	else if (rq_data_dir(req) == WRITE)
+		cmd->sc_data_direction = DMA_TO_DEVICE;
 	else
+		cmd->sc_data_direction = DMA_FROM_DEVICE;
+
+	switch (req->cmd_type) {
+	case REQ_TYPE_FS:
+		ret = scsi_setup_fs_cmnd(sdev, req);
+		break;
+	case REQ_TYPE_BLOCK_PC:
+		ret = scsi_setup_blk_pc_cmnd(sdev, req);
+		break;
+	default:
 		ret = BLKPREP_KILL;
+	}
 
 out:
 	return scsi_prep_return(q, req, ret);
