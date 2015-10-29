@@ -356,10 +356,11 @@ int generic_permission(struct inode *inode, int mask)
 
 	if (S_ISDIR(inode->i_mode)) {
 		/* DACs are overridable for directories */
-		if (inode_capable(inode, CAP_DAC_OVERRIDE))
+		if (capable_wrt_inode_uidgid(inode, CAP_DAC_OVERRIDE))
 			return 0;
 		if (!(mask & MAY_WRITE))
-			if (inode_capable(inode, CAP_DAC_READ_SEARCH))
+			if (capable_wrt_inode_uidgid(inode,
+						     CAP_DAC_READ_SEARCH))
 				return 0;
 		return -EACCES;
 	}
@@ -369,7 +370,7 @@ int generic_permission(struct inode *inode, int mask)
 	 * at least one exec bit set.
 	 */
 	if (!(mask & MAY_EXEC) || (inode->i_mode & S_IXUGO))
-		if (inode_capable(inode, CAP_DAC_OVERRIDE))
+		if (capable_wrt_inode_uidgid(inode, CAP_DAC_OVERRIDE))
 			return 0;
 
 	/*
@@ -377,7 +378,7 @@ int generic_permission(struct inode *inode, int mask)
 	 */
 	mask &= MAY_READ | MAY_WRITE | MAY_EXEC;
 	if (mask == MAY_READ)
-		if (inode_capable(inode, CAP_DAC_READ_SEARCH))
+		if (capable_wrt_inode_uidgid(inode, CAP_DAC_READ_SEARCH))
 			return 0;
 
 	return -EACCES;
@@ -506,6 +507,25 @@ void path_put(const struct path *path)
 	mntput(path->mnt);
 }
 EXPORT_SYMBOL(path_put);
+
+/**
+ * path_connected - Verify that a path->dentry is below path->mnt.mnt_root
+ * @path: nameidate to verify
+ *
+ * Rename can sometimes move a file or directory outside of a bind
+ * mount, path_connected allows those cases to be detected.
+ */
+static bool path_connected(const struct path *path)
+{
+	struct vfsmount *mnt = path->mnt;
+
+	/* Only bind mounts can have disconnected paths */
+	if (mnt->mnt_root == mnt->mnt_sb->s_root)
+		return true;
+
+	return is_subdir(path->dentry, mnt->mnt_root);
+}
+
 
 /*
  * Path walking has 2 modes, rcu-walk and ref-walk (see
@@ -1206,6 +1226,8 @@ static int follow_dotdot_rcu(struct nameidata *nd)
 				goto failed;
 			nd->path.dentry = parent;
 			nd->seq = seq;
+			if (unlikely(!path_connected(&nd->path)))
+				goto failed;
 			break;
 		}
 		if (!follow_up_rcu(&nd->path))
@@ -1289,7 +1311,7 @@ static void follow_mount(struct path *path)
 	}
 }
 
-static void follow_dotdot(struct nameidata *nd)
+static int follow_dotdot(struct nameidata *nd)
 {
 	set_root(nd);
 
@@ -1304,6 +1326,10 @@ static void follow_dotdot(struct nameidata *nd)
 			/* rare case of legitimate dget_parent()... */
 			nd->path.dentry = dget_parent(nd->path.dentry);
 			dput(old);
+			if (unlikely(!path_connected(&nd->path))) {
+				path_put(&nd->path);
+				return -ENOENT;
+			}
 			break;
 		}
 		if (!follow_up(&nd->path))
@@ -1311,6 +1337,7 @@ static void follow_dotdot(struct nameidata *nd)
 	}
 	follow_mount(&nd->path);
 	nd->inode = nd->path.dentry->d_inode;
+	return 0;
 }
 
 /*
@@ -1534,7 +1561,7 @@ static inline int handle_dots(struct nameidata *nd, int type)
 			if (follow_dotdot_rcu(nd))
 				return -ECHILD;
 		} else
-			follow_dotdot(nd);
+			return follow_dotdot(nd);
 	}
 	return 0;
 }
@@ -1933,7 +1960,7 @@ static int path_init(int dfd, const char *name, unsigned int flags,
 
 		nd->path = f.file->f_path;
 		if (flags & LOOKUP_RCU) {
-			if (f.need_put)
+			if (f.flags & FDPUT_FPUT)
 				*fp = f.file;
 			nd->seq = __read_seqcount_begin(&nd->path.dentry->d_seq);
 			lock_rcu_walk();
@@ -2279,7 +2306,7 @@ mountpoint_last(struct nameidata *nd, struct path *path)
 	if (unlikely(nd->last_type != LAST_NORM)) {
 		error = handle_dots(nd, nd->last_type);
 		if (error)
-			goto out;
+			return error;
 		dentry = dget(nd->path.dentry);
 		goto done;
 	}
@@ -2429,7 +2456,7 @@ int __check_sticky(struct inode *dir, struct inode *inode)
 		return 0;
 	if (uid_eq(dir->i_uid, fsuid))
 		return 0;
-	return !inode_capable(inode, CAP_FOWNER);
+	return !capable_wrt_inode_uidgid(inode, CAP_FOWNER);
 }
 EXPORT_SYMBOL(__check_sticky);
 
@@ -3906,7 +3933,7 @@ int vfs_link(struct dentry *old_dentry, struct inode *dir, struct dentry *new_de
 
 	mutex_lock(&inode->i_mutex);
 	/* Make sure we don't allow creating hardlink to an unlinked file */
-	if (inode->i_nlink == 0)
+	if (inode->i_nlink == 0 && !(inode->i_state & I_LINKABLE))
 		error =  -ENOENT;
 	else if (max_links && inode->i_nlink >= max_links)
 		error = -EMLINK;
@@ -3914,6 +3941,12 @@ int vfs_link(struct dentry *old_dentry, struct inode *dir, struct dentry *new_de
 		error = try_break_deleg(inode, delegated_inode);
 		if (!error)
 			error = dir->i_op->link(old_dentry, dir, new_dentry);
+	}
+
+	if (!error && (inode->i_state & I_LINKABLE)) {
+		spin_lock(&inode->i_lock);
+		inode->i_state &= ~I_LINKABLE;
+		spin_unlock(&inode->i_lock);
 	}
 	mutex_unlock(&inode->i_mutex);
 	if (!error)
