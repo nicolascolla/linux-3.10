@@ -481,12 +481,9 @@ static void __init intel_pstate_sysfs_expose_params(void)
 }
 /************************** sysfs end ************************/
 
-static void intel_pstate_hwp_enable(void)
+static void intel_pstate_hwp_enable(struct cpudata *cpudata)
 {
-	hwp_active++;
-	pr_info("intel_pstate HWP enabled\n");
-
-	wrmsrl( MSR_PM_ENABLE, 0x1);
+	wrmsrl_on_cpu(cpudata->cpu, MSR_PM_ENABLE, 0x1);
 }
 
 static int byt_get_min_pstate(void)
@@ -920,6 +917,10 @@ static int intel_pstate_init_cpu(unsigned int cpunum)
 	cpu = all_cpu_data[cpunum];
 
 	cpu->cpu = cpunum;
+
+	if (hwp_active)
+		intel_pstate_hwp_enable(cpu);
+
 	intel_pstate_get_cpu_pstates(cpu);
 
 	init_timer_deferrable(&cpu->timer);
@@ -1233,8 +1234,10 @@ static int __init intel_pstate_init(void)
 	if (!all_cpu_data)
 		return -ENOMEM;
 
-	if (cpu_has(c,X86_FEATURE_HWP) && !no_hwp)
-		intel_pstate_hwp_enable();
+	if (cpu_has(c,X86_FEATURE_HWP) && !no_hwp) {
+		pr_info("intel_pstate: HWP enabled\n");
+		hwp_active++;
+	}
 
 	if (!hwp_active && hwp_only)
 		goto out;
@@ -1269,8 +1272,10 @@ static int __init intel_pstate_setup(char *str)
 
 	if (!strcmp(str, "disable"))
 		no_load = 1;
-	if (!strcmp(str, "no_hwp"))
+	if (!strcmp(str, "no_hwp")) {
+		pr_info("intel_pstate: HWP disabled\n");
 		no_hwp = 1;
+	}
 	if (!strcmp(str, "force"))
 		force_load = 1;
 	if (!strcmp(str, "hwp_only"))

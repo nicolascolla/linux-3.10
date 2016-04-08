@@ -1142,12 +1142,16 @@ static int migrate_swap_stop(void *data)
 	struct rq *src_rq, *dst_rq;
 	int ret = -EAGAIN;
 
+	if (!cpu_active(arg->src_cpu) || !cpu_active(arg->dst_cpu))
+		return -EAGAIN;
+
 	src_rq = cpu_rq(arg->src_cpu);
 	dst_rq = cpu_rq(arg->dst_cpu);
 
 	double_raw_lock(&arg->src_task->pi_lock,
 			&arg->dst_task->pi_lock);
 	double_rq_lock(src_rq, dst_rq);
+
 	if (task_cpu(arg->dst_task) != arg->dst_cpu)
 		goto unlock;
 
@@ -6869,8 +6873,22 @@ struct sched_domain *build_sched_domain(struct sched_domain_topology_level *tl,
 		sd->level = child->level + 1;
 		sched_domain_level_max = max(sched_domain_level_max, sd->level);
 		child->parent = sd;
+		sd->child = child;
+
+		if (!cpumask_subset(sched_domain_span(child),
+				    sched_domain_span(sd))) {
+			pr_err("BUG: arch topology borken\n");
+#ifdef CONFIG_SCHED_DEBUG
+			pr_err("     the %s domain not a subset of the %s domain\n",
+					child->name, sd->name);
+#endif
+			/* Fixup, ensure @sd has at least @child cpus. */
+			cpumask_or(sched_domain_span(sd),
+				   sched_domain_span(sd),
+				   sched_domain_span(child));
+		}
+
 	}
-	sd->child = child;
 	set_domain_attribute(sd, attr);
 
 	return sd;

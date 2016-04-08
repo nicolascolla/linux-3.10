@@ -412,9 +412,8 @@ struct inode *ceph_alloc_inode(struct super_block *sb)
 	ci->i_flushing_caps = 0;
 	INIT_LIST_HEAD(&ci->i_dirty_item);
 	INIT_LIST_HEAD(&ci->i_flushing_item);
-	ci->i_cap_flush_seq = 0;
-	ci->i_cap_flush_last_tid = 0;
-	memset(&ci->i_cap_flush_tid, 0, sizeof(ci->i_cap_flush_tid));
+	ci->i_prealloc_cap_flush = NULL;
+	ci->i_cap_flush_tree = RB_ROOT;
 	init_waitqueue_head(&ci->i_cap_wq);
 	ci->i_hold_caps_min = 0;
 	ci->i_hold_caps_max = 0;
@@ -449,6 +448,7 @@ struct inode *ceph_alloc_inode(struct super_block *sb)
 
 	INIT_LIST_HEAD(&ci->i_unsafe_writes);
 	INIT_LIST_HEAD(&ci->i_unsafe_dirops);
+	INIT_LIST_HEAD(&ci->i_unsafe_iops);
 	spin_lock_init(&ci->i_unsafe_lock);
 
 	ci->i_snap_realm = NULL;
@@ -741,7 +741,10 @@ static int fill_inode(struct inode *inode, struct page *locked_page,
 
 	if (new_version ||
 	    (new_issued & (CEPH_CAP_ANY_FILE_RD | CEPH_CAP_ANY_FILE_WR))) {
+		if (ci->i_layout.fl_pg_pool != info->layout.fl_pg_pool)
+			ci->i_ceph_flags &= ~CEPH_I_POOL_PERM;
 		ci->i_layout = info->layout;
+
 		queue_trunc = ceph_fill_file_size(inode, issued,
 					le32_to_cpu(info->truncate_seq),
 					le64_to_cpu(info->truncate_size),
@@ -1710,11 +1713,13 @@ int ceph_setattr(struct dentry *dentry, struct iattr *attr)
 	const unsigned int ia_valid = attr->ia_valid;
 	struct ceph_mds_request *req;
 	struct ceph_mds_client *mdsc = ceph_sb_to_client(dentry->d_sb)->mdsc;
+	struct ceph_cap_flush *prealloc_cf;
 	int issued;
 	int release = 0, dirtied = 0;
 	int mask = 0;
 	int err = 0;
 	int inode_dirty_flags = 0;
+	bool lock_snap_rwsem = false;
 
 	if (ceph_snap(inode) != CEPH_NOSNAP)
 		return -EROFS;
@@ -1723,13 +1728,31 @@ int ceph_setattr(struct dentry *dentry, struct iattr *attr)
 	if (err != 0)
 		return err;
 
+	prealloc_cf = ceph_alloc_cap_flush();
+	if (!prealloc_cf)
+		return -ENOMEM;
+
 	req = ceph_mdsc_create_request(mdsc, CEPH_MDS_OP_SETATTR,
 				       USE_AUTH_MDS);
-	if (IS_ERR(req))
+	if (IS_ERR(req)) {
+		ceph_free_cap_flush(prealloc_cf);
 		return PTR_ERR(req);
+	}
 
 	spin_lock(&ci->i_ceph_lock);
 	issued = __ceph_caps_issued(ci, NULL);
+
+	if (!ci->i_head_snapc &&
+	    (issued & (CEPH_CAP_ANY_EXCL | CEPH_CAP_FILE_WR))) {
+		lock_snap_rwsem = true;
+		if (!down_read_trylock(&mdsc->snap_rwsem)) {
+			spin_unlock(&ci->i_ceph_lock);
+			down_read(&mdsc->snap_rwsem);
+			spin_lock(&ci->i_ceph_lock);
+			issued = __ceph_caps_issued(ci, NULL);
+		}
+	}
+
 	dout("setattr %p issued %s\n", inode, ceph_cap_string(issued));
 
 	if (ia_valid & ATTR_UID) {
@@ -1871,12 +1894,15 @@ int ceph_setattr(struct dentry *dentry, struct iattr *attr)
 		dout("setattr %p ATTR_FILE ... hrm!\n", inode);
 
 	if (dirtied) {
-		inode_dirty_flags = __ceph_mark_dirty_caps(ci, dirtied);
+		inode_dirty_flags = __ceph_mark_dirty_caps(ci, dirtied,
+							   &prealloc_cf);
 		inode->i_ctime = CURRENT_TIME;
 	}
 
 	release &= issued;
 	spin_unlock(&ci->i_ceph_lock);
+	if (lock_snap_rwsem)
+		up_read(&mdsc->snap_rwsem);
 
 	if (inode_dirty_flags)
 		__mark_inode_dirty(inode, inode_dirty_flags);
@@ -1895,6 +1921,7 @@ int ceph_setattr(struct dentry *dentry, struct iattr *attr)
 	ceph_mdsc_put_request(req);
 	if (mask & CEPH_SETATTR_SIZE)
 		__ceph_do_pending_vmtruncate(inode);
+	ceph_free_cap_flush(prealloc_cf);
 	return err;
 }
 

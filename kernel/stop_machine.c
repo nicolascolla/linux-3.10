@@ -35,13 +35,16 @@ struct cpu_stop_done {
 
 /* the actual stopper, one per every possible cpu, enabled on online cpus */
 struct cpu_stopper {
+	struct task_struct	*thread;
+
 	spinlock_t		lock;
 	bool			enabled;	/* is this stopper enabled? */
 	struct list_head	works;		/* list of pending works */
+
+	struct cpu_stop_work	stop_work;	/* for stop_cpus */
 };
 
 static DEFINE_PER_CPU(struct cpu_stopper, cpu_stopper);
-static DEFINE_PER_CPU(struct task_struct *, cpu_stopper_task);
 static bool stop_machine_initialized = false;
 
 /*
@@ -70,22 +73,24 @@ static void cpu_stop_signal_done(struct cpu_stop_done *done, bool executed)
 	}
 }
 
+static void __cpu_stop_queue_work(struct cpu_stopper *stopper,
+					struct cpu_stop_work *work)
+{
+	list_add_tail(&work->list, &stopper->works);
+	wake_up_process(stopper->thread);
+}
+
 /* queue @work to @stopper.  if offline, @work is completed immediately */
 static void cpu_stop_queue_work(unsigned int cpu, struct cpu_stop_work *work)
 {
 	struct cpu_stopper *stopper = &per_cpu(cpu_stopper, cpu);
-	struct task_struct *p = per_cpu(cpu_stopper_task, cpu);
-
 	unsigned long flags;
 
 	spin_lock_irqsave(&stopper->lock, flags);
-
-	if (stopper->enabled) {
-		list_add_tail(&work->list, &stopper->works);
-		wake_up_process(p);
-	} else
+	if (stopper->enabled)
+		__cpu_stop_queue_work(stopper, work);
+	else
 		cpu_stop_signal_done(work->done, false);
-
 	spin_unlock_irqrestore(&stopper->lock, flags);
 }
 
@@ -211,6 +216,31 @@ static int multi_cpu_stop(void *data)
 	return err;
 }
 
+static int cpu_stop_queue_two_works(int cpu1, struct cpu_stop_work *work1,
+				    int cpu2, struct cpu_stop_work *work2)
+{
+	struct cpu_stopper *stopper1 = per_cpu_ptr(&cpu_stopper, cpu1);
+	struct cpu_stopper *stopper2 = per_cpu_ptr(&cpu_stopper, cpu2);
+	int err;
+
+	lg_double_lock(&stop_cpus_lock, cpu1, cpu2);
+	spin_lock_irq(&stopper1->lock);
+	spin_lock_nested(&stopper2->lock, SINGLE_DEPTH_NESTING);
+
+	err = -ENOENT;
+	if (!stopper1->enabled || !stopper2->enabled)
+		goto unlock;
+
+	err = 0;
+	__cpu_stop_queue_work(stopper1, work1);
+	__cpu_stop_queue_work(stopper2, work2);
+unlock:
+	spin_unlock(&stopper2->lock);
+	spin_unlock_irq(&stopper1->lock);
+	lg_double_unlock(&stop_cpus_lock, cpu1, cpu2);
+
+	return err;
+}
 /**
  * stop_two_cpus - stops two cpus
  * @cpu1: the cpu to stop
@@ -245,23 +275,12 @@ int stop_two_cpus(unsigned int cpu1, unsigned int cpu2, cpu_stop_fn_t fn, void *
 	cpu_stop_init_done(&done, 2);
 	set_state(&msdata, MULTI_STOP_PREPARE);
 
-	/*
-	 * If we observe both CPUs active we know _cpu_down() cannot yet have
-	 * queued its stop_machine works and therefore ours will get executed
-	 * first. Or its not either one of our CPUs that's getting unplugged,
-	 * in which case we don't care.
-	 *
-	 * This relies on the stopper workqueues to be FIFO.
-	 */
-	if (!cpu_active(cpu1) || !cpu_active(cpu2)) {
+	if (cpu1 > cpu2)
+		swap(cpu1, cpu2);
+	if (cpu_stop_queue_two_works(cpu1, &work1, cpu2, &work2)) {
 		preempt_enable();
 		return -ENOENT;
 	}
-
-	lg_double_lock(&stop_cpus_lock, cpu1, cpu2);
-	cpu_stop_queue_work(cpu1, &work1);
-	cpu_stop_queue_work(cpu2, &work2);
-	lg_double_unlock(&stop_cpus_lock, cpu1, cpu2);
 
 	preempt_enable();
 
@@ -291,7 +310,6 @@ void stop_one_cpu_nowait(unsigned int cpu, cpu_stop_fn_t fn, void *arg,
 
 /* static data for stop_cpus */
 static DEFINE_MUTEX(stop_cpus_mutex);
-static DEFINE_PER_CPU(struct cpu_stop_work, stop_cpus_work);
 
 static void queue_stop_cpus_work(const struct cpumask *cpumask,
 				 cpu_stop_fn_t fn, void *arg,
@@ -300,22 +318,19 @@ static void queue_stop_cpus_work(const struct cpumask *cpumask,
 	struct cpu_stop_work *work;
 	unsigned int cpu;
 
-	/* initialize works and done */
-	for_each_cpu(cpu, cpumask) {
-		work = &per_cpu(stop_cpus_work, cpu);
-		work->fn = fn;
-		work->arg = arg;
-		work->done = done;
-	}
-
 	/*
 	 * Disable preemption while queueing to avoid getting
 	 * preempted by a stopper which might wait for other stoppers
 	 * to enter @fn which can lead to deadlock.
 	 */
 	lg_global_lock(&stop_cpus_lock);
-	for_each_cpu(cpu, cpumask)
-		cpu_stop_queue_work(cpu, &per_cpu(stop_cpus_work, cpu));
+	for_each_cpu(cpu, cpumask) {
+		work = &per_cpu(cpu_stopper.stop_work, cpu);
+		work->fn = fn;
+		work->arg = arg;
+		work->done = done;
+		cpu_stop_queue_work(cpu, work);
+	}
 	lg_global_unlock(&stop_cpus_lock);
 }
 
@@ -452,25 +467,30 @@ repeat:
 	}
 }
 
+void stop_machine_park(int cpu)
+{
+	struct cpu_stopper *stopper = &per_cpu(cpu_stopper, cpu);
+	/*
+	 * Lockless. cpu_stopper_thread() will take stopper->lock and flush
+	 * the pending works before it parks, until then it is fine to queue
+	 * the new works.
+	 */
+	stopper->enabled = false;
+	kthread_park(stopper->thread);
+}
+
 extern void sched_set_stop_task(int cpu, struct task_struct *stop);
 
 static void cpu_stop_create(unsigned int cpu)
 {
-	sched_set_stop_task(cpu, per_cpu(cpu_stopper_task, cpu));
+	sched_set_stop_task(cpu, per_cpu(cpu_stopper.thread, cpu));
 }
 
 static void cpu_stop_park(unsigned int cpu)
 {
 	struct cpu_stopper *stopper = &per_cpu(cpu_stopper, cpu);
-	struct cpu_stop_work *work;
-	unsigned long flags;
 
-	/* drain remaining works */
-	spin_lock_irqsave(&stopper->lock, flags);
-	list_for_each_entry(work, &stopper->works, list)
-		cpu_stop_signal_done(work->done, false);
-	stopper->enabled = false;
-	spin_unlock_irqrestore(&stopper->lock, flags);
+	WARN_ON(!list_empty(&stopper->works));
 }
 
 static void cpu_stop_unpark(unsigned int cpu)
@@ -483,7 +503,7 @@ static void cpu_stop_unpark(unsigned int cpu)
 }
 
 static struct smp_hotplug_thread cpu_stop_threads = {
-	.store			= &cpu_stopper_task,
+	.store			= &cpu_stopper.thread,
 	.thread_should_run	= cpu_stop_should_run,
 	.thread_fn		= cpu_stopper_thread,
 	.thread_comm		= "migration/%u",

@@ -38,7 +38,7 @@ int ceph_init_dentry(struct dentry *dentry)
 	if (dentry->d_fsdata)
 		return 0;
 
-	di = kmem_cache_alloc(ceph_dentry_cachep, GFP_NOFS | __GFP_ZERO);
+	di = kmem_cache_alloc(ceph_dentry_cachep, GFP_KERNEL | __GFP_ZERO);
 	if (!di)
 		return -ENOMEM;          /* oh well */
 
@@ -235,7 +235,7 @@ static int note_last_dentry(struct ceph_file_info *fi, const char *name,
 			    int len)
 {
 	kfree(fi->last_name);
-	fi->last_name = kmalloc(len+1, GFP_NOFS);
+	fi->last_name = kmalloc(len+1, GFP_KERNEL);
 	if (!fi->last_name)
 		return -ENOMEM;
 	memcpy(fi->last_name, name, len);
@@ -346,7 +346,7 @@ more:
 		req->r_direct_hash = ceph_frag_value(frag);
 		req->r_direct_is_hash = true;
 		if (fi->last_name) {
-			req->r_path2 = kstrdup(fi->last_name, GFP_NOFS);
+			req->r_path2 = kstrdup(fi->last_name, GFP_KERNEL);
 			if (!req->r_path2) {
 				ceph_mdsc_put_request(req);
 				return -ENOMEM;
@@ -755,7 +755,7 @@ static int ceph_symlink(struct inode *dir, struct dentry *dentry,
 		d_drop(dentry);
 		return PTR_ERR(req);
 	}
-	req->r_path2 = kstrdup(dest, GFP_NOFS);
+	req->r_path2 = kstrdup(dest, GFP_KERNEL);
 	if (!req->r_path2) {
 		err = -ENOMEM;
 		ceph_mdsc_put_request(req);
@@ -1169,7 +1169,7 @@ static ssize_t ceph_read_dir(struct file *file, char __user *buf, size_t size,
 		return -EISDIR;
 
 	if (!cf->dir_info) {
-		cf->dir_info = kmalloc(bufsize, GFP_NOFS);
+		cf->dir_info = kmalloc(bufsize, GFP_KERNEL);
 		if (!cf->dir_info)
 			return -ENOMEM;
 		cf->dir_info_len =
@@ -1201,66 +1201,6 @@ static ssize_t ceph_read_dir(struct file *file, char __user *buf, size_t size,
 		return -EFAULT;
 	*ppos += (size - left);
 	return size - left;
-}
-
-/*
- * an fsync() on a dir will wait for any uncommitted directory
- * operations to commit.
- */
-static int ceph_dir_fsync(struct file *file, loff_t start, loff_t end,
-			  int datasync)
-{
-	struct inode *inode = file_inode(file);
-	struct ceph_inode_info *ci = ceph_inode(inode);
-	struct list_head *head = &ci->i_unsafe_dirops;
-	struct ceph_mds_request *req;
-	u64 last_tid;
-	int ret = 0;
-
-	dout("dir_fsync %p\n", inode);
-	ret = filemap_write_and_wait_range(inode->i_mapping, start, end);
-	if (ret)
-		return ret;
-	mutex_lock(&inode->i_mutex);
-
-	spin_lock(&ci->i_unsafe_lock);
-	if (list_empty(head))
-		goto out;
-
-	req = list_entry(head->prev,
-			 struct ceph_mds_request, r_unsafe_dir_item);
-	last_tid = req->r_tid;
-
-	do {
-		ceph_mdsc_get_request(req);
-		spin_unlock(&ci->i_unsafe_lock);
-
-		dout("dir_fsync %p wait on tid %llu (until %llu)\n",
-		     inode, req->r_tid, last_tid);
-		if (req->r_timeout) {
-			unsigned long time_left = wait_for_completion_timeout(
-							&req->r_safe_completion,
-							req->r_timeout);
-			if (time_left > 0)
-				ret = 0;
-			else
-				ret = -EIO;  /* timed out */
-		} else {
-			wait_for_completion(&req->r_safe_completion);
-		}
-		ceph_mdsc_put_request(req);
-
-		spin_lock(&ci->i_unsafe_lock);
-		if (ret || list_empty(head))
-			break;
-		req = list_entry(head->next,
-				 struct ceph_mds_request, r_unsafe_dir_item);
-	} while (req->r_tid < last_tid);
-out:
-	spin_unlock(&ci->i_unsafe_lock);
-	mutex_unlock(&inode->i_mutex);
-
-	return ret;
 }
 
 /*
@@ -1335,7 +1275,7 @@ const struct file_operations ceph_dir_fops = {
 	.open = ceph_open,
 	.release = ceph_release,
 	.unlocked_ioctl = ceph_ioctl,
-	.fsync = ceph_dir_fsync,
+	.fsync = ceph_fsync,
 };
 
 const struct file_operations ceph_snapdir_fops = {

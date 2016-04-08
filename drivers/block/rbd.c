@@ -2420,7 +2420,7 @@ static void rbd_img_obj_request_fill(struct rbd_obj_request *obj_request,
 	}
 
 	if (opcode == CEPH_OSD_OP_DELETE)
-		osd_req_op_init(osd_request, num_ops, opcode);
+		osd_req_op_init(osd_request, num_ops, opcode, 0);
 	else
 		osd_req_op_extent_init(osd_request, num_ops, opcode,
 				       offset, length, 0, 0);
@@ -2891,7 +2891,7 @@ static int rbd_img_obj_exists_submit(struct rbd_obj_request *obj_request)
 		goto out;
 	stat_request->callback = rbd_img_obj_exists_callback;
 
-	osd_req_op_init(stat_request->osd_req, 0, CEPH_OSD_OP_STAT);
+	osd_req_op_init(stat_request->osd_req, 0, CEPH_OSD_OP_STAT, 0);
 	osd_req_op_raw_data_in_pages(stat_request->osd_req, 0, pages, size, 0,
 					false, false);
 	rbd_osd_req_format_read(stat_request);
@@ -5006,8 +5006,8 @@ out_err:
  */
 static int rbd_add_get_pool_id(struct rbd_client *rbdc, const char *pool_name)
 {
+	struct ceph_options *opts = rbdc->client->options;
 	u64 newest_epoch;
-	unsigned long timeout = rbdc->client->options->mount_timeout * HZ;
 	int tries = 0;
 	int ret;
 
@@ -5022,7 +5022,8 @@ again:
 		if (rbdc->client->osdc.osdmap->epoch < newest_epoch) {
 			ceph_monc_request_next_osdmap(&rbdc->client->monc);
 			(void) ceph_monc_wait_osdmap(&rbdc->client->monc,
-						     newest_epoch, timeout);
+						     newest_epoch,
+						     opts->mount_timeout);
 			goto again;
 		} else {
 			/* the osdmap we have is new enough */
