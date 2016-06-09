@@ -145,6 +145,9 @@ struct net {
 	RH_KABI_EXTEND(struct work_struct flow_cache_flush_work)
 	RH_KABI_EXTEND(struct mutex flow_flush_sem)
 #endif
+	RH_KABI_EXTEND(bool ip_local_ports_warned)
+	RH_KABI_EXTEND(int ipv4_sysctl_ip_nonlocal_bind)
+	RH_KABI_EXTEND(int ipv6_sysctl_ip_nonlocal_bind)
 };
 
 /*

@@ -58,7 +58,7 @@
 #include "hpsa.h"
 
 /* HPSA_DRIVER_VERSION must be 3 byte values (0-255) separated by '.' */
-#define HPSA_DRIVER_VERSION "3.4.10-0-RH2"
+#define HPSA_DRIVER_VERSION "3.4.10-0-RH3"
 #define DRIVER_NAME "HP HPSA Driver (v " HPSA_DRIVER_VERSION ")"
 #define HPSA "hpsa"
 
@@ -4563,6 +4563,8 @@ static int hpsa_scsi_ioaccel_raid_map(struct ctlr_info *h,
 		return IO_ACCEL_INELIGIBLE;
 
 	c->phys_disk = dev->phys_disk[map_index];
+	if (!c->phys_disk)
+		return IO_ACCEL_INELIGIBLE;
 
 	disk_handle = dd[map_index].ioaccel_handle;
 	disk_block = le64_to_cpu(map->disk_starting_blk) +

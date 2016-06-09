@@ -98,12 +98,12 @@ static int netlink_dump(struct sock *sk);
 static void netlink_skb_destructor(struct sk_buff *skb);
 
 /* nl_table locking explained:
- * Lookup and traversal are protected with nl_sk_hash_lock or nl_table_lock
- * combined with an RCU read-side lock. Insertion and removal are protected
- * with nl_sk_hash_lock while using RCU list modification primitives and may
- * run in parallel to nl_table_lock protected lookups. Destruction of the
- * Netlink socket may only occur *after* nl_table_lock has been acquired
- * either during or after the socket has been removed from the list.
+ * Lookup and traversal are protected with an RCU read-side lock. Insertion
+ * and removal are protected with nl_sk_hash_lock while using RCU list
+ * modification primitives and may run in parallel to RCU protected lookups.
+ * Destruction of the Netlink socket may only occur *after* nl_table_lock has
+ * been acquired * either during or after the socket has been removed from
+ * the list and after an RCU grace period.
  */
 DEFINE_RWLOCK(nl_table_lock);
 EXPORT_SYMBOL_GPL(nl_table_lock);
@@ -362,25 +362,52 @@ err1:
 	return NULL;
 }
 
+
+static void
+__netlink_set_ring(struct sock *sk, struct nl_mmap_req *req, bool tx_ring, void **pg_vec,
+		   unsigned int order)
+{
+	struct netlink_sock *nlk = nlk_sk(sk);
+	struct sk_buff_head *queue;
+	struct netlink_ring *ring;
+
+	queue = tx_ring ? &sk->sk_write_queue : &sk->sk_receive_queue;
+	ring  = tx_ring ? &nlk->tx_ring : &nlk->rx_ring;
+
+	spin_lock_bh(&queue->lock);
+
+	ring->frame_max		= req->nm_frame_nr - 1;
+	ring->head		= 0;
+	ring->frame_size	= req->nm_frame_size;
+	ring->pg_vec_pages	= req->nm_block_size / PAGE_SIZE;
+
+	swap(ring->pg_vec_len, req->nm_block_nr);
+	swap(ring->pg_vec_order, order);
+	swap(ring->pg_vec, pg_vec);
+
+	__skb_queue_purge(queue);
+	spin_unlock_bh(&queue->lock);
+
+	WARN_ON(atomic_read(&nlk->mapped));
+
+	if (pg_vec)
+		free_pg_vec(pg_vec, order, req->nm_block_nr);
+}
+
 static int netlink_set_ring(struct sock *sk, struct nl_mmap_req *req,
-			    bool closing, bool tx_ring)
+			    bool tx_ring)
 {
 	struct netlink_sock *nlk = nlk_sk(sk);
 	struct netlink_ring *ring;
-	struct sk_buff_head *queue;
 	void **pg_vec = NULL;
 	unsigned int order = 0;
-	int err;
 
 	ring  = tx_ring ? &nlk->tx_ring : &nlk->rx_ring;
-	queue = tx_ring ? &sk->sk_write_queue : &sk->sk_receive_queue;
 
-	if (!closing) {
-		if (atomic_read(&nlk->mapped))
-			return -EBUSY;
-		if (atomic_read(&ring->pending))
-			return -EBUSY;
-	}
+	if (atomic_read(&nlk->mapped))
+		return -EBUSY;
+	if (atomic_read(&ring->pending))
+		return -EBUSY;
 
 	if (req->nm_block_nr) {
 		if (ring->pg_vec != NULL)
@@ -412,31 +439,19 @@ static int netlink_set_ring(struct sock *sk, struct nl_mmap_req *req,
 			return -EINVAL;
 	}
 
-	err = -EBUSY;
 	mutex_lock(&nlk->pg_vec_lock);
-	if (closing || atomic_read(&nlk->mapped) == 0) {
-		err = 0;
-		spin_lock_bh(&queue->lock);
-
-		ring->frame_max		= req->nm_frame_nr - 1;
-		ring->head		= 0;
-		ring->frame_size	= req->nm_frame_size;
-		ring->pg_vec_pages	= req->nm_block_size / PAGE_SIZE;
-
-		swap(ring->pg_vec_len, req->nm_block_nr);
-		swap(ring->pg_vec_order, order);
-		swap(ring->pg_vec, pg_vec);
-
-		__skb_queue_purge(queue);
-		spin_unlock_bh(&queue->lock);
-
-		WARN_ON(atomic_read(&nlk->mapped));
+	if (atomic_read(&nlk->mapped) == 0) {
+		__netlink_set_ring(sk, req, tx_ring, pg_vec, order);
+		mutex_unlock(&nlk->pg_vec_lock);
+		return 0;
 	}
+
 	mutex_unlock(&nlk->pg_vec_lock);
 
 	if (pg_vec)
 		free_pg_vec(pg_vec, order, req->nm_block_nr);
-	return err;
+
+	return -EBUSY;
 }
 
 static void netlink_mm_open(struct vm_area_struct *vma)
@@ -925,10 +940,10 @@ static void netlink_sock_destruct(struct sock *sk)
 
 		memset(&req, 0, sizeof(req));
 		if (nlk->rx_ring.pg_vec)
-			netlink_set_ring(sk, &req, true, false);
+			__netlink_set_ring(sk, &req, false, NULL, 0);
 		memset(&req, 0, sizeof(req));
 		if (nlk->tx_ring.pg_vec)
-			netlink_set_ring(sk, &req, true, true);
+			__netlink_set_ring(sk, &req, true, NULL, 0);
 	}
 #endif /* CONFIG_NETLINK_MMAP */
 
@@ -1032,13 +1047,11 @@ static struct sock *netlink_lookup(struct net *net, int protocol, u32 portid)
 	struct netlink_table *table = &nl_table[protocol];
 	struct sock *sk;
 
-	read_lock(&nl_table_lock);
 	rcu_read_lock();
 	sk = __netlink_lookup(table, portid, net);
 	if (sk)
 		sock_hold(sk);
 	rcu_read_unlock();
-	read_unlock(&nl_table_lock);
 
 	return sk;
 }
@@ -1206,6 +1219,13 @@ out_module:
 	goto out;
 }
 
+static void deferred_put_nlk_sk(struct rcu_head *head)
+{
+	struct netlink_sock *nlk = container_of(head, struct netlink_sock, rcu);
+
+	sock_put(&nlk->sk);
+}
+
 static int netlink_release(struct socket *sock)
 {
 	struct sock *sk = sock->sk;
@@ -1265,7 +1285,7 @@ static int netlink_release(struct socket *sock)
 	local_bh_disable();
 	sock_prot_inuse_add(sock_net(sk), &netlink_proto, -1);
 	local_bh_enable();
-	sock_put(sk);
+	call_rcu(&nlk->rcu, deferred_put_nlk_sk);
 	return 0;
 }
 
@@ -1280,7 +1300,6 @@ static int netlink_autobind(struct socket *sock)
 
 retry:
 	cond_resched();
-	netlink_table_grab();
 	rcu_read_lock();
 	if (__netlink_lookup(table, portid, net)) {
 		/* Bind collision, search negative portid values. */
@@ -1288,11 +1307,9 @@ retry:
 		if (rover > -4097)
 			rover = -4097;
 		rcu_read_unlock();
-		netlink_table_ungrab();
 		goto retry;
 	}
 	rcu_read_unlock();
-	netlink_table_ungrab();
 
 	err = netlink_insert(sk, net, portid);
 	if (err == -EADDRINUSE)
@@ -2177,7 +2194,7 @@ static int netlink_setsockopt(struct socket *sock, int level, int optname,
 			return -EINVAL;
 		if (copy_from_user(&req, optval, sizeof(req)))
 			return -EFAULT;
-		err = netlink_set_ring(sk, &req, false,
+		err = netlink_set_ring(sk, &req,
 				       optname == NETLINK_TX_RING);
 		break;
 	}
@@ -2957,9 +2974,8 @@ static struct sock *netlink_seq_socket_idx(struct seq_file *seq, loff_t pos)
 }
 
 static void *netlink_seq_start(struct seq_file *seq, loff_t *pos)
-	__acquires(nl_table_lock) __acquires(RCU)
+	__acquires(RCU)
 {
-	read_lock(&nl_table_lock);
 	rcu_read_lock();
 	return *pos ? netlink_seq_socket_idx(seq, *pos - 1) : SEQ_START_TOKEN;
 }
@@ -3009,10 +3025,9 @@ static void *netlink_seq_next(struct seq_file *seq, void *v, loff_t *pos)
 }
 
 static void netlink_seq_stop(struct seq_file *seq, void *v)
-	__releases(RCU) __releases(nl_table_lock)
+	__releases(RCU)
 {
 	rcu_read_unlock();
-	read_unlock(&nl_table_lock);
 }
 
 
@@ -3155,7 +3170,7 @@ static int __init netlink_proto_init(void)
 		.head_offset = offsetof(struct netlink_sock, node),
 		.key_offset = offsetof(struct netlink_sock, portid),
 		.key_len = sizeof(u32), /* portid */
-		.hashfn = arch_fast_hash,
+		.hashfn = jhash,
 		.max_shift = 16, /* 64K */
 		.grow_decision = rht_grow_above_75,
 		.shrink_decision = rht_shrink_below_30,
