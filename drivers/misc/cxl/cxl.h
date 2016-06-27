@@ -269,6 +269,7 @@ static const cxl_p2n_reg_t CXL_PSL_WED_An     = {0x0A0};
 #define CXL_PSL_DSISR_An_PE (1ull << (63-4))  /* PSL Error (implementation specific) */
 #define CXL_PSL_DSISR_An_AE (1ull << (63-5))  /* AFU Error */
 #define CXL_PSL_DSISR_An_OC (1ull << (63-6))  /* OS Context Warning */
+#define CXL_PSL_DSISR_PENDING (CXL_PSL_DSISR_TRANS | CXL_PSL_DSISR_An_PE | CXL_PSL_DSISR_An_AE | CXL_PSL_DSISR_An_OC)
 /* NOTE: Bits 32:63 are undefined if DSISR[DS] = 1 */
 #define CXL_PSL_DSISR_An_M  DSISR_NOHPTE      /* PTE not found */
 #define CXL_PSL_DSISR_An_P  DSISR_PROTFAULT   /* Storage protection violation */
@@ -362,6 +363,10 @@ struct cxl_afu {
 	struct mutex contexts_lock;
 	struct mutex spa_mutex;
 	spinlock_t afu_cntl_lock;
+
+	/* AFU error buffer fields and bin attribute for sysfs */
+	u64 eb_len, eb_offset;
+	struct bin_attribute attr_eb;
 
 	/*
 	 * Only the first part of the SPA is used for the process element
@@ -564,6 +569,9 @@ static inline void __iomem *_cxl_p2n_addr(struct cxl_afu *afu, cxl_p2n_reg_t reg
 u16 cxl_afu_cr_read16(struct cxl_afu *afu, int cr, u64 off);
 u8 cxl_afu_cr_read8(struct cxl_afu *afu, int cr, u64 off);
 
+ssize_t cxl_afu_read_err_buffer(struct cxl_afu *afu, char *buf,
+				loff_t off, size_t count);
+
 
 struct cxl_calls {
 	void (*cxl_slbia)(struct mm_struct *mm);
@@ -661,4 +669,5 @@ void cxl_stop_trace(struct cxl *cxl);
 
 extern struct pci_driver cxl_pci_driver;
 
+void native_irq_wait(struct cxl_context *ctx);
 #endif

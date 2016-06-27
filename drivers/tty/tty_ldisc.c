@@ -517,16 +517,18 @@ static void tty_ldisc_restore(struct tty_struct *tty, struct tty_ldisc *old)
 int tty_set_ldisc(struct tty_struct *tty, int ldisc)
 {
 	int retval;
-	struct tty_ldisc *o_ldisc, *new_ldisc;
+	struct tty_ldisc *old_ldisc, *new_ldisc;
 	struct tty_struct *o_tty = tty->link;
 
 	new_ldisc = tty_ldisc_get(tty, ldisc);
 	if (IS_ERR(new_ldisc))
 		return PTR_ERR(new_ldisc);
 
+	tty_lock(tty);
 	retval = tty_ldisc_lock_pair_timeout(tty, o_tty, 5 * HZ);
 	if (retval) {
 		tty_ldisc_put(new_ldisc);
+		tty_unlock(tty);
 		return retval;
 	}
 
@@ -537,19 +539,17 @@ int tty_set_ldisc(struct tty_struct *tty, int ldisc)
 	if (tty->ldisc->ops->num == ldisc) {
 		tty_ldisc_enable_pair(tty, o_tty);
 		tty_ldisc_put(new_ldisc);
+		tty_unlock(tty);
 		return 0;
 	}
 
 	/* FIXME: why 'shutoff' input if the ldisc is locked? */
 	tty->receive_room = 0;
 
-	o_ldisc = tty->ldisc;
-	tty_lock(tty);
+	old_ldisc = tty->ldisc;
 
-	/* FIXME: for testing only */
-	WARN_ON(test_bit(TTY_HUPPED, &tty->flags));
-
-	if (test_bit(TTY_HUPPING, &tty->flags)) {
+	if (test_bit(TTY_HUPPING, &tty->flags) ||
+	    test_bit(TTY_HUPPED, &tty->flags)) {
 		/* We were raced by the hangup method. It will have stomped
 		   the ldisc data and closed the ldisc down */
 		tty_ldisc_enable_pair(tty, o_tty);
@@ -558,8 +558,8 @@ int tty_set_ldisc(struct tty_struct *tty, int ldisc)
 		return -EIO;
 	}
 
-	/* Shutdown the current discipline. */
-	tty_ldisc_close(tty, o_ldisc);
+	/* Shutdown the old discipline. */
+	tty_ldisc_close(tty, old_ldisc);
 
 	/* Now set up the new line discipline. */
 	tty->ldisc = new_ldisc;
@@ -569,17 +569,17 @@ int tty_set_ldisc(struct tty_struct *tty, int ldisc)
 	if (retval < 0) {
 		/* Back to the old one or N_TTY if we can't */
 		tty_ldisc_put(new_ldisc);
-		tty_ldisc_restore(tty, o_ldisc);
+		tty_ldisc_restore(tty, old_ldisc);
 	}
 
 	/* At this point we hold a reference to the new ldisc and a
 	   a reference to the old ldisc. If we ended up flipping back
 	   to the existing ldisc we have two references to it */
 
-	if (tty->ldisc->ops->num != o_ldisc->ops->num && tty->ops->set_ldisc)
+	if (tty->ldisc->ops->num != old_ldisc->ops->num && tty->ops->set_ldisc)
 		tty->ops->set_ldisc(tty);
 
-	tty_ldisc_put(o_ldisc);
+	tty_ldisc_put(old_ldisc);
 
 	/*
 	 *	Allow ldisc referencing to occur again
@@ -679,8 +679,6 @@ void tty_ldisc_hangup(struct tty_struct *tty)
 	wake_up_interruptible_poll(&tty->write_wait, POLLOUT);
 	wake_up_interruptible_poll(&tty->read_wait, POLLIN);
 
-	tty_unlock(tty);
-
 	/*
 	 * Shutdown the current line discipline, and reset it to
 	 * N_TTY if need be.
@@ -688,7 +686,6 @@ void tty_ldisc_hangup(struct tty_struct *tty)
 	 * Avoid racing set_ldisc or tty_ldisc_release
 	 */
 	tty_ldisc_lock_pair(tty, tty->link);
-	tty_lock(tty);
 
 	if (tty->ldisc) {
 
@@ -768,6 +765,8 @@ static void tty_ldisc_kill(struct tty_struct *tty)
  *	Called during the final close of a tty/pty pair in order to shut down
  *	the line discpline layer. On exit the ldisc assigned is N_TTY and the
  *	ldisc has not been opened.
+ *
+ *	Holding ldisc_sem write lock serializes tty->ldisc changes.
  */
 
 void tty_ldisc_release(struct tty_struct *tty, struct tty_struct *o_tty)
@@ -780,13 +779,9 @@ void tty_ldisc_release(struct tty_struct *tty, struct tty_struct *o_tty)
 	tty_ldisc_debug(tty, "closing ldisc: %p\n", tty->ldisc);
 
 	tty_ldisc_lock_pair(tty, o_tty);
-	tty_lock_pair(tty, o_tty);
-
 	tty_ldisc_kill(tty);
 	if (o_tty)
 		tty_ldisc_kill(o_tty);
-
-	tty_unlock_pair(tty, o_tty);
 	tty_ldisc_unlock_pair(tty, o_tty);
 
 	/* And the memory resources remaining (buffers, termios) will be
