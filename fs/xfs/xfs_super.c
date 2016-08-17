@@ -859,18 +859,20 @@ xfs_init_mount_workqueues(
 		goto out_destroy_unwritten;
 
 	mp->m_reclaim_workqueue = alloc_workqueue("xfs-reclaim/%s",
-			WQ_NON_REENTRANT|WQ_FREEZABLE, 0, mp->m_fsname);
+			WQ_MEM_RECLAIM|WQ_NON_REENTRANT|WQ_FREEZABLE, 0,
+			mp->m_fsname);
 	if (!mp->m_reclaim_workqueue)
 		goto out_destroy_cil;
 
 	mp->m_log_workqueue = alloc_workqueue("xfs-log/%s",
-			WQ_NON_REENTRANT|WQ_FREEZABLE|WQ_HIGHPRI, 0,
-			mp->m_fsname);
+			WQ_MEM_RECLAIM|WQ_NON_REENTRANT|WQ_FREEZABLE|WQ_HIGHPRI,
+			0, mp->m_fsname);
 	if (!mp->m_log_workqueue)
 		goto out_destroy_reclaim;
 
 	mp->m_eofblocks_workqueue = alloc_workqueue("xfs-eofblocks/%s",
-			WQ_NON_REENTRANT|WQ_FREEZABLE, 0, mp->m_fsname);
+			WQ_MEM_RECLAIM|WQ_NON_REENTRANT|WQ_FREEZABLE, 0,
+			mp->m_fsname);
 	if (!mp->m_eofblocks_workqueue)
 		goto out_destroy_log;
 
@@ -1275,6 +1277,7 @@ xfs_fs_remount(
 		 */
 		xfs_restore_resvblks(mp);
 		xfs_log_work_queue(mp);
+		xfs_queue_eofblocks(mp);
 	}
 
 	/* rw -> ro */
@@ -1287,6 +1290,13 @@ xfs_fs_remount(
 		 * return it to the same size.
 		 */
 		xfs_save_resvblks(mp);
+
+		/*
+		 * Cancel background eofb scanning so it cannot race with the
+		 * final log force+buftarg wait and deadlock the remount.
+		 */
+		cancel_delayed_work_sync(&mp->m_eofblocks_work);
+
 		xfs_quiesce_attr(mp);
 		mp->m_flags |= XFS_MOUNT_RDONLY;
 	}

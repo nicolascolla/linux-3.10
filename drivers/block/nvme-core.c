@@ -13,6 +13,7 @@
  */
 
 #include <linux/nvme.h>
+#include <linux/aer.h>
 #include <linux/bitops.h>
 #include <linux/blkdev.h>
 #include <linux/blk-mq.h>
@@ -33,6 +34,7 @@
 #include <linux/mm.h>
 #include <linux/module.h>
 #include <linux/moduleparam.h>
+#include <linux/mutex.h>
 #include <linux/pci.h>
 #include <linux/poison.h>
 #include <linux/ptrace.h>
@@ -190,6 +192,13 @@ static int nvme_admin_init_hctx(struct blk_mq_hw_ctx *hctx, void *data,
 	hctx->driver_data = nvmeq;
 	nvmeq->tags = &dev->admin_tagset.tags[0];
 	return 0;
+}
+
+static void nvme_admin_exit_hctx(struct blk_mq_hw_ctx *hctx, unsigned int hctx_idx)
+{
+	struct nvme_queue *nvmeq = hctx->driver_data;
+
+	nvmeq->tags = NULL;
 }
 
 static int nvme_admin_init_request(void *data, struct request *req,
@@ -1454,6 +1463,7 @@ static struct blk_mq_ops nvme_mq_admin_ops = {
 	.queue_rq	= nvme_admin_queue_rq,
 	.map_queue	= blk_mq_map_queue,
 	.init_hctx	= nvme_admin_init_hctx,
+	.exit_hctx      = nvme_admin_exit_hctx,
 	.init_request	= nvme_admin_init_request,
 	.timeout	= nvme_timeout,
 };
@@ -1496,6 +1506,7 @@ static int nvme_alloc_admin_tags(struct nvme_dev *dev)
 		}
 		if (!blk_get_queue(dev->admin_q)) {
 			nvme_dev_remove_admin(dev);
+			dev->admin_q = NULL;
 			return -ENODEV;
 		}
 	} else
@@ -2277,6 +2288,22 @@ static void nvme_scan_namespaces(struct nvme_dev *dev, unsigned nn)
 	list_sort(NULL, &dev->namespaces, ns_cmp);
 }
 
+static void nvme_set_irq_hints(struct nvme_dev *dev)
+{
+	struct nvme_queue *nvmeq;
+	int i;
+
+	for (i = 0; i < dev->online_queues; i++) {
+		nvmeq = dev->queues[i];
+
+		if (!nvmeq->tags || !(*nvmeq->tags))
+			continue;
+
+		irq_set_affinity_hint(dev->entry[nvmeq->cq_vector].vector,
+					blk_mq_tags_cpumask(*nvmeq->tags));
+	}
+}
+
 static void nvme_dev_scan(struct work_struct *work)
 {
 	struct nvme_dev *dev = container_of(work, struct nvme_dev, scan_work);
@@ -2297,6 +2324,7 @@ static void nvme_dev_scan(struct work_struct *work)
 	ctrl = mem;
 	nvme_scan_namespaces(dev, le32_to_cpup(&ctrl->nn));
 	dma_free_coherent(&dev->pci_dev->dev, 4096, mem, dma_addr);
+	nvme_set_irq_hints(dev);
 }
 
 /*
@@ -2414,6 +2442,8 @@ static int nvme_dev_map(struct nvme_dev *dev)
 	dev->db_stride = 1 << NVME_CAP_STRIDE(cap);
 	dev->dbs = ((void __iomem *)dev->bar) + 4096;
 
+	pci_enable_pcie_error_reporting(pdev);
+	pci_save_state(pdev);
 	return 0;
 
  unmap:
@@ -2439,8 +2469,10 @@ static void nvme_dev_unmap(struct nvme_dev *dev)
 		pci_release_regions(dev->pci_dev);
 	}
 
-	if (pci_is_enabled(dev->pci_dev))
+	if (pci_is_enabled(dev->pci_dev)) {
+		pci_disable_pcie_error_reporting(dev->pci_dev);
 		pci_disable_device(dev->pci_dev);
+	}
 }
 
 struct nvme_delq_ctx {
@@ -2638,6 +2670,7 @@ static void nvme_dev_shutdown(struct nvme_dev *dev)
 
 	nvme_dev_list_remove(dev);
 
+	mutex_lock(&dev->shutdown_lock);
 	if (dev->bar) {
 		nvme_freeze_queues(dev);
 		csts = readl(&dev->bar->csts);
@@ -2656,6 +2689,7 @@ static void nvme_dev_shutdown(struct nvme_dev *dev)
 
 	for (i = dev->queue_count - 1; i >= 0; i--)
 		nvme_clear_queue(dev->queues[i]);
+	mutex_unlock(&dev->shutdown_lock);
 }
 
 static void nvme_dev_remove(struct nvme_dev *dev)
@@ -2735,8 +2769,10 @@ static void nvme_free_dev(struct kref *kref)
 	put_device(dev->device);
 	nvme_free_namespaces(dev);
 	nvme_release_instance(dev);
-	blk_mq_free_tag_set(&dev->tagset);
-	blk_put_queue(dev->admin_q);
+	if (dev->tagset.tags)
+		blk_mq_free_tag_set(&dev->tagset);
+	if (dev->admin_q)
+		blk_put_queue(dev->admin_q);
 	kfree(dev->queues);
 	kfree(dev->entry);
 	kfree(dev);
@@ -2803,22 +2839,6 @@ static const struct file_operations nvme_dev_fops = {
 	.compat_ioctl	= nvme_dev_ioctl,
 };
 
-static void nvme_set_irq_hints(struct nvme_dev *dev)
-{
-	struct nvme_queue *nvmeq;
-	int i;
-
-	for (i = 0; i < dev->online_queues; i++) {
-		nvmeq = dev->queues[i];
-
-		if (!nvmeq->tags || !(*nvmeq->tags))
-			continue;
-
-		irq_set_affinity_hint(dev->entry[nvmeq->cq_vector].vector,
-					blk_mq_tags_cpumask(*nvmeq->tags));
-	}
-}
-
 static int nvme_dev_start(struct nvme_dev *dev)
 {
 	int result;
@@ -2860,13 +2880,14 @@ static int nvme_dev_start(struct nvme_dev *dev)
 	if (result)
 		goto free_tags;
 
-	nvme_set_irq_hints(dev);
-
 	dev->event_limit = 1;
 	return result;
 
  free_tags:
 	nvme_dev_remove_admin(dev);
+	blk_put_queue(dev->admin_q);
+	dev->admin_q = NULL;
+	dev->queues[0]->tags = NULL;
  disable:
 	nvme_disable_queue(dev, 0);
 	nvme_dev_list_remove(dev);
@@ -2909,7 +2930,6 @@ static int nvme_dev_resume(struct nvme_dev *dev)
 	} else {
 		nvme_unfreeze_queues(dev);
 		nvme_dev_add(dev);
-		nvme_set_irq_hints(dev);
 	}
 	return 0;
 }
@@ -3016,6 +3036,7 @@ static int nvme_probe(struct pci_dev *pdev, const struct pci_device_id *id)
 
 	INIT_LIST_HEAD(&dev->namespaces);
 	INIT_WORK(&dev->reset_work, nvme_reset_failed_dev);
+	mutex_init(&dev->shutdown_lock);
 	dev->pci_dev = pci_dev_get(pdev);
 	pci_set_drvdata(pdev, dev);
 	result = nvme_set_instance(dev);
@@ -3109,13 +3130,6 @@ static void nvme_remove(struct pci_dev *pdev)
 	kref_put(&dev->kref, nvme_free_dev);
 }
 
-/* These functions are yet to be implemented */
-#define nvme_error_detected NULL
-#define nvme_dump_registers NULL
-#define nvme_link_reset NULL
-#define nvme_slot_reset NULL
-#define nvme_error_resume NULL
-
 static int nvme_suspend(struct device *dev)
 {
 	struct pci_dev *pdev = to_pci_dev(dev);
@@ -3139,10 +3153,46 @@ static int nvme_resume(struct device *dev)
 
 static SIMPLE_DEV_PM_OPS(nvme_dev_pm_ops, nvme_suspend, nvme_resume);
 
+static pci_ers_result_t nvme_error_detected(struct pci_dev *pdev,
+						pci_channel_state_t state)
+{
+	struct nvme_dev *dev = pci_get_drvdata(pdev);
+
+	/*
+	 * A frozen channel requires a reset. When detected, this method will
+	 * shutdown the controller to quiesce. The controller will be restarted
+	 * after the slot reset through driver's slot_reset callback.
+	 */
+	dev_warn(&pdev->dev, "error detected: state:%d\n", state);
+	switch (state) {
+	case pci_channel_io_normal:
+		return PCI_ERS_RESULT_CAN_RECOVER;
+	case pci_channel_io_frozen:
+		nvme_dev_shutdown(dev);
+		return PCI_ERS_RESULT_NEED_RESET;
+	case pci_channel_io_perm_failure:
+		return PCI_ERS_RESULT_DISCONNECT;
+	}
+	return PCI_ERS_RESULT_NEED_RESET;
+}
+
+static pci_ers_result_t nvme_slot_reset(struct pci_dev *pdev)
+{
+	struct nvme_dev *dev = pci_get_drvdata(pdev);
+
+	dev_info(&pdev->dev, "restart after slot reset\n");
+	pci_restore_state(pdev);
+	queue_work(nvme_workq, &dev->reset_work);
+	return PCI_ERS_RESULT_RECOVERED;
+}
+
+static void nvme_error_resume(struct pci_dev *pdev)
+{
+	pci_cleanup_aer_uncorrect_error_status(pdev);
+}
+
 static const struct pci_error_handlers nvme_err_handler = {
 	.error_detected	= nvme_error_detected,
-	.mmio_enabled	= nvme_dump_registers,
-	.link_reset	= nvme_link_reset,
 	.slot_reset	= nvme_slot_reset,
 	.resume		= nvme_error_resume,
 };
