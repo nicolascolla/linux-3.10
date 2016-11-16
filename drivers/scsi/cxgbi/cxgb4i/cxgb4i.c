@@ -158,7 +158,7 @@ static struct scsi_transport_template *cxgb4i_stt;
  */
 
 #define RCV_BUFSIZ_MASK		0x3FFU
-#define MAX_IMM_TX_PKT_LEN	128
+#define MAX_IMM_TX_PKT_LEN	256
 
 static int push_tx_frames(struct cxgbi_sock *, int);
 
@@ -576,10 +576,11 @@ static inline void make_tx_data_wr(struct cxgbi_sock *csk, struct sk_buff *skb,
 	struct fw_ofld_tx_data_wr *req;
 	unsigned int submode = cxgbi_skcb_ulp_mode(skb) & 3;
 	unsigned int wr_ulp_mode = 0, val;
+	bool imm = is_ofld_imm(skb);
 
 	req = (struct fw_ofld_tx_data_wr *)__skb_push(skb, sizeof(*req));
 
-	if (is_ofld_imm(skb)) {
+	if (imm) {
 		req->op_to_immdlen = htonl(FW_WR_OP_V(FW_OFLD_TX_DATA_WR) |
 					FW_WR_COMPL_F |
 					FW_WR_IMMDLEN_V(dlen));
