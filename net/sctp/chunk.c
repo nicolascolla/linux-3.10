@@ -77,6 +77,19 @@ static struct sctp_datamsg *sctp_datamsg_new(gfp_t gfp)
 	return msg;
 }
 
+void sctp_datamsg_free(struct sctp_datamsg *msg)
+{
+	struct sctp_chunk *chunk;
+
+	/* This doesn't have to be a _safe vairant because
+	 * sctp_chunk_free() only drops the refs.
+	 */
+	list_for_each_entry(chunk, &msg->chunks, frag_list)
+		sctp_chunk_free(chunk);
+
+	sctp_datamsg_put(msg);
+}
+
 /* Final destructruction of datamsg memory. */
 static void sctp_datamsg_destroy(struct sctp_datamsg *msg)
 {
@@ -201,8 +214,8 @@ struct sctp_datamsg *sctp_datamsg_from_user(struct sctp_association *asoc,
 		struct sctp_hmac *hmac_desc = sctp_auth_asoc_get_hmac(asoc);
 
 		if (hmac_desc)
-			max_data -= WORD_ROUND(sizeof(sctp_auth_chunk_t) +
-					    hmac_desc->hmac_len);
+			max_data -= SCTP_PAD4(sizeof(sctp_auth_chunk_t) +
+					      hmac_desc->hmac_len);
 	}
 
 	/* Now, check if we need to reduce our max */
@@ -222,7 +235,7 @@ struct sctp_datamsg *sctp_datamsg_from_user(struct sctp_association *asoc,
 	    asoc->outqueue.out_qlen == 0 &&
 	    list_empty(&asoc->outqueue.retransmit) &&
 	    msg_len > max)
-		max_data -= WORD_ROUND(sizeof(sctp_sack_chunk_t));
+		max_data -= SCTP_PAD4(sizeof(sctp_sack_chunk_t));
 
 	/* Encourage Cookie-ECHO bundling. */
 	if (asoc->state < SCTP_STATE_COOKIE_ECHOED)
