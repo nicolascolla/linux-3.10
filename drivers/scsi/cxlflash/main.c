@@ -264,8 +264,9 @@ static void context_reset(struct afu_cmd *cmd)
 {
 	int nretry = 0;
 	u64 rrin = 0x1;
-	u64 room = 0;
 	struct afu *afu = cmd->parent;
+	struct cxlflash_cfg *cfg = afu->parent;
+	struct device *dev = &cfg->dev->dev;
 	ulong lock_flags;
 
 	pr_debug("%s: cmd=%p\n", __func__, cmd);
@@ -281,23 +282,6 @@ static void context_reset(struct afu_cmd *cmd)
 	cmd->sa.host_use_b[0] |= (B_DONE | B_ERROR | B_TIMEOUT);
 	spin_unlock_irqrestore(&cmd->slock, lock_flags);
 
-	/*
-	 * We really want to send this reset at all costs, so spread
-	 * out wait time on successive retries for available room.
-	 */
-	do {
-		room = readq_be(&afu->host_map->cmd_room);
-		atomic64_set(&afu->room, room);
-		if (room)
-			goto write_rrin;
-		udelay(1 << nretry);
-	} while (nretry++ < MC_ROOM_RETRY_CNT);
-
-	pr_err("%s: no cmd_room to send reset\n", __func__);
-	return;
-
-write_rrin:
-	nretry = 0;
 	writeq_be(rrin, &afu->host_map->ioarrin);
 	do {
 		rrin = readq_be(&afu->host_map->ioarrin);
@@ -306,6 +290,9 @@ write_rrin:
 		/* Double delay each time */
 		udelay(1 << nretry);
 	} while (nretry++ < MC_ROOM_RETRY_CNT);
+
+	dev_dbg(dev, "%s: returning rrin=0x%016llX nretry=%d\n",
+		__func__, rrin, nretry);
 }
 
 /**
@@ -320,59 +307,34 @@ static int send_cmd(struct afu *afu, struct afu_cmd *cmd)
 {
 	struct cxlflash_cfg *cfg = afu->parent;
 	struct device *dev = &cfg->dev->dev;
-	int nretry = 0;
 	int rc = 0;
-	u64 room;
-	long newval;
+	s64 room;
+	ulong lock_flags;
 
 	/*
-	 * This routine is used by critical users such an AFU sync and to
-	 * send a task management function (TMF). Thus we want to retry a
-	 * bit before returning an error. To avoid the performance penalty
-	 * of MMIO, we spread the update of 'room' over multiple commands.
+	 * To avoid the performance penalty of MMIO, spread the update of
+	 * 'room' over multiple commands.
 	 */
-retry:
-	newval = atomic64_dec_if_positive(&afu->room);
-	if (!newval) {
-		do {
-			room = readq_be(&afu->host_map->cmd_room);
-			atomic64_set(&afu->room, room);
-			if (room)
-				goto write_ioarrin;
-			udelay(1 << nretry);
-		} while (nretry++ < MC_ROOM_RETRY_CNT);
-
-		dev_err(dev, "%s: no cmd_room to send 0x%X\n",
-		       __func__, cmd->rcb.cdb[0]);
-
-		goto no_room;
-	} else if (unlikely(newval < 0)) {
-		/* This should be rare. i.e. Only if two threads race and
-		 * decrement before the MMIO read is done. In this case
-		 * just benefit from the other thread having updated
-		 * afu->room.
-		 */
-		if (nretry++ < MC_ROOM_RETRY_CNT) {
-			udelay(1 << nretry);
-			goto retry;
+	spin_lock_irqsave(&afu->rrin_slock, lock_flags);
+	if (--afu->room < 0) {
+		room = readq_be(&afu->host_map->cmd_room);
+		if (room <= 0) {
+			dev_dbg_ratelimited(dev, "%s: no cmd_room to send "
+					    "0x%02X, room=0x%016llX\n",
+					    __func__, cmd->rcb.cdb[0], room);
+			afu->room = 0;
+			rc = SCSI_MLQUEUE_HOST_BUSY;
+			goto out;
 		}
-
-		goto no_room;
+		afu->room = room - 1;
 	}
 
-write_ioarrin:
 	writeq_be((u64)&cmd->rcb, &afu->host_map->ioarrin);
 out:
+	spin_unlock_irqrestore(&afu->rrin_slock, lock_flags);
 	pr_devel("%s: cmd=%p len=%d ea=%p rc=%d\n", __func__, cmd,
 		 cmd->rcb.data_len, (void *)cmd->rcb.data_ea, rc);
 	return rc;
-
-no_room:
-	afu->read_room = true;
-	kref_get(&cfg->afu->mapcount);
-	schedule_work(&cfg->work_q);
-	rc = SCSI_MLQUEUE_HOST_BUSY;
-	goto out;
 }
 
 /**
@@ -824,17 +786,6 @@ static void notify_shutdown(struct cxlflash_cfg *cfg, bool wait)
 }
 
 /**
- * cxlflash_shutdown() - shutdown handler
- * @pdev:	PCI device associated with the host.
- */
-static void cxlflash_shutdown(struct pci_dev *pdev)
-{
-	struct cxlflash_cfg *cfg = pci_get_drvdata(pdev);
-
-	notify_shutdown(cfg, false);
-}
-
-/**
  * cxlflash_remove() - PCI entry point to tear down host
  * @pdev:	PCI device associated with the host.
  *
@@ -844,6 +795,11 @@ static void cxlflash_remove(struct pci_dev *pdev)
 {
 	struct cxlflash_cfg *cfg = pci_get_drvdata(pdev);
 	ulong lock_flags;
+
+	if (!pci_is_enabled(pdev)) {
+		pr_debug("%s: Device is disabled\n", __func__);
+		return;
+	}
 
 	/* If a Task Management Function is active, wait for it to complete
 	 * before continuing with remove.
@@ -1047,6 +1003,8 @@ static int wait_port_online(__be64 __iomem *fc_regs, u32 delay_us, u32 nretry)
 	do {
 		msleep(delay_us / 1000);
 		status = readq_be(&fc_regs[FC_MTIP_STATUS / 8]);
+		if (status == U64_MAX)
+			nretry /= 2;
 	} while ((status & FC_MTIP_STATUS_MASK) != FC_MTIP_STATUS_ONLINE &&
 		 nretry--);
 
@@ -1078,6 +1036,8 @@ static int wait_port_offline(__be64 __iomem *fc_regs, u32 delay_us, u32 nretry)
 	do {
 		msleep(delay_us / 1000);
 		status = readq_be(&fc_regs[FC_MTIP_STATUS / 8]);
+		if (status == U64_MAX)
+			nretry /= 2;
 	} while ((status & FC_MTIP_STATUS_MASK) != FC_MTIP_STATUS_OFFLINE &&
 		 nretry--);
 
@@ -1188,7 +1148,7 @@ static const struct asyc_intr_info ainfo[] = {
 	{SISL_ASTATUS_FC0_LOGI_F, "login failed", 0, CLR_FC_ERROR},
 	{SISL_ASTATUS_FC0_LOGI_S, "login succeeded", 0, SCAN_HOST},
 	{SISL_ASTATUS_FC0_LINK_DN, "link down", 0, 0},
-	{SISL_ASTATUS_FC0_LINK_UP, "link up", 0, SCAN_HOST},
+	{SISL_ASTATUS_FC0_LINK_UP, "link up", 0, 0},
 	{SISL_ASTATUS_FC1_OTHER, "other error", 1, CLR_FC_ERROR | LINK_RESET},
 	{SISL_ASTATUS_FC1_LOGO, "target initiated LOGO", 1, 0},
 	{SISL_ASTATUS_FC1_CRC_T, "CRC threshold exceeded", 1, LINK_RESET},
@@ -1196,7 +1156,7 @@ static const struct asyc_intr_info ainfo[] = {
 	{SISL_ASTATUS_FC1_LOGI_F, "login failed", 1, CLR_FC_ERROR},
 	{SISL_ASTATUS_FC1_LOGI_S, "login succeeded", 1, SCAN_HOST},
 	{SISL_ASTATUS_FC1_LINK_DN, "link down", 1, 0},
-	{SISL_ASTATUS_FC1_LINK_UP, "link up", 1, SCAN_HOST},
+	{SISL_ASTATUS_FC1_LINK_UP, "link up", 1, 0},
 	{0x0, "", 0, 0}		/* terminator */
 };
 
@@ -1865,7 +1825,8 @@ static int init_afu(struct cxlflash_cfg *cfg)
 	}
 
 	afu_err_intr_init(cfg->afu);
-	atomic64_set(&afu->room, readq_be(&afu->host_map->cmd_room));
+	spin_lock_init(&afu->rrin_slock);
+	afu->room = readq_be(&afu->host_map->cmd_room);
 
 	/* Restore the LUN mappings */
 	cxlflash_restore_luntable(cfg);
@@ -2049,6 +2010,11 @@ retry:
  * cxlflash_eh_host_reset_handler() - reset the host adapter
  * @scp:	SCSI command from stack identifying host.
  *
+ * Following a reset, the state is evaluated again in case an EEH occurred
+ * during the reset. In such a scenario, the host reset will either yield
+ * until the EEH recovery is complete or return success or failure based
+ * upon the current device state.
+ *
  * Return:
  *	SUCCESS as defined in scsi/scsi.h
  *	FAILED as defined in scsi/scsi.h
@@ -2081,7 +2047,8 @@ static int cxlflash_eh_host_reset_handler(struct scsi_cmnd *scp)
 		} else
 			cfg->state = STATE_NORMAL;
 		wake_up_all(&cfg->reset_waitq);
-		break;
+		ssleep(1);
+		/* fall through */
 	case STATE_RESET:
 		wait_event(cfg->reset_waitq, cfg->state != STATE_RESET);
 		if (cfg->state == STATE_NORMAL)
@@ -2436,7 +2403,6 @@ MODULE_DEVICE_TABLE(pci, cxlflash_pci_table);
  * Handles the following events:
  * - Link reset which cannot be performed on interrupt context due to
  * blocking up to a few seconds
- * - Read AFU command room
  * - Rescan the host
  */
 static void cxlflash_worker_thread(struct work_struct *work)
@@ -2471,11 +2437,6 @@ static void cxlflash_worker_thread(struct work_struct *work)
 		}
 
 		cfg->lr_state = LINK_RESET_COMPLETE;
-	}
-
-	if (afu->read_room) {
-		atomic64_set(&afu->room, readq_be(&afu->host_map->cmd_room));
-		afu->read_room = false;
 	}
 
 	spin_unlock_irqrestore(cfg->host->host_lock, lock_flags);
@@ -2602,6 +2563,9 @@ out_remove:
  * @pdev:	PCI device struct.
  * @state:	PCI channel state.
  *
+ * When an EEH occurs during an active reset, wait until the reset is
+ * complete and then take action based upon the device state.
+ *
  * Return: PCI_ERS_RESULT_NEED_RESET or PCI_ERS_RESULT_DISCONNECT
  */
 static pci_ers_result_t cxlflash_pci_error_detected(struct pci_dev *pdev,
@@ -2615,6 +2579,10 @@ static pci_ers_result_t cxlflash_pci_error_detected(struct pci_dev *pdev,
 
 	switch (state) {
 	case pci_channel_io_frozen:
+		wait_event(cfg->reset_waitq, cfg->state != STATE_RESET);
+		if (cfg->state == STATE_FAILTERM)
+			return PCI_ERS_RESULT_DISCONNECT;
+
 		cfg->state = STATE_RESET;
 		scsi_block_requests(cfg->host);
 		drain_ioctls(cfg);
@@ -2691,7 +2659,7 @@ static struct pci_driver cxlflash_driver = {
 	.id_table = cxlflash_pci_table,
 	.probe = cxlflash_probe,
 	.remove = cxlflash_remove,
-	.shutdown = cxlflash_shutdown,
+	.shutdown = cxlflash_remove,
 	.err_handler = &cxlflash_err_handler,
 };
 

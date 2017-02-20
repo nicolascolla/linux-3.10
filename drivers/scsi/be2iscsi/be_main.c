@@ -1193,12 +1193,19 @@ beiscsi_get_wrb_handle(struct hwi_wrb_context *pwrb_context,
 {
 	struct wrb_handle *pwrb_handle;
 
+	spin_lock_bh(&pwrb_context->wrb_lock);
+	if (!pwrb_context->wrb_handles_available) {
+		spin_unlock_bh(&pwrb_context->wrb_lock);
+		return NULL;
+	}
 	pwrb_handle = pwrb_context->pwrb_handle_base[pwrb_context->alloc_index];
 	pwrb_context->wrb_handles_available--;
 	if (pwrb_context->alloc_index == (wrbs_per_cxn - 1))
 		pwrb_context->alloc_index = 0;
 	else
 		pwrb_context->alloc_index++;
+	spin_unlock_bh(&pwrb_context->wrb_lock);
+	memset(pwrb_handle->pwrb, 0, sizeof(*pwrb_handle->pwrb));
 
 	return pwrb_handle;
 }
@@ -1230,12 +1237,15 @@ beiscsi_put_wrb_handle(struct hwi_wrb_context *pwrb_context,
 		       struct wrb_handle *pwrb_handle,
 		       unsigned int wrbs_per_cxn)
 {
+	spin_lock_bh(&pwrb_context->wrb_lock);
 	pwrb_context->pwrb_handle_base[pwrb_context->free_index] = pwrb_handle;
 	pwrb_context->wrb_handles_available++;
 	if (pwrb_context->free_index == (wrbs_per_cxn - 1))
 		pwrb_context->free_index = 0;
 	else
 		pwrb_context->free_index++;
+	pwrb_handle->pio_handle = NULL;
+	spin_unlock_bh(&pwrb_context->wrb_lock);
 }
 
 /**
@@ -1435,11 +1445,11 @@ hwi_complete_drvr_msgs(struct beiscsi_conn *beiscsi_conn,
 		       struct beiscsi_hba *phba, struct sol_cqe *psol)
 {
 	struct hwi_wrb_context *pwrb_context;
-	struct wrb_handle *pwrb_handle = NULL;
-	struct hwi_controller *phwi_ctrlr;
-	struct iscsi_task *task;
-	struct beiscsi_io_task *io_task;
 	uint16_t wrb_index, cid, cri_index;
+	struct hwi_controller *phwi_ctrlr;
+	struct wrb_handle *pwrb_handle;
+	struct iscsi_session *session;
+	struct iscsi_task *task;
 
 	phwi_ctrlr = phba->phwi_ctrlr;
 	if (is_chip_be2_be3r(phba)) {
@@ -1457,11 +1467,12 @@ hwi_complete_drvr_msgs(struct beiscsi_conn *beiscsi_conn,
 	cri_index = BE_GET_CRI_FROM_CID(cid);
 	pwrb_context = &phwi_ctrlr->wrb_context[cri_index];
 	pwrb_handle = pwrb_context->pwrb_handle_basestd[wrb_index];
+	session = beiscsi_conn->conn->session;
+	spin_lock_bh(&session->lock);
 	task = pwrb_handle->pio_handle;
-
-	io_task = task->dd_data;
-	memset(io_task->pwrb_handle->pwrb, 0, sizeof(struct iscsi_wrb));
-	iscsi_put_task(task);
+	if (task)
+		__iscsi_put_task(task);
+	spin_unlock_bh(&session->lock);
 }
 
 static void
@@ -1541,16 +1552,16 @@ static void adapter_get_sol_cqe(struct beiscsi_hba *phba,
 static void hwi_complete_cmd(struct beiscsi_conn *beiscsi_conn,
 			     struct beiscsi_hba *phba, struct sol_cqe *psol)
 {
-	struct hwi_wrb_context *pwrb_context;
-	struct wrb_handle *pwrb_handle;
-	struct iscsi_wrb *pwrb = NULL;
-	struct hwi_controller *phwi_ctrlr;
-	struct iscsi_task *task;
-	unsigned int type;
 	struct iscsi_conn *conn = beiscsi_conn->conn;
 	struct iscsi_session *session = conn->session;
 	struct common_sol_cqe csol_cqe = {0};
+	struct hwi_wrb_context *pwrb_context;
+	struct hwi_controller *phwi_ctrlr;
+	struct wrb_handle *pwrb_handle;
+	struct iscsi_wrb *pwrb = NULL;
+	struct iscsi_task *task;
 	uint16_t cri_index = 0;
+	uint8_t type;
 
 	phwi_ctrlr = phba->phwi_ctrlr;
 
@@ -1563,11 +1574,15 @@ static void hwi_complete_cmd(struct beiscsi_conn *beiscsi_conn,
 	pwrb_handle = pwrb_context->pwrb_handle_basestd[
 		      csol_cqe.wrb_index];
 
+	spin_lock_bh(&session->lock);
 	task = pwrb_handle->pio_handle;
+	if (!task) {
+		spin_unlock_bh(&session->lock);
+		return;
+	}
 	pwrb = pwrb_handle->pwrb;
 	type = ((struct beiscsi_io_task *)task->dd_data)->wrb_type;
 
-	spin_lock_bh(&session->lock);
 	switch (type) {
 	case HWH_TYPE_IO:
 	case HWH_TYPE_IO_RD:
@@ -2921,6 +2936,7 @@ static int beiscsi_init_wrb_handle(struct beiscsi_hba *phba)
 			}
 			num_cxn_wrbh--;
 		}
+		spin_lock_init(&pwrb_context->wrb_lock);
 	}
 	idx = 0;
 	for (index = 0; index < phba->params.cxns_per_ctrl; index++) {
@@ -4621,17 +4637,13 @@ beiscsi_free_mgmt_task_handles(struct beiscsi_conn *beiscsi_conn,
 	io_task = task->dd_data;
 
 	if (io_task->pwrb_handle) {
-		memset(io_task->pwrb_handle->pwrb, 0,
-		       sizeof(struct iscsi_wrb));
-		free_wrb_handle(phba, pwrb_context,
-				io_task->pwrb_handle);
+		free_wrb_handle(phba, pwrb_context, io_task->pwrb_handle);
 		io_task->pwrb_handle = NULL;
 	}
 
 	if (io_task->psgl_handle) {
 		spin_lock_bh(&phba->mgmt_sgl_lock);
-		free_mgmt_sgl_handle(phba,
-				     io_task->psgl_handle);
+		free_mgmt_sgl_handle(phba, io_task->psgl_handle);
 		io_task->psgl_handle = NULL;
 		spin_unlock_bh(&phba->mgmt_sgl_lock);
 	}
@@ -4669,6 +4681,7 @@ static void beiscsi_cleanup_task(struct iscsi_task *task)
 		pci_pool_free(beiscsi_sess->bhs_pool, io_task->cmd_bhs,
 			      io_task->bhs_pa.u.a64.address);
 		io_task->cmd_bhs = NULL;
+		task->hdr = NULL;
 	}
 
 	if (task->sc) {
