@@ -413,18 +413,22 @@ static int xdr_decode(nfs_readdir_descriptor_t *desc,
 static
 int nfs_same_file(struct dentry *dentry, struct nfs_entry *entry)
 {
+	struct inode *inode;
 	struct nfs_inode *nfsi;
 
 	if (dentry->d_inode == NULL)
-		goto different;
+		return 0;
 
-	nfsi = NFS_I(dentry->d_inode);
-	if (entry->fattr->fileid == nfsi->fileid)
-		return 1;
-	if (nfs_compare_fh(entry->fh, &nfsi->fh) == 0)
-		return 1;
-different:
-	return 0;
+	inode = dentry->d_inode;
+	if (is_bad_inode(inode) || NFS_STALE(inode))
+		return 0;
+
+	nfsi = NFS_I(inode);
+	if (entry->fattr->fileid != nfsi->fileid)
+		return 0;
+	if (entry->fh->size && nfs_compare_fh(entry->fh, &nfsi->fh) != 0)
+		return 0;
+	return 1;
 }
 
 static
@@ -495,6 +499,8 @@ void nfs_prime_dcache(struct dentry *parent, struct nfs_entry *entry)
 					&entry->fattr->fsid))
 			goto out;
 		if (nfs_same_file(dentry, entry)) {
+			if (!entry->fh->size)
+				goto out;
 			nfs_set_verifier(dentry, nfs_save_change_attribute(dir));
 			status = nfs_refresh_inode(dentry->d_inode, entry->fattr);
 			if (!status)
@@ -506,6 +512,8 @@ void nfs_prime_dcache(struct dentry *parent, struct nfs_entry *entry)
 			dput(dentry);
 		}
 	}
+	if (!entry->fh->size)
+		goto out;
 
 	dentry = d_alloc(parent, &filename);
 	if (dentry == NULL)

@@ -181,7 +181,7 @@ static struct map *kernel_get_module_map(const char *module)
 	return NULL;
 }
 
-static struct map *get_target_map(const char *target, bool user)
+struct map *get_target_map(const char *target, bool user)
 {
 	/* Init maps of given executable or kernel */
 	if (user)
@@ -612,21 +612,13 @@ static int add_module_to_probe_trace_events(struct probe_trace_event *tevs,
 	return ret;
 }
 
-/* Post processing the probe events */
-static int post_process_probe_trace_events(struct probe_trace_event *tevs,
-					   int ntevs, const char *module,
-					   bool uprobe)
+static int
+post_process_kernel_probe_trace_events(struct probe_trace_event *tevs,
+				       int ntevs)
 {
 	struct ref_reloc_sym *reloc_sym;
 	char *tmp;
 	int i, skipped = 0;
-
-	if (uprobe)
-		return add_exec_to_probe_trace_events(tevs, ntevs, module);
-
-	/* Note that currently ref_reloc_sym based probe is not for drivers */
-	if (module)
-		return add_module_to_probe_trace_events(tevs, ntevs, module);
 
 	reloc_sym = kernel_get_ref_reloc_sym();
 	if (!reloc_sym) {
@@ -657,6 +649,34 @@ static int post_process_probe_trace_events(struct probe_trace_event *tevs,
 				       reloc_sym->unrelocated_addr;
 	}
 	return skipped;
+}
+
+void __weak
+arch__post_process_probe_trace_events(struct perf_probe_event *pev __maybe_unused,
+				      int ntevs __maybe_unused)
+{
+}
+
+/* Post processing the probe events */
+static int post_process_probe_trace_events(struct perf_probe_event *pev,
+					   struct probe_trace_event *tevs,
+					   int ntevs, const char *module,
+					   bool uprobe)
+{
+	int ret;
+
+	if (uprobe)
+		ret = add_exec_to_probe_trace_events(tevs, ntevs, module);
+	else if (module)
+		/* Currently ref_reloc_sym based probe is not for drivers */
+		ret = add_module_to_probe_trace_events(tevs, ntevs, module);
+	else
+		ret = post_process_kernel_probe_trace_events(tevs, ntevs);
+
+	if (ret >= 0)
+		arch__post_process_probe_trace_events(pev, ntevs);
+
+	return ret;
 }
 
 /* Try to find perf_probe_event with debuginfo */
@@ -697,7 +717,7 @@ static int try_to_find_probe_trace_events(struct perf_probe_event *pev,
 
 	if (ntevs > 0) {	/* Succeeded to find trace events */
 		pr_debug("Found %d probe_trace_events.\n", ntevs);
-		ret = post_process_probe_trace_events(*tevs, ntevs,
+		ret = post_process_probe_trace_events(pev, *tevs, ntevs,
 						pev->target, pev->uprobes);
 		if (ret < 0 || ret == ntevs) {
 			clear_probe_trace_events(*tevs, ntevs);
@@ -2495,7 +2515,8 @@ static int find_probe_functions(struct map *map, char *name,
 
 void __weak arch__fix_tev_from_maps(struct perf_probe_event *pev __maybe_unused,
 				struct probe_trace_event *tev __maybe_unused,
-				struct map *map __maybe_unused) { }
+				struct map *map __maybe_unused,
+				struct symbol *sym __maybe_unused) { }
 
 /*
  * Find probe function addresses from map.
@@ -2621,7 +2642,7 @@ static int find_probe_trace_events_from_map(struct perf_probe_event *pev,
 					strdup_or_goto(pev->args[i].type,
 							nomem_out);
 		}
-		arch__fix_tev_from_maps(pev, tev, map);
+		arch__fix_tev_from_maps(pev, tev, map, sym);
 	}
 	if (ret == skipped) {
 		ret = -ENOENT;
@@ -2733,8 +2754,6 @@ errout:
 	return err;
 }
 
-bool __weak arch__prefers_symtab(void) { return false; }
-
 static int convert_to_probe_trace_events(struct perf_probe_event *pev,
 					 struct probe_trace_event **tevs)
 {
@@ -2752,12 +2771,6 @@ static int convert_to_probe_trace_events(struct perf_probe_event *pev,
 	ret = try_to_find_absolute_address(pev, tevs);
 	if (ret > 0)
 		return ret;
-
-	if (arch__prefers_symtab() && !perf_probe_event_need_dwarf(pev)) {
-		ret = find_probe_trace_events_from_map(pev, tevs);
-		if (ret > 0)
-			return ret; /* Found in symbol table */
-	}
 
 	/* Convert perf_probe_event with debuginfo */
 	ret = try_to_find_probe_trace_events(pev, tevs);
