@@ -1699,6 +1699,25 @@ try_to_wake_up(struct task_struct *p, unsigned int state, int wake_flags)
 
 #ifdef CONFIG_SMP
 	/*
+	 * Ensure we load p->on_cpu _after_ p->on_rq, otherwise it would be
+	 * possible to, falsely, observe p->on_cpu == 0.
+	 *
+	 * One must be running (->on_cpu == 1) in order to remove oneself
+	 * from the runqueue.
+	 *
+	 *  [S] ->on_cpu = 1;	[L] ->on_rq
+	 *      UNLOCK rq->lock
+	 *			RMB
+	 *      LOCK   rq->lock
+	 *  [S] ->on_rq = 0;    [L] ->on_cpu
+	 *
+	 * Pairs with the full barrier implied in the UNLOCK+LOCK on rq->lock
+	 * from the consecutive calls to schedule(); the first switching to our
+	 * task, the second putting it to sleep.
+	 */
+	smp_rmb();
+
+	/*
 	 * If the owning (remote) cpu is still in the middle of schedule() with
 	 * this task as prev, wait until its done referencing the task.
 	 */
@@ -5899,6 +5918,8 @@ fail:
 	return ret;
 }
 
+static bool sched_smp_initialized __read_mostly;
+
 #ifdef CONFIG_NUMA_BALANCING
 /* Migrate current task p to target_cpu */
 int migrate_task_to(struct task_struct *p, int target_cpu)
@@ -6344,24 +6365,6 @@ static int sched_cpu_inactive(struct notifier_block *nfb,
 	}
 }
 
-static int __init migration_init(void)
-{
-	void *cpu = (void *)(long)smp_processor_id();
-	int err;
-
-	/* Initialize migration for the boot CPU */
-	err = migration_call(&migration_notifier, CPU_UP_PREPARE, cpu);
-	BUG_ON(err == NOTIFY_BAD);
-	migration_call(&migration_notifier, CPU_ONLINE, cpu);
-	register_cpu_notifier(&migration_notifier);
-
-	/* Register cpu active notifiers */
-	cpu_notifier(sched_cpu_active, CPU_PRI_SCHED_ACTIVE);
-	cpu_notifier(sched_cpu_inactive, CPU_PRI_SCHED_INACTIVE);
-
-	return 0;
-}
-early_initcall(migration_init);
 #endif
 
 #ifdef CONFIG_SMP
@@ -7281,6 +7284,9 @@ struct sched_domain_topology_level *sched_domain_topology = default_topology;
 
 void set_sched_topology(struct sched_domain_topology_level *tl)
 {
+	if (WARN_ON_ONCE(sched_smp_initialized))
+		return;
+
 	sched_domain_topology = tl;
 }
 
@@ -7492,6 +7498,9 @@ static int sched_domains_numa_masks_update(struct notifier_block *nfb,
 					   void *hcpu)
 {
 	int cpu = (long)hcpu;
+
+	if (!sched_smp_initialized)
+		return NOTIFY_DONE;
 
 	switch (action & ~CPU_TASKS_FROZEN) {
 	case CPU_ONLINE:
@@ -7914,6 +7923,9 @@ static int num_cpus_frozen;	/* used to mark begin/end of suspend/resume */
 static int cpuset_cpu_active(struct notifier_block *nfb, unsigned long action,
 			     void *hcpu)
 {
+	if (!sched_smp_initialized)
+		return NOTIFY_DONE;
+
 	switch (action) {
 	case CPU_ONLINE_FROZEN:
 	case CPU_DOWN_FAILED_FROZEN:
@@ -7953,6 +7965,9 @@ static int cpuset_cpu_inactive(struct notifier_block *nfb, unsigned long action,
 	struct dl_bw *dl_b;
 	bool overflow;
 	int cpus;
+
+	if (!sched_smp_initialized)
+		return NOTIFY_DONE;
 
 	switch (action) {
 	case CPU_DOWN_PREPARE:
@@ -8001,10 +8016,6 @@ void __init sched_init_smp(void)
 		cpumask_set_cpu(smp_processor_id(), non_isolated_cpus);
 	mutex_unlock(&sched_domains_mutex);
 
-	hotcpu_notifier(sched_domains_numa_masks_update, CPU_PRI_SCHED_ACTIVE);
-	hotcpu_notifier(cpuset_cpu_active, CPU_PRI_CPUSET_ACTIVE);
-	hotcpu_notifier(cpuset_cpu_inactive, CPU_PRI_CPUSET_INACTIVE);
-
 	init_hrtick();
 
 	/* Move init over to a non-isolated CPU */
@@ -8015,7 +8026,32 @@ void __init sched_init_smp(void)
 
 	init_sched_rt_class();
 	init_sched_dl_class();
+	sched_smp_initialized = true;
 }
+
+static int __init migration_init(void)
+{
+	void *cpu = (void *)(long)smp_processor_id();
+	int err;
+
+	/* Initialize migration for the boot CPU */
+	err = migration_call(&migration_notifier, CPU_UP_PREPARE, cpu);
+	BUG_ON(err == NOTIFY_BAD);
+	migration_call(&migration_notifier, CPU_ONLINE, cpu);
+	register_cpu_notifier(&migration_notifier);
+
+	/* Register cpu active notifiers */
+	cpu_notifier(sched_cpu_active, CPU_PRI_SCHED_ACTIVE);
+	cpu_notifier(sched_cpu_inactive, CPU_PRI_SCHED_INACTIVE);
+
+	hotcpu_notifier(sched_domains_numa_masks_update, CPU_PRI_SCHED_ACTIVE);
+	hotcpu_notifier(cpuset_cpu_active, CPU_PRI_CPUSET_ACTIVE);
+	hotcpu_notifier(cpuset_cpu_inactive, CPU_PRI_CPUSET_INACTIVE);
+
+	return 0;
+}
+early_initcall(migration_init);
+
 #else
 void __init sched_init_smp(void)
 {
