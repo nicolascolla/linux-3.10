@@ -781,7 +781,7 @@ qla2x00_sysfs_write_reset(struct file *filp, struct kobject *kobj,
 	case 0x2025e:
 		if (!IS_P3P_TYPE(ha) || vha != base_vha) {
 			ql_log(ql_log_info, vha, 0x7071,
-			    "FCoE ctx reset no supported.\n");
+			    "FCoE ctx reset not supported.\n");
 			return -EPERM;
 		}
 
@@ -1828,6 +1828,9 @@ qla2x00_terminate_rport_io(struct fc_rport *rport)
 	fc_port_t *fcport = *(fc_port_t **)rport->dd_data;
 
 	if (!fcport)
+		return;
+
+	if (test_bit(UNLOADING, &fcport->vha->dpc_flags))
 		return;
 
 	if (test_bit(ABORT_ISP_ACTIVE, &fcport->vha->dpc_flags))

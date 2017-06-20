@@ -1024,7 +1024,11 @@ global_port_update:
 			if (atomic_read(&fcport->state) != FCS_ONLINE)
 				continue;
 			if (fcport->d_id.b24 == rscn_entry) {
-				qla2x00_mark_device_lost(vha, fcport, 0, 0);
+				/*
+				 * Logout needs to be deferred here to prevent
+				 * locking issues
+				 */
+				qla2x00_mark_device_lost(vha, fcport, 0, 1);
 				break;
 			}
 		}
@@ -1930,14 +1934,14 @@ qla25xx_process_bidir_status_iocb(scsi_qla_host_t *vha, void *pkt,
 
 	case CS_DATA_OVERRUN:
 		ql_dbg(ql_dbg_user, vha, 0x70b1,
-		    "Command completed with date overrun thread_id=%d\n",
+		    "Command completed with data overrun thread_id=%d\n",
 		    thread_id);
 		rval = EXT_STATUS_DATA_OVERRUN;
 		break;
 
 	case CS_DATA_UNDERRUN:
 		ql_dbg(ql_dbg_user, vha, 0x70b2,
-		    "Command completed with date underrun thread_id=%d\n",
+		    "Command completed with data underrun thread_id=%d\n",
 		    thread_id);
 		rval = EXT_STATUS_DATA_UNDERRUN;
 		break;
@@ -1964,7 +1968,7 @@ qla25xx_process_bidir_status_iocb(scsi_qla_host_t *vha, void *pkt,
 
 	case CS_BIDIR_RD_UNDERRUN:
 		ql_dbg(ql_dbg_user, vha, 0x70b6,
-		    "Command completed with read data data underrun "
+		    "Command completed with read data underrun "
 		    "thread_id=%d\n", thread_id);
 		rval = EXT_STATUS_DATA_UNDERRUN;
 		break;

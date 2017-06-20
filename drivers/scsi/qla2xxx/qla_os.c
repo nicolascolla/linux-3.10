@@ -925,6 +925,35 @@ sp_get(struct srb *sp)
 	atomic_inc(&sp->ref_count);
 }
 
+#define ISP_REG_DISCONNECT 0xffffffffU
+/**************************************************************************
+* qla2x00_isp_reg_stat
+*
+* Description:
+*	Read the host status register of ISP before aborting the command.
+*
+* Input:
+*	ha = pointer to host adapter structure.
+*
+*
+* Returns:
+*	Either true or false.
+*
+* Note:	Return true if there is register disconnect.
+**************************************************************************/
+static inline
+uint32_t qla2x00_isp_reg_stat(struct qla_hw_data *ha)
+{
+	struct device_reg_24xx __iomem *reg = &ha->iobase->isp24;
+	struct device_reg_82xx __iomem *reg82 = &ha->iobase->isp82;
+
+	if (IS_P3P_TYPE(ha))
+		return ((RD_REG_DWORD(&reg82->host_int)) == ISP_REG_DISCONNECT);
+	else
+		return ((RD_REG_DWORD(&reg->host_status)) ==
+			ISP_REG_DISCONNECT);
+}
+
 /**************************************************************************
 * qla2xxx_eh_abort
 *
@@ -951,6 +980,11 @@ qla2xxx_eh_abort(struct scsi_cmnd *cmd)
 	int rval, wait = 0;
 	struct qla_hw_data *ha = vha->hw;
 
+	if (qla2x00_isp_reg_stat(ha)) {
+		ql_log(ql_log_info, vha, 0x8042,
+		    "PCI/Register disconnect, exiting.\n");
+		return FAILED;
+	}
 	if (!CMD_SP(cmd))
 		return SUCCESS;
 
@@ -1134,6 +1168,12 @@ qla2xxx_eh_device_reset(struct scsi_cmnd *cmd)
 	scsi_qla_host_t *vha = shost_priv(cmd->device->host);
 	struct qla_hw_data *ha = vha->hw;
 
+	if (qla2x00_isp_reg_stat(ha)) {
+		ql_log(ql_log_info, vha, 0x803e,
+		    "PCI/Register disconnect, exiting.\n");
+		return FAILED;
+	}
+
 	return __qla2xxx_eh_generic_reset("DEVICE", WAIT_LUN, cmd,
 	    ha->isp_ops->lun_reset);
 }
@@ -1143,6 +1183,12 @@ qla2xxx_eh_target_reset(struct scsi_cmnd *cmd)
 {
 	scsi_qla_host_t *vha = shost_priv(cmd->device->host);
 	struct qla_hw_data *ha = vha->hw;
+
+	if (qla2x00_isp_reg_stat(ha)) {
+		ql_log(ql_log_info, vha, 0x803f,
+		    "PCI/Register disconnect, exiting.\n");
+		return FAILED;
+	}
 
 	return __qla2xxx_eh_generic_reset("TARGET", WAIT_TARGET, cmd,
 	    ha->isp_ops->target_reset);
@@ -1170,6 +1216,13 @@ qla2xxx_eh_bus_reset(struct scsi_cmnd *cmd)
 	fc_port_t *fcport = (struct fc_port *) cmd->device->hostdata;
 	int ret = FAILED;
 	unsigned int id, lun;
+	struct qla_hw_data *ha = vha->hw;
+
+	if (qla2x00_isp_reg_stat(ha)) {
+		ql_log(ql_log_info, vha, 0x8040,
+		    "PCI/Register disconnect, exiting.\n");
+		return FAILED;
+	}
 
 	id = cmd->device->id;
 	lun = cmd->device->lun;
@@ -1237,6 +1290,13 @@ qla2xxx_eh_host_reset(struct scsi_cmnd *cmd)
 	int ret = FAILED;
 	unsigned int id, lun;
 	scsi_qla_host_t *base_vha = pci_get_drvdata(ha->pdev);
+
+	if (qla2x00_isp_reg_stat(ha)) {
+		ql_log(ql_log_info, vha, 0x8041,
+		    "PCI/Register disconnect, exiting.\n");
+		schedule_work(&ha->board_disable);
+		return SUCCESS;
+	}
 
 	id = cmd->device->id;
 	lun = cmd->device->lun;
@@ -1376,7 +1436,8 @@ qla2x00_abort_all_cmds(scsi_qla_host_t *vha, int res)
 				/* Don't abort commands in adapter during EEH
 				 * recovery as it's not accessible/responding.
 				 */
-				if (!ha->flags.eeh_busy) {
+				if (GET_CMD_SP(sp) && !ha->flags.eeh_busy &&
+				    (sp->type == SRB_SCSI_CMD)) {
 					/* Get a reference to the sp and drop the lock.
 					 * The reference ensures this sp->done() call
 					 * - and not the call in qla2xxx_eh_abort() -
