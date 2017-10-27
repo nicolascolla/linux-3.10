@@ -1739,10 +1739,11 @@ static void kvm_gen_update_masterclock(struct kvm *kvm)
 #endif
 }
 
-static u64 __get_kvmclock_ns(struct kvm *kvm)
+u64 get_kvmclock_ns(struct kvm *kvm)
 {
 	struct kvm_arch *ka = &kvm->arch;
 	struct pvclock_vcpu_time_info hv_clock;
+	u64 ret;
 
 	spin_lock(&ka->pvclock_gtod_sync_lock);
 	if (!ka->use_master_clock) {
@@ -1753,22 +1754,17 @@ static u64 __get_kvmclock_ns(struct kvm *kvm)
 	hv_clock.system_time = ka->master_kernel_ns + ka->kvmclock_offset;
 	spin_unlock(&ka->pvclock_gtod_sync_lock);
 
+	/* both __this_cpu_read() and rdtsc() should be on the same cpu */
+	get_cpu();
+
 	kvm_get_time_scale(NSEC_PER_SEC, __this_cpu_read(cpu_tsc_khz) * 1000LL,
 			   &hv_clock.tsc_shift,
 			   &hv_clock.tsc_to_system_mul);
-	return __pvclock_read_cycles(&hv_clock, rdtsc());
-}
+	ret = __pvclock_read_cycles(&hv_clock, rdtsc());
 
-u64 get_kvmclock_ns(struct kvm *kvm)
-{
-	unsigned long flags;
-	s64 ns;
+	put_cpu();
 
-	local_irq_save(flags);
-	ns = __get_kvmclock_ns(kvm);
-	local_irq_restore(flags);
-
-	return ns;
+	return ret;
 }
 
 static int kvm_guest_time_update(struct kvm_vcpu *v)
@@ -4064,10 +4060,8 @@ long kvm_arch_vm_ioctl(struct file *filp,
 			goto out;
 
 		r = 0;
-		local_irq_disable();
-		now_ns = __get_kvmclock_ns(kvm);
+		now_ns = get_kvmclock_ns(kvm);
 		kvm->arch.kvmclock_offset += user_ns.clock - now_ns;
-		local_irq_enable();
 		kvm_gen_update_masterclock(kvm);
 		break;
 	}
@@ -4075,11 +4069,9 @@ long kvm_arch_vm_ioctl(struct file *filp,
 		struct kvm_clock_data user_ns;
 		u64 now_ns;
 
-		local_irq_disable();
-		now_ns = __get_kvmclock_ns(kvm);
+		now_ns = get_kvmclock_ns(kvm);
 		user_ns.clock = now_ns;
 		user_ns.flags = kvm->arch.use_master_clock ? KVM_CLOCK_TSC_STABLE : 0;
-		local_irq_enable();
 		memset(&user_ns.pad, 0, sizeof(user_ns.pad));
 
 		r = -EFAULT;
