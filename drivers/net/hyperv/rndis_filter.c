@@ -1088,10 +1088,13 @@ int rndis_filter_device_add(struct hv_device *dev,
 	num_possible_rss_qs = cpumask_weight(node_cpu_mask);
 
 	/* We will use the given number of channels if available. */
-	if (device_info->num_chn && device_info->num_chn < net_device->max_chn)
+	if (device_info->num_chn && device_info->num_chn < net_device->max_chn) {
+		gmb();
 		net_device->num_chn = device_info->num_chn;
-	else
+	} else {
+		gmb();
 		net_device->num_chn = min(num_possible_rss_qs, num_rss_qs);
+	}
 
 	num_rss_qs = net_device->num_chn - 1;
 	net_device->num_sc_offered = num_rss_qs;

@@ -32,6 +32,7 @@
 #include <asm/msr-index.h>
 #include <asm/asm.h>
 #include <asm/kvm_page_track.h>
+#include <asm/spec_ctrl.h>
 
 #define KVM_MAX_VCPUS 384
 #define KVM_SOFT_MAX_VCPUS 384

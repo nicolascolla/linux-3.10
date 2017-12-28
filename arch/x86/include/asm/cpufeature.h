@@ -93,7 +93,7 @@
 #define X86_FEATURE_SYSCALL32	(3*32+14) /* "" syscall in ia32 userspace */
 #define X86_FEATURE_SYSENTER32	(3*32+15) /* "" sysenter in ia32 userspace */
 #define X86_FEATURE_REP_GOOD	(3*32+16) /* rep microcode works well */
-#define X86_FEATURE_MFENCE_RDTSC (3*32+17) /* "" Mfence synchronizes RDTSC */
+
 #define X86_FEATURE_LFENCE_RDTSC (3*32+18) /* "" Lfence synchronizes RDTSC */
 #define X86_FEATURE_11AP	(3*32+19) /* "" Bad local APIC aka 11AP */
 #define X86_FEATURE_NOPL	(3*32+20) /* The NOPL (0F 1F) instructions */
@@ -191,6 +191,7 @@
 #define X86_FEATURE_CAT_L3	(7*32+ 4) /* Cache Allocation Technology L3 */
 #define X86_FEATURE_CAT_L2	(7*32+ 5) /* Cache Allocation Technology L2 */
 #define X86_FEATURE_CDP_L3	(7*32+ 6) /* Code and Data Prioritization L3 */
+#define X86_FEATURE_INVPCID_SINGLE ( 7*32+ 7) /* Effectively INVPCID && CR4.PCIDE=1 */
 
 #define X86_FEATURE_HW_PSTATE	(7*32+ 8) /* AMD HW-PState */
 #define X86_FEATURE_PROC_FEEDBACK (7*32+ 9) /* AMD ProcFeedbackInterface */
@@ -198,7 +199,8 @@
 #define X86_FEATURE_INTEL_PT	( 7*32+15) /* Intel Processor Trace */
 #define X86_FEATURE_AVX512_4VNNIW (7*32+16) /* AVX-512 Neural Network Instructions */
 #define X86_FEATURE_AVX512_4FMAPS (7*32+17) /* AVX-512 Multiply Accumulation Single precision */
-#define X86_FEATURE_AVX512_VPOPCNTDQ (16*32+14) /* POPCNT for vectors of DW/QW */
+#define X86_FEATURE_SPEC_CTRL	( 7*32+19) /* Control Speculation Control */
+#define X86_FEATURE_IBPB_SUPPORT ( 7*32+20) /* Indirect Branch Prediction Barrier Support */
 
 /* Virtualization flags: Linux defined, word 8 */
 #define X86_FEATURE_TPR_SHADOW  (8*32+ 0) /* Intel TPR Shadow */
@@ -284,6 +286,7 @@
 
 /* Intel-defined CPU features, CPUID level 0x00000007:0 (ecx), word 16 */
 #define X86_FEATURE_AVX512VBMI	(16*32+ 1) /* AVX512 Vector Bit Manipulation instructions*/
+#define X86_FEATURE_AVX512_VPOPCNTDQ (16*32+14) /* POPCNT for vectors of DW/QW */
 
 /*
  * BUG word(s)

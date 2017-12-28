@@ -198,10 +198,12 @@ static int enable_start_cpu0;
 static void notrace start_secondary(void *unused)
 {
 	/*
-	 * Don't put *anything* before cpu_init(), SMP booting is too
-	 * fragile that we want to limit the things done here to the
-	 * most necessary things.
+	 * Don't put *anything* except direct CPU state initialization
+	 * before cpu_init(), SMP booting is too fragile that we want to
+	 * limit the things done here to the most necessary things.
 	 */
+	if (boot_cpu_has(X86_FEATURE_PCID))
+		write_cr4(read_cr4() | X86_CR4_PCIDE);
 	cpu_init();
 	x86_cpuinit.early_percpu_clock_init();
 	preempt_disable();
@@ -1650,9 +1652,13 @@ void native_play_dead(void)
 	play_dead_common();
 	tboot_shutdown(TB_SHUTDOWN_WFS);
 
+	spec_ctrl_disable_ibrs();
+
 	mwait_play_dead();	/* Only returns on failure */
 	if (cpuidle_play_dead())
 		hlt_play_dead();
+
+	spec_ctrl_enable_ibrs();
 }
 
 #else /* ... !CONFIG_HOTPLUG_CPU */

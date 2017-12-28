@@ -544,6 +544,8 @@ struct vcpu_vmx {
 	u64 		      msr_host_kernel_gs_base;
 	u64 		      msr_guest_kernel_gs_base;
 #endif
+	u64		      spec_ctrl;
+
 	u32 vm_entry_controls_shadow;
 	u32 vm_exit_controls_shadow;
 	/*
@@ -2076,6 +2078,7 @@ static void vmx_vcpu_load(struct kvm_vcpu *vcpu, int cpu)
 	if (per_cpu(current_vmcs, cpu) != vmx->loaded_vmcs->vmcs) {
 		per_cpu(current_vmcs, cpu) = vmx->loaded_vmcs->vmcs;
 		vmcs_load(vmx->loaded_vmcs->vmcs);
+		spec_ctrl_ibpb();
 	}
 
 	if (vmx->loaded_vmcs->cpu != cpu) {
@@ -2796,6 +2799,9 @@ static int vmx_get_msr(struct kvm_vcpu *vcpu, struct msr_data *msr_info)
 	case MSR_IA32_TSC:
 		msr_info->data = guest_read_tsc(vcpu);
 		break;
+	case MSR_IA32_SPEC_CTRL:
+		msr_info->data = to_vmx(vcpu)->spec_ctrl;
+		break;
 	case MSR_IA32_SYSENTER_CS:
 		msr_info->data = vmcs_read32(GUEST_SYSENTER_CS);
 		break;
@@ -2890,6 +2896,9 @@ static int vmx_set_msr(struct kvm_vcpu *vcpu, struct msr_data *msr_info)
 		break;
 	case MSR_IA32_TSC:
 		kvm_write_tsc(vcpu, msr_info);
+		break;
+	case MSR_IA32_SPEC_CTRL:
+		to_vmx(vcpu)->spec_ctrl = msr_info->data;
 		break;
 	case MSR_IA32_CR_PAT:
 		if (vmcs_config.vmentry_ctrl & VM_ENTRY_LOAD_IA32_PAT) {
@@ -3328,6 +3337,12 @@ static void free_loaded_vmcs(struct loaded_vmcs *loaded_vmcs)
 	free_vmcs(loaded_vmcs->vmcs);
 	loaded_vmcs->vmcs = NULL;
 	WARN_ON(loaded_vmcs->shadow_vmcs != NULL);
+
+	/*
+	 * The VMCS could be recycled, causing a false negative in vmx_vcpu_load;
+	 * block speculative execution.
+	 */
+	spec_ctrl_ibpb();
 }
 
 static void free_kvm_area(void)
@@ -6196,6 +6211,8 @@ static __init int hardware_setup(void)
 	vmx_disable_intercept_for_msr(MSR_IA32_SYSENTER_ESP, false);
 	vmx_disable_intercept_for_msr(MSR_IA32_SYSENTER_EIP, false);
 	vmx_disable_intercept_for_msr(MSR_IA32_BNDCFGS, true);
+	vmx_disable_intercept_for_msr(MSR_IA32_SPEC_CTRL, false);
+	vmx_disable_intercept_for_msr(MSR_IA32_PRED_CMD, false);
 
 	memcpy(vmx_msr_bitmap_legacy_x2apic,
 			vmx_msr_bitmap_legacy, PAGE_SIZE);
@@ -8548,6 +8565,8 @@ static void __noclone vmx_vcpu_run(struct kvm_vcpu *vcpu)
 	if (vcpu->guest_debug & KVM_GUESTDBG_SINGLESTEP)
 		vmx_set_interrupt_shadow(vcpu, 0);
 
+	spec_ctrl_vmenter_ibrs(vmx->spec_ctrl);
+
 	atomic_switch_perf_msrs(vmx);
 	debugctlmsr = get_debugctlmsr();
 
@@ -8621,6 +8640,23 @@ static void __noclone vmx_vcpu_run(struct kvm_vcpu *vcpu)
 
 		"pop  %%" _ASM_BP "; pop  %%" _ASM_DX " \n\t"
 		"setbe %c[fail](%0) \n\t"
+		/*
+		 * Clear host registers marked as clobbered to prevent
+		 * speculative use.
+		 */
+		"xor %%" _ASM_BX ", %%" _ASM_BX " \n\t"
+		"xor %%" _ASM_SI ", %%" _ASM_SI " \n\t"
+		"xor %%" _ASM_DI ", %%" _ASM_DI " \n\t"
+#ifdef CONFIG_X86_64
+		"xor %%r8, %%r8 \n\t"
+		"xor %%r9, %%r9 \n\t"
+		"xor %%r10, %%r10 \n\t"
+		"xor %%r11, %%r11 \n\t"
+		"xor %%r12, %%r12 \n\t"
+		"xor %%r13, %%r13 \n\t"
+		"xor %%r14, %%r14 \n\t"
+		"xor %%r15, %%r15 \n\t"
+#endif
 		".pushsection .rodata \n\t"
 		".global vmx_return \n\t"
 		"vmx_return: " _ASM_PTR " 2b \n\t"
@@ -8656,6 +8692,12 @@ static void __noclone vmx_vcpu_run(struct kvm_vcpu *vcpu)
 		, "eax", "ebx", "edi", "esi"
 #endif
 	      );
+
+	if (cpu_has_spec_ctrl()) {
+		rdmsrl(MSR_IA32_SPEC_CTRL, vmx->spec_ctrl);
+		__spec_ctrl_vmexit_ibrs(vmx->spec_ctrl);
+	}
+	stuff_RSB();
 
 	/* MSR_IA32_DEBUGCTLMSR is zeroed on vmexit. Restore it if needed */
 	if (debugctlmsr)

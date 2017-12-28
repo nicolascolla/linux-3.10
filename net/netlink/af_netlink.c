@@ -628,8 +628,10 @@ static bool netlink_dump_space(struct netlink_sock *nlk)
 		return false;
 
 	n = ring->head + ring->frame_max / 2;
-	if (n > ring->frame_max)
+	if (n > ring->frame_max) {
+		gmb();
 		n -= ring->frame_max;
+	}
 
 	hdr = __netlink_lookup_frame(ring, n);
 
