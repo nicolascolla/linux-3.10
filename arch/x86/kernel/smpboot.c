@@ -109,12 +109,12 @@ EXPORT_PER_CPU_SYMBOL(rh_cpu_info);
 
 atomic_t init_deasserted;
 /* Logical package management. We might want to allocate that dynamically */
-static int *physical_to_logical_pkg __read_mostly;
-static unsigned long *physical_package_map __read_mostly;;
-static unsigned int max_physical_pkg_id __read_mostly;
 unsigned int __max_logical_packages __read_mostly;
 EXPORT_SYMBOL(__max_logical_packages);
 static unsigned int logical_packages __read_mostly;
+
+/* Maximum number of SMT threads on any online core */
+int __read_mostly __max_smt_threads = 1;
 
 /*
  * Report back to the Boot Processor during boot time or to the caller processor
@@ -248,130 +248,60 @@ static void notrace start_secondary(void *unused)
 }
 
 /**
- * topology_update_package_map - Update the physical to logical package map
- * @pkg:	The physical package id as retrieved via CPUID
- * @cpu:	The cpu for which this is updated
- */
-int topology_update_package_map(unsigned int pkg, unsigned int cpu)
-{
-	unsigned int new;
-
-	/* Called from early boot ? */
-	if (!physical_package_map)
-		return 0;
-
-	if (pkg >= max_physical_pkg_id)
-		return -EINVAL;
-
-	/* Set the logical package id */
-	if (test_and_set_bit(pkg, physical_package_map))
-		goto found;
-
-	if (logical_packages >= __max_logical_packages) {
-		pr_warn("Package %u of CPU %u exceeds BIOS package data %u.\n",
-			logical_packages, cpu, __max_logical_packages);
-		return -ENOSPC;
-	}
-
-	new = logical_packages++;
-	if (new != pkg) {
-		pr_info("CPU %u Converting physical %u to logical package %u\n",
-			cpu, pkg, new);
-	}
-	physical_to_logical_pkg[pkg] = new;
-
-found:
-	rh_cpu_data(cpu).logical_proc_id = physical_to_logical_pkg[pkg];
-	return 0;
-}
-
-/**
  * topology_phys_to_logical_pkg - Map a physical package id to a logical
  *
  * Returns logical package id or -1 if not found
  */
 int topology_phys_to_logical_pkg(unsigned int phys_pkg)
 {
-	if (phys_pkg >= max_physical_pkg_id)
-		return -1;
-	return physical_to_logical_pkg[phys_pkg];
+	int cpu;
+
+	for_each_possible_cpu(cpu) {
+		struct cpuinfo_x86 *c = &cpu_data(cpu);
+		struct rh_cpuinfo_x86 *rhc = &rh_cpu_data(cpu);
+
+		if (rhc->initialized && c->phys_proc_id == phys_pkg)
+			return rh_cpu_data(cpu).logical_proc_id;
+	}
+	return -1;
 }
 EXPORT_SYMBOL(topology_phys_to_logical_pkg);
 
-static void __init smp_init_package_map(struct cpuinfo_x86 *c, unsigned int cpu)
+/**
+ * topology_update_package_map - Update the physical to logical package map
+ * @pkg:	The physical package id as retrieved via CPUID
+ * @cpu:	The cpu for which this is updated
+ */
+int topology_update_package_map(unsigned int pkg, unsigned int cpu)
 {
-	unsigned int ncpus;
-	size_t size;
+	int new;
 
-	/*
-	 * Today neither Intel nor AMD support heterogenous systems. That
-	 * might change in the future....
-	 *
-	 * While ideally we'd want '* smp_num_siblings' in the below @ncpus
-	 * computation, this won't actually work since some Intel BIOSes
-	 * report inconsistent HT data when they disable HT.
-	 *
-	 * In particular, they reduce the APIC-IDs to only include the cores,
-	 * but leave the CPUID topology to say there are (2) siblings.
-	 * This means we don't know how many threads there will be until
-	 * after the APIC enumeration.
-	 *
-	 * By not including this we'll sometimes over-estimate the number of
-	 * logical packages by the amount of !present siblings, but this is
-	 * still better than MAX_LOCAL_APIC.
-	 *
-	 * We use total_cpus not nr_cpu_ids because nr_cpu_ids can be limited
-	 * on the command line leading to a similar issue as the HT disable
-	 * problem because the hyperthreads are usually enumerated after the
-	 * primary cores.
-	 */
-	ncpus = boot_cpu_data.x86_max_cores;
-	if (!ncpus) {
-		pr_warn("x86_max_cores == zero !?!?");
-		ncpus = 1;
+	/* Already available somewhere? */
+	new = topology_phys_to_logical_pkg(pkg);
+	if (new >= 0)
+		goto found;
+
+	new = logical_packages++;
+	if (new != pkg) {
+		pr_info("CPU %u Converting physical %u to logical package %u\n",
+			cpu, pkg, new);
 	}
-
-	__max_logical_packages = DIV_ROUND_UP(total_cpus, ncpus);
-	logical_packages = 0;
-
-	/*
-	 * Possibly larger than what we need as the number of apic ids per
-	 * package can be smaller than the actual used apic ids.
-	 */
-	max_physical_pkg_id = DIV_ROUND_UP(MAX_LOCAL_APIC, ncpus);
-
-	if (x86_hyper == &x86_hyper_xen_hvm) {
-		/*
-		 * RHEL-only. Each logical package has not more than
-		 * x86_max_cores CPUs but it can happen that it has less, e.g.
-		 * we may have 1 CPU per logical package regardless of what's
-		 * in x86_max_cores. This is seen on some Xen setups with AMD
-		 * processors.
-		 */
-		__max_logical_packages = min(max_physical_pkg_id, total_cpus);
-	}
-
-	size = max_physical_pkg_id * sizeof(unsigned int);
-	physical_to_logical_pkg = kmalloc(size, GFP_KERNEL);
-	memset(physical_to_logical_pkg, 0xff, size);
-	size = BITS_TO_LONGS(max_physical_pkg_id) * sizeof(unsigned long);
-	physical_package_map = kzalloc(size, GFP_KERNEL);
-
-	pr_info("Max logical packages: %u\n", __max_logical_packages);
-
-	topology_update_package_map(c->phys_proc_id, cpu);
+found:
+	rh_cpu_data(cpu).logical_proc_id = new;
+	return 0;
 }
 
 void __init smp_store_boot_cpu_info(void)
 {
 	int id = 0; /* CPU 0 */
 	struct cpuinfo_x86 *c = &cpu_data(id);
-	struct rh_cpuinfo_x86 *rh_c = &rh_cpu_data(id);
+	struct rh_cpuinfo_x86 *rhc = &rh_cpu_data(id);
 
 	*c = boot_cpu_data;
 	c->cpu_index = id;
-	*rh_c = rh_boot_cpu_data;
-	smp_init_package_map(c, id);
+	*rhc = rh_boot_cpu_data;
+	topology_update_package_map(c->phys_proc_id, id);
+	rhc->initialized = true;
 }
 
 /*
@@ -381,14 +311,18 @@ void __init smp_store_boot_cpu_info(void)
 void smp_store_cpu_info(int id)
 {
 	struct cpuinfo_x86 *c = &cpu_data(id);
+	struct rh_cpuinfo_x86 *rhc = &rh_cpu_data(id);
 
-	*c = boot_cpu_data;
+	/* Copy boot_cpu_data only on the first bringup */
+	if (!rhc->initialized)
+		*c = boot_cpu_data;
 	c->cpu_index = id;
 	/*
 	 * During boot time, CPU0 has this setup already. Save the info when
 	 * bringing up AP or offlined CPU0.
 	 */
 	identify_secondary_cpu(c);
+	rhc->initialized = true;
 }
 
 static bool
@@ -496,7 +430,7 @@ void set_cpu_sibling_map(int cpu)
 	bool has_mp = has_smt || boot_cpu_data.x86_max_cores > 1;
 	struct cpuinfo_x86 *c = &cpu_data(cpu);
 	struct cpuinfo_x86 *o;
-	int i;
+	int i, threads;
 
 	cpumask_set_cpu(cpu, cpu_sibling_setup_mask);
 
@@ -551,6 +485,10 @@ void set_cpu_sibling_map(int cpu)
 		if (match_die(c, o) && !topology_same_node(c, o))
 			x86_has_numa_in_package = true;
 	}
+
+	threads = cpumask_weight(topology_sibling_cpumask(cpu));
+	if (threads > __max_smt_threads)
+		__max_smt_threads = threads;
 }
 
 /* maps the cpu to the sched domain representing multi-core */
@@ -1352,7 +1290,16 @@ void __init native_smp_prepare_boot_cpu(void)
 
 void __init native_smp_cpus_done(unsigned int max_cpus)
 {
+	int ncpus;
+
 	pr_debug("Boot done\n");
+	/*
+	 * Today neither Intel nor AMD support heterogenous systems so
+	 * extrapolate the boot cpu's data to all packages.
+	 */
+	ncpus = cpu_data(0).booted_cores * topology_max_smt_threads();
+	__max_logical_packages = DIV_ROUND_UP(nr_cpu_ids, ncpus);
+	pr_info("Max logical packages: %u\n", __max_logical_packages);
 
 	if (x86_has_numa_in_package)
 		set_sched_topology(x86_numa_in_package_topology);
@@ -1458,6 +1405,21 @@ __init void prefill_possible_map(void)
 
 #ifdef CONFIG_HOTPLUG_CPU
 
+/* Recompute SMT state for all CPUs on offline */
+static void recompute_smt_state(void)
+{
+	int max_threads, cpu;
+
+	max_threads = 0;
+	for_each_online_cpu (cpu) {
+		int threads = cpumask_weight(topology_sibling_cpumask(cpu));
+
+		if (threads > max_threads)
+			max_threads = threads;
+	}
+	__max_smt_threads = max_threads;
+}
+
 static void remove_siblinginfo(int cpu)
 {
 	int sibling;
@@ -1482,6 +1444,7 @@ static void remove_siblinginfo(int cpu)
 	c->phys_proc_id = 0;
 	c->cpu_core_id = 0;
 	cpumask_clear_cpu(cpu, cpu_sibling_setup_mask);
+	recompute_smt_state();
 }
 
 static void __ref remove_cpu_from_maps(int cpu)

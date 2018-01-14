@@ -116,6 +116,7 @@ void __init efi_call_phys_prelog(void)
 			pr_err("Failed to allocate pud table!\n");
 			break;
 		}
+		pgd_efi->pgd &= ~_PAGE_NX;
 		for (j = 0; j < PTRS_PER_PUD; j++) {
 			addr_pud = addr_pgd + j * PUD_SIZE;
 			if (addr_pud > (max_pfn << PAGE_SHIFT))
