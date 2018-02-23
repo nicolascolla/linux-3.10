@@ -58,6 +58,7 @@
 #include <asm/context_tracking.h>
 #include <asm/smap.h>
 #include <asm/spec_ctrl.h>
+#include <asm/nospec-branch.h>
 #include <linux/err.h>
 #include "kaiser.h"
 
@@ -265,9 +266,9 @@ ENDPROC(native_usergs_sysret64)
 	je 1f
 	SWAPGS
 	SWITCH_TO_KERNEL_CR3
-	ENABLE_IBRS_CLOBBER /* no indirect jump allowed before IBRS */
+	IBRS_ENTRY_CLOBBER /* no indirect jump allowed before IBRS */
 	movq PER_CPU_VAR(kernel_stack), %rsp
-	STUFF_RSB /* no ret allowed before stuffing the RSB */
+	FILL_RETURN_BUFFER_CLOBBER /* no ret allowed before stuffing the RSB */
 	movq %rsi, %rsp
 1:
 	/* Check to see if we're on the trampoline stack. */
@@ -357,8 +358,8 @@ ENTRY(save_paranoid)
 	xorl %ebx,%ebx
 1:
 	SAVE_AND_SWITCH_TO_KERNEL_CR3 scratch_reg=%rax save_reg=%r14
-	ENABLE_IBRS_SAVE_AND_CLOBBER save_reg=%r13d /* no indirect jump allowed before IBRS */
-	STUFF_RSB /* no ret allowed before stuffing the RSB */
+	IBRS_ENTRY_SAVE_AND_CLOBBER save_reg=%r13d /* no indirect jump allowed before IBRS */
+	FILL_RETURN_BUFFER_CLOBBER /* no ret allowed before stuffing the RSB */
 	ret
 	CFI_ENDPROC
 END(save_paranoid)
@@ -399,7 +400,7 @@ ENTRY(ret_from_fork)
 	subq $REST_SKIP, %rsp	# leave space for volatiles
 	CFI_ADJUST_CFA_OFFSET	REST_SKIP
 	movq %rbp, %rdi
-	call *%rbx
+	CALL_NOSPEC %rbx
 	movl $0, RAX(%rsp)
 	RESTORE_REST
 	jmp int_ret_from_sys_call
@@ -455,8 +456,8 @@ GLOBAL(system_call_after_swapgs)
 	SWITCH_TO_KERNEL_CR3
 	movq	%rsp,PER_CPU_VAR(old_rsp)
 	movq	PER_CPU_VAR(kernel_stack),%rsp
-	ENABLE_IBRS /* no indirect jump allowed before IBRS */
-	STUFF_RSB /* no ret allowed before stuffing the RSB */
+	IBRS_ENTRY /* no indirect jump allowed before IBRS */
+	FILL_RETURN_BUFFER /* no ret allowed before stuffing the RSB */
 	/*
 	 * No need to follow this irqs off/on section - it's straight
 	 * and short:
@@ -479,7 +480,14 @@ system_call_fastpath:
 #endif
 	ja badsys
 	movq %r10,%rcx
-	call *sys_call_table(,%rax,8)  # XXX:	 rip relative
+
+#ifdef CONFIG_RETPOLINE
+	movq sys_call_table(, %rax, 8), %rax
+	call __x86_indirect_thunk_rax
+#else
+	call *sys_call_table(, %rax, 8)  # XXX:	 rip relative
+#endif
+
 	movq %rax,RAX(%rsp)
 /*
  * Syscall return path ending with SYSRET (fast path)
@@ -500,7 +508,7 @@ sysret_check:
 	 * sysretq will re-enable interrupts:
 	 */
 	TRACE_IRQS_ON
-	DISABLE_IBRS_CLOBBER
+	IBRS_EXIT_CLOBBER
 	movq RIP(%rsp),%rcx
 	CFI_REGISTER	rip,rcx
 	RESTORE_REST
@@ -598,7 +606,14 @@ tracesys:
 #endif
 	ja   1f		/* RAX(%rsp) set to -ENOSYS above */
 	movq %r10,%rcx	/* fixup for C */
-	call *sys_call_table(,%rax,8)
+
+#ifdef CONFIG_RETPOLINE
+	movq sys_call_table(, %rax, 8), %rax
+	call __x86_indirect_thunk_rax
+#else
+	call *sys_call_table(, %rax, 8)  # XXX:	 rip relative
+#endif
+
 	movq %rax,RAX(%rsp)
 1:	RESTORE_REST
 /* Use IRET because user could have changed frame */
@@ -862,7 +877,7 @@ retint_swapgs:		/* return to user-space */
 	TRACE_IRQS_IRETQ
 
 retint_userspace_restore_args:
-	DISABLE_IBRS_CLOBBER
+	IBRS_EXIT_CLOBBER
 	/*
 	 * Returning from an interrupt/NMI/exception to user space, currently
 	 * on the kernel task stack, which is not user-mapped.  Copy the iret
@@ -1370,7 +1385,7 @@ trace_errorentry page_fault do_page_fault
 errorentry async_page_fault do_async_page_fault
 #endif
 #ifdef CONFIG_X86_MCE
-paranoidzeroentry machine_check *machine_check_vector(%rip)
+paranoidzeroentry machine_check do_mce
 #endif
 
 	/*
@@ -1397,14 +1412,14 @@ ENTRY(paranoid_exit)
 	jnz   paranoid_userspace
 paranoid_swapgs_restore:
 	/* return to kernel with swapgs */
-	RESTORE_IBRS_CLOBBER save_reg=%r13d
+	IBRS_EXIT_RESTORE_CLOBBER save_reg=%r13d
 	RESTORE_CR3 scratch_reg=%rax save_reg=%r14
 	RESTORE_ALL 8
 	SWAPGS
 	jmp irq_return
 paranoid_noswapgs_restore:
 	/* return to kernel */
-	RESTORE_IBRS_CLOBBER save_reg=%r13d
+	IBRS_EXIT_RESTORE_CLOBBER save_reg=%r13d
 	RESTORE_CR3 scratch_reg=%rax save_reg=%r14
 	RESTORE_ALL 8
 	jmp irq_return
@@ -1469,8 +1484,8 @@ error_swapgs:
 	SWITCH_TO_KERNEL_CR3
 	movq %rsp, %rsi
 	movq PER_CPU_VAR(kernel_stack), %rsp
-	ENABLE_IBRS_CLOBBER /* no indirect jump allowed before IBRS */
-	STUFF_RSB /* no ret allowed before stuffing the RSB */
+	IBRS_ENTRY_CLOBBER /* no indirect jump allowed before IBRS */
+	FILL_RETURN_BUFFER_CLOBBER /* no ret allowed before stuffing the RSB */
 	movq %rsi, %rsp
 error_sti:
 	/* Check to see if we're on the trampoline stack. */
@@ -1653,8 +1668,8 @@ ENTRY(nmi)
 	pushq	%r14		/* pt_regs->r14 */
 	pushq	%r15		/* pt_regs->r15 */
 
-	ENABLE_IBRS_CLOBBER /* no indirect jump allowed before IBRS */
-	STUFF_RSB /* no ret allowed before stuffing the RSB */
+	IBRS_ENTRY_CLOBBER /* no indirect jump allowed before IBRS */
+	FILL_RETURN_BUFFER_CLOBBER /* no ret allowed before stuffing the RSB */
 
 	/*
 	 * At this point we no longer need to worry about stack damage
@@ -1880,7 +1895,7 @@ end_repeat_nmi:
 	movq $-1,%rsi
 	call do_nmi
 
-	RESTORE_IBRS_CLOBBER save_reg=%r13d
+	IBRS_EXIT_RESTORE_CLOBBER save_reg=%r13d
 
 	RESTORE_CR3 scratch_reg=%rax save_reg=%r14
 

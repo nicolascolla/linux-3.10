@@ -16,6 +16,7 @@
 #include <asm/asm.h>
 #include <asm/smap.h>
 #include <asm/spec_ctrl.h>
+#include <asm/nospec-branch.h>
 #include <linux/linkage.h>
 #include <linux/err.h>
 #include "../kernel/kaiser.h"
@@ -126,9 +127,9 @@ ENTRY(ia32_sysenter_target)
 	SWITCH_TO_KERNEL_CR3
 	movq	PER_CPU_VAR(kernel_stack), %rsp
 	addq	$(KERNEL_STACK_OFFSET),%rsp
-	ENABLE_IBRS
+	IBRS_ENTRY
 	CLEAR_R8_TO_R15
-	STUFF_RSB /* no ret allowed before stuffing the RSB */
+	FILL_RETURN_BUFFER /* no ret allowed before stuffing the RSB */
 	/*
 	 * No need to follow this irqs on/off section: the syscall
 	 * disabled irqs, here we enable it straight after entry:
@@ -166,14 +167,19 @@ ENTRY(ia32_sysenter_target)
 sysenter_do_call:
 	IA32_ARG_FIXUP
 sysenter_dispatch:
+#ifdef CONFIG_RETPOLINE
+	mov	ia32_sys_call_table(,%rax,8), %rax
+	call	__x86_indirect_thunk_rax
+#else
 	call	*ia32_sys_call_table(,%rax,8)
+#endif
 	movq	%rax,RAX-ARGOFFSET(%rsp)
 	DISABLE_INTERRUPTS(CLBR_NONE)
 	TRACE_IRQS_OFF
 	testl	$_TIF_ALLWORK_MASK,TI_flags+THREAD_INFO(%rsp,RIP-ARGOFFSET)
 	jnz	sysexit_audit
 sysexit_from_sys_call:
-	DISABLE_IBRS
+	IBRS_EXIT
 	andl    $~TS_COMPAT,TI_status+THREAD_INFO(%rsp,RIP-ARGOFFSET)
 	/* clear IF, that popfq doesn't enable interrupts early */
 	andl  $~0x200,EFLAGS-R11(%rsp) 
@@ -292,8 +298,8 @@ ENTRY(ia32_cstar_target)
 	movl	%esp,%r8d
 	CFI_REGISTER	rsp,r8
 	movq	PER_CPU_VAR(kernel_stack),%rsp
-	ENABLE_IBRS
-	STUFF_RSB /* no ret allowed before stuffing the RSB */
+	IBRS_ENTRY
+	FILL_RETURN_BUFFER /* no ret allowed before stuffing the RSB */
 	/*
 	 * No need to follow this irqs on/off section: the syscall
 	 * disabled irqs and here we enable it straight after entry:
@@ -330,14 +336,19 @@ ENTRY(ia32_cstar_target)
 cstar_do_call:
 	IA32_ARG_FIXUP 1
 cstar_dispatch:
+#ifdef CONFIG_RETPOLINE
+	mov ia32_sys_call_table(,%rax,8), %rax
+	call __x86_indirect_thunk_rax
+#else
 	call *ia32_sys_call_table(,%rax,8)
+#endif
 	movq %rax,RAX-ARGOFFSET(%rsp)
 	DISABLE_INTERRUPTS(CLBR_NONE)
 	TRACE_IRQS_OFF
 	testl $_TIF_ALLWORK_MASK,TI_flags+THREAD_INFO(%rsp,RIP-ARGOFFSET)
 	jnz sysretl_audit
 sysretl_from_sys_call:
-	DISABLE_IBRS
+	IBRS_EXIT
 	andl $~TS_COMPAT,TI_status+THREAD_INFO(%rsp,RIP-ARGOFFSET)
 	RESTORE_ARGS 0,-ARG_SKIP,0,0,0
 	movl RIP-ARGOFFSET(%rsp),%ecx
@@ -460,9 +471,8 @@ ENTRY(ia32_syscall)
 	movq %r8, %rax
 	movq %r9, %rcx
 
-	ENABLE_IBRS
-	CLEAR_R8_TO_R15
-	STUFF_RSB /* no ret allowed before stuffing the RSB */
+	IBRS_ENTRY
+	FILL_RETURN_BUFFER /* no ret allowed before stuffing the RSB */
 
 	/*
 	 * No need to follow this irqs on/off section: the syscall
@@ -481,7 +491,16 @@ ENTRY(ia32_syscall)
 	ja ia32_badsys
 ia32_do_call:
 	IA32_ARG_FIXUP
+	SAVE_REST
+	CLEAR_R10_TO_R15
+#ifdef CONFIG_RETPOLINE
+	mov ia32_sys_call_table(,%rax,8), %rax
+	call __x86_indirect_thunk_rax
+#else
 	call *ia32_sys_call_table(,%rax,8) # xxx: rip relative
+#endif
+ia32_ptregsret:
+	RESTORE_REST
 ia32_sysret:
 	movq %rax,RAX-ARGOFFSET(%rsp)
 ia32_ret_from_sys_call:
@@ -531,6 +550,11 @@ GLOBAL(stub32_clone)
 
 	ALIGN
 ia32_ptregs_common:
+	/* ia32_syscall? already has the full frame */
+	cmpq $ia32_ptregsret, (%rsp)
+	jne  1f
+	JMP_NOSPEC %rax
+1:
 	popq %r11
 	CFI_ENDPROC
 	CFI_STARTPROC32	simple
@@ -547,7 +571,7 @@ ia32_ptregs_common:
 	CFI_REL_OFFSET	rsp,RSP-ARGOFFSET
 /*	CFI_REL_OFFSET	ss,SS-ARGOFFSET*/
 	SAVE_REST
-	call *%rax
+	CALL_NOSPEC %rax
 	RESTORE_REST
 	jmp  ia32_sysret	/* misbalances the return cache */
 	CFI_ENDPROC

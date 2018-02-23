@@ -16,7 +16,7 @@
 
 #define MWAIT_ECX_INTERRUPT_BREAK	0x1
 
-static inline void __monitor(const void *eax, unsigned long ecx,
+static __always_inline void __monitor(const void *eax, unsigned long ecx,
 			     unsigned long edx)
 {
 	/* "monitor %eax, %ecx, %edx;" */
@@ -24,7 +24,7 @@ static inline void __monitor(const void *eax, unsigned long ecx,
 		     :: "a" (eax), "c" (ecx), "d"(edx));
 }
 
-static inline void __mwait(unsigned long eax, unsigned long ecx)
+static __always_inline void __mwait(unsigned long eax, unsigned long ecx)
 {
 	/* "mwait %eax, %ecx;" */
 	asm volatile(".byte 0x0f, 0x01, 0xc9;"
@@ -52,11 +52,11 @@ static inline void mwait_idle_with_hints(unsigned long eax, unsigned long ecx)
 		 * save_paranoid model which always enables ibrs on
 		 * exception entry before any indirect jump can run.
 		 */
-		spec_ctrl_disable_ibrs();
+		spec_ctrl_ibrs_off();
 		__monitor((void *)&current_thread_info()->flags, 0, 0);
 		if (!need_resched())
 			__mwait(eax, ecx);
-		spec_ctrl_enable_ibrs();
+		spec_ctrl_ibrs_on();
 	}
 	__current_clr_polling();
 }

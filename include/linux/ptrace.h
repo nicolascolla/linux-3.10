@@ -63,10 +63,7 @@ extern void exit_ptrace(struct task_struct *tracer);
 			  | PTRACE_MODE_NOACCESS_CHK)
 /* Returns true on success, false on denial. */
 extern bool ptrace_may_access(struct task_struct *task, unsigned int mode);
-extern int ___ptrace_may_access(struct task_struct *tracer,
-				const struct cred *cred, /* tracer cred */
-				struct task_struct *task,
-				unsigned int mode);
+extern int __ptrace_may_access(struct task_struct *task, unsigned int mode);
 
 static inline int ptrace_reparented(struct task_struct *child)
 {
