@@ -17,8 +17,11 @@ extern int rtnl_put_cacheinfo(struct sk_buff *skb, struct dst_entry *dst,
 			      u32 id, long expires, u32 error);
 
 void rtmsg_ifinfo(int type, struct net_device *dev, unsigned change, gfp_t flags);
+void rtmsg_ifinfo_newnet(int type, struct net_device *dev, unsigned int change,
+			 gfp_t flags, int *new_nsid);
 struct sk_buff *rtmsg_ifinfo_build_skb(int type, struct net_device *dev,
-				       unsigned change, gfp_t flags);
+				       unsigned change, u32 event,
+				       gfp_t flags, int *new_nsid);
 void rtmsg_ifinfo_send(struct sk_buff *skb, struct net_device *dev,
 		       gfp_t flags);
 
@@ -79,13 +82,19 @@ static inline struct netdev_queue *dev_ingress_queue(struct net_device *dev)
 
 struct netdev_queue *dev_ingress_queue_create(struct net_device *dev);
 
-#ifdef CONFIG_NET_CLS_ACT
+#ifdef CONFIG_NET_INGRESS
 void net_inc_ingress_queue(void);
 void net_dec_ingress_queue(void);
 #endif
 
-extern void rtnetlink_init(void);
-extern void __rtnl_unlock(void);
+#ifdef CONFIG_NET_EGRESS
+void net_inc_egress_queue(void);
+void net_dec_egress_queue(void);
+#endif
+
+void rtnetlink_init(void);
+void __rtnl_unlock(void);
+void rtnl_kfree_skbs(struct sk_buff *head, struct sk_buff *tail);
 
 #define ASSERT_RTNL() do { \
 	if (unlikely(!rtnl_is_locked())) { \

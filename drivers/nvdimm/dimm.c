@@ -49,10 +49,14 @@ static int nvdimm_probe(struct device *dev)
 	kref_init(&ndd->kref);
 
 	rc = nvdimm_init_nsarea(ndd);
+	if (rc == -EACCES)
+		nvdimm_set_locked(dev);
 	if (rc)
 		goto err;
 
 	rc = nvdimm_init_config_data(ndd);
+	if (rc == -EACCES)
+		nvdimm_set_locked(dev);
 	if (rc)
 		goto err;
 

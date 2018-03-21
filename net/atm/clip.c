@@ -60,7 +60,7 @@ static int to_atmarpd(enum atmarp_ctrl_type type, int itf, __be32 ip)
 	skb = alloc_skb(sizeof(struct atmarp_ctrl), GFP_ATOMIC);
 	if (!skb)
 		return -ENOMEM;
-	ctrl = (struct atmarp_ctrl *)skb_put(skb, sizeof(struct atmarp_ctrl));
+	ctrl = skb_put(skb, sizeof(struct atmarp_ctrl));
 	ctrl->type = type;
 	ctrl->itf_num = itf;
 	ctrl->ip = ip;
@@ -106,7 +106,7 @@ static void unlink_clip_vcc(struct clip_vcc *clip_vcc)
 			entry->expires = jiffies - 1;
 			/* force resolution or expiration */
 			error = neigh_update(entry->neigh, NULL, NUD_NONE,
-					     NEIGH_UPDATE_F_ADMIN);
+					     NEIGH_UPDATE_F_ADMIN, 0);
 			if (error)
 				pr_crit("neigh_update failed with %d\n", error);
 			goto out;
@@ -478,7 +478,7 @@ static int clip_setentry(struct atm_vcc *vcc, __be32 ip)
 		link_vcc(clip_vcc, entry);
 	}
 	error = neigh_update(neigh, llc_oui, NUD_PERMANENT,
-			     NEIGH_UPDATE_F_OVERRIDE | NEIGH_UPDATE_F_ADMIN);
+			     NEIGH_UPDATE_F_OVERRIDE | NEIGH_UPDATE_F_ADMIN, 0);
 	neigh_release(neigh);
 	return error;
 }

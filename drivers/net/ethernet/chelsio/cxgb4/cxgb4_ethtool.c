@@ -997,7 +997,7 @@ static int get_eeprom(struct net_device *dev, struct ethtool_eeprom *e,
 {
 	int i, err = 0;
 	struct adapter *adapter = netdev2adap(dev);
-	u8 *buf = t4_alloc_mem(EEPROMSIZE);
+	u8 *buf = kvzalloc(EEPROMSIZE, GFP_KERNEL);
 
 	if (!buf)
 		return -ENOMEM;
@@ -1008,7 +1008,7 @@ static int get_eeprom(struct net_device *dev, struct ethtool_eeprom *e,
 
 	if (!err)
 		memcpy(data, buf + e->offset, e->len);
-	t4_free_mem(buf);
+	kvfree(buf);
 	return err;
 }
 
@@ -1037,7 +1037,7 @@ static int set_eeprom(struct net_device *dev, struct ethtool_eeprom *eeprom,
 	if (aligned_offset != eeprom->offset || aligned_len != eeprom->len) {
 		/* RMW possibly needed for first or last words.
 		 */
-		buf = t4_alloc_mem(aligned_len);
+		buf = kvzalloc(aligned_len, GFP_KERNEL);
 		if (!buf)
 			return -ENOMEM;
 		err = eeprom_rd_phys(adapter, aligned_offset, (u32 *)buf);
@@ -1065,7 +1065,7 @@ static int set_eeprom(struct net_device *dev, struct ethtool_eeprom *eeprom,
 		err = t4_seeprom_wp(adapter, true);
 out:
 	if (buf != data)
-		t4_free_mem(buf);
+		kvfree(buf);
 	return err;
 }
 
@@ -1113,14 +1113,31 @@ static int set_flash(struct net_device *netdev, struct ethtool_flash *ef)
 
 static int get_ts_info(struct net_device *dev, struct ethtool_ts_info *ts_info)
 {
+	struct port_info *pi = netdev_priv(dev);
+	struct  adapter *adapter = pi->adapter;
+
 	ts_info->so_timestamping = SOF_TIMESTAMPING_TX_SOFTWARE |
 				   SOF_TIMESTAMPING_RX_SOFTWARE |
 				   SOF_TIMESTAMPING_SOFTWARE;
 
 	ts_info->so_timestamping |= SOF_TIMESTAMPING_RX_HARDWARE |
+				    SOF_TIMESTAMPING_TX_HARDWARE |
 				    SOF_TIMESTAMPING_RAW_HARDWARE;
 
-	ts_info->phc_index = -1;
+	ts_info->tx_types = (1 << HWTSTAMP_TX_OFF) |
+			    (1 << HWTSTAMP_TX_ON);
+
+	ts_info->rx_filters = (1 << HWTSTAMP_FILTER_NONE) |
+			      (1 << HWTSTAMP_FILTER_PTP_V2_L4_EVENT) |
+			      (1 << HWTSTAMP_FILTER_PTP_V1_L4_SYNC) |
+			      (1 << HWTSTAMP_FILTER_PTP_V1_L4_DELAY_REQ) |
+			      (1 << HWTSTAMP_FILTER_PTP_V2_L4_SYNC) |
+			      (1 << HWTSTAMP_FILTER_PTP_V2_L4_DELAY_REQ);
+
+	if (adapter->ptp_clock)
+		ts_info->phc_index = ptp_clock_index(adapter->ptp_clock);
+	else
+		ts_info->phc_index = -1;
 
 	return 0;
 }

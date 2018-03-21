@@ -221,7 +221,7 @@ sysc_vtime:
 	mvc	__PT_PSW(8,%r11),__LC_SVC_OLD_PSW
 	mvc	__PT_INT_CODE(4,%r11),__LC_SVC_ILC
 sysc_do_svc:
-	oi	__TI_flags+3(%r12),_TIF_SYSCALL
+	oi	__TI_flags+2(%r12),_TIF_SYSCALL>>8
 	l	%r10,__TI_sysc_table(%r12)	# 31 bit system call table
 	lh	%r8,__PT_INT_CODE+2(%r11)
 	sla	%r8,2				# shift and test for svc0
@@ -249,7 +249,7 @@ sysc_tif:
 	jno	sysc_restore
 	tm	__TI_flags+3(%r12),_TIF_WORK_SVC
 	jnz	sysc_work			# check for work
-	ni	__TI_flags+3(%r12),255-_TIF_SYSCALL
+	ni	__TI_flags+2(%r12),255-_TIF_SYSCALL>>8
 	BPON
 sysc_restore:
 	mvc	__LC_RETURN_PSW(8),__PT_PSW(%r11)
@@ -307,7 +307,7 @@ sysc_sigpending:
 	lr	%r2,%r11		# pass pointer to pt_regs
 	l	%r1,BASED(.Ldo_signal)
 	basr	%r14,%r1		# call do_signal
-	tm	__TI_flags+3(%r12),_TIF_SYSCALL
+	tm	__TI_flags+2(%r12),_TIF_SYSCALL>>8
 	jno	sysc_return
 	lm	%r2,%r7,__PT_R2(%r11)	# load svc arguments
 	l	%r10,__TI_sysc_table(%r12)	# 31 bit system call table

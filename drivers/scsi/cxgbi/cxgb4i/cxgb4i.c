@@ -29,6 +29,7 @@
 #include "t4fw_api.h"
 #include "l2t.h"
 #include "cxgb4i.h"
+#include "clip_tbl.h"
 
 static unsigned int dbg_level;
 
@@ -803,7 +804,7 @@ static void do_act_establish(struct cxgbi_device *cdev, struct sk_buff *skb)
 
 	cxgbi_sock_get(csk);
 	csk->tid = tid;
-	cxgb4_insert_tid(lldi->tids, csk, tid);
+	cxgb4_insert_tid(lldi->tids, csk, tid, csk->csk_family);
 	cxgbi_sock_set_flag(csk, CTPF_HAS_TID);
 
 	free_atid(csk);
@@ -953,7 +954,8 @@ static void do_act_open_rpl(struct cxgbi_device *cdev, struct sk_buff *skb)
 	if (status && status != CPL_ERR_TCAM_FULL &&
 	    status != CPL_ERR_CONN_EXIST &&
 	    status != CPL_ERR_ARP_MISS)
-		cxgb4_remove_tid(lldi->tids, csk->port_id, GET_TID(rpl));
+		cxgb4_remove_tid(lldi->tids, csk->port_id, GET_TID(rpl),
+				 csk->csk_family);
 
 	cxgbi_sock_get(csk);
 	spin_lock_bh(&csk->lock);
@@ -1562,23 +1564,34 @@ static inline void l2t_put(struct cxgbi_sock *csk)
 static void release_offload_resources(struct cxgbi_sock *csk)
 {
 	struct cxgb4_lld_info *lldi;
+#if IS_ENABLED(CONFIG_IPV6)
+	struct net_device *ndev = csk->cdev->ports[csk->port_id];
+#endif
 
 	log_debug(1 << CXGBI_DBG_TOE | 1 << CXGBI_DBG_SOCK,
 		"csk 0x%p,%u,0x%lx,%u.\n",
 		csk, csk->state, csk->flags, csk->tid);
 
 	cxgbi_sock_free_cpl_skbs(csk);
+	cxgbi_sock_purge_write_queue(csk);
 	if (csk->wr_cred != csk->wr_max_cred) {
 		cxgbi_sock_purge_wr_queue(csk);
 		cxgbi_sock_reset_wr_list(csk);
 	}
 
 	l2t_put(csk);
+#if IS_ENABLED(CONFIG_IPV6)
+	if (csk->csk_family == AF_INET6)
+		cxgb4_clip_release(ndev,
+				   (const u32 *)&csk->saddr6.sin6_addr, 1);
+#endif
+
 	if (cxgbi_sock_flag(csk, CTPF_HAS_ATID))
 		free_atid(csk);
 	else if (cxgbi_sock_flag(csk, CTPF_HAS_TID)) {
 		lldi = cxgbi_cdev_priv(csk->cdev);
-		cxgb4_remove_tid(lldi->tids, 0, csk->tid);
+		cxgb4_remove_tid(lldi->tids, 0, csk->tid,
+				 csk->csk_family);
 		cxgbi_sock_clear_flag(csk, CTPF_HAS_TID);
 		cxgbi_sock_put(csk);
 	}
@@ -1594,6 +1607,7 @@ static int init_act_open(struct cxgbi_sock *csk)
 	struct neighbour *n = NULL;
 	void *daddr;
 	unsigned int step;
+	unsigned int rxq_idx;
 	unsigned int size, size6;
 	unsigned int linkspeed;
 	unsigned int rcv_winf, snd_winf;
@@ -1620,6 +1634,9 @@ static int init_act_open(struct cxgbi_sock *csk)
 		goto rel_resource;
 	}
 
+	if (!(n->nud_state & NUD_VALID))
+		neigh_event_send(n, NULL);
+
 	csk->atid = cxgb4_alloc_atid(lldi->tids, csk);
 	if (csk->atid < 0) {
 		pr_err("%s, NO atid available.\n", ndev->name);
@@ -1631,9 +1648,14 @@ static int init_act_open(struct cxgbi_sock *csk)
 	csk->l2t = cxgb4_l2t_get(lldi->l2t, n, ndev, 0);
 	if (!csk->l2t) {
 		pr_err("%s, cannot alloc l2t.\n", ndev->name);
-		goto rel_resource;
+		goto rel_resource_without_clip;
 	}
 	cxgbi_sock_get(csk);
+
+#if IS_ENABLED(CONFIG_IPV6)
+	if (csk->csk_family == AF_INET6)
+		cxgb4_clip_get(ndev, (const u32 *)&csk->saddr6.sin6_addr, 1);
+#endif
 
 	if (is_t4(lldi->adapter_type)) {
 		size = sizeof(struct cpl_act_open_req);
@@ -1667,7 +1689,9 @@ static int init_act_open(struct cxgbi_sock *csk)
 	step = lldi->ntxq / lldi->nchan;
 	csk->txq_idx = cxgb4_port_idx(ndev) * step;
 	step = lldi->nrxq / lldi->nchan;
-	csk->rss_qid = lldi->rxq_ids[cxgb4_port_idx(ndev) * step];
+	rxq_idx = (cxgb4_port_idx(ndev) * step) + (cdev->rxq_idx_cntr % step);
+	cdev->rxq_idx_cntr++;
+	csk->rss_qid = lldi->rxq_ids[rxq_idx];
 	linkspeed = ((struct port_info *)netdev_priv(ndev))->link_cfg.speed;
 	csk->snd_win = cxgb4i_snd_win;
 	csk->rcv_win = cxgb4i_rcv_win;
@@ -1713,6 +1737,12 @@ static int init_act_open(struct cxgbi_sock *csk)
 	return 0;
 
 rel_resource:
+#if IS_ENABLED(CONFIG_IPV6)
+	if (csk->csk_family == AF_INET6)
+		cxgb4_clip_release(ndev,
+				   (const u32 *)&csk->saddr6.sin6_addr, 1);
+#endif
+rel_resource_without_clip:
 	if (n)
 		neigh_release(n);
 	if (skb)

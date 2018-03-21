@@ -36,11 +36,18 @@
 #include "util/parse-regs-options.h"
 #include "util/trigger.h"
 #include "util/perf-hooks.h"
+#include "util/time-utils.h"
+#include "util/units.h"
 #include "asm/bug.h"
 
+#include <errno.h>
+#include <inttypes.h>
+#include <poll.h>
 #include <unistd.h>
 #include <sched.h>
+#include <signal.h>
 #include <sys/mman.h>
+#include <sys/wait.h>
 #include <asm/bug.h>
 #include <linux/time64.h>
 
@@ -416,7 +423,7 @@ static int record__mmap(struct record *rec)
 
 static int record__open(struct record *rec)
 {
-	char msg[512];
+	char msg[BUFSIZ];
 	struct perf_evsel *pos;
 	struct perf_evlist *evlist = rec->evlist;
 	struct perf_session *session = rec->session;
@@ -430,7 +437,7 @@ static int record__open(struct record *rec)
 try_again:
 		if (perf_evsel__open(pos, pos->cpus, pos->threads) < 0) {
 			if (perf_evsel__fallback(pos, errno, msg, sizeof(msg))) {
-				if (verbose)
+				if (verbose > 0)
 					ui__warning("%s\n", msg);
 				goto try_again;
 			}
@@ -653,22 +660,23 @@ record__finish_output(struct record *rec)
 
 static int record__synthesize_workload(struct record *rec, bool tail)
 {
-	struct {
-		struct thread_map map;
-		struct thread_map_data map_data;
-	} thread_map;
+	int err;
+	struct thread_map *thread_map;
 
 	if (rec->opts.tail_synthesize != tail)
 		return 0;
 
-	thread_map.map.nr = 1;
-	thread_map.map.map[0].pid = rec->evlist->workload.pid;
-	thread_map.map.map[0].comm = NULL;
-	return perf_event__synthesize_thread_map(&rec->tool, &thread_map.map,
+	thread_map = thread_map__new_by_tid(rec->evlist->workload.pid);
+	if (thread_map == NULL)
+		return -1;
+
+	err = perf_event__synthesize_thread_map(&rec->tool, thread_map,
 						 process_synthesized_event,
 						 &rec->session->machines.host,
 						 rec->opts.sample_address,
 						 rec->opts.proc_map_timeout);
+	thread_map__put(thread_map);
+	return err;
 }
 
 static int record__synthesize(struct record *rec, bool tail);
@@ -1621,7 +1629,7 @@ static struct option __record_options[] = {
 
 struct option *record_options = __record_options;
 
-int cmd_record(int argc, const char **argv, const char *prefix __maybe_unused)
+int cmd_record(int argc, const char **argv)
 {
 	int err;
 	struct record *rec = &record;
@@ -1644,8 +1652,12 @@ int cmd_record(int argc, const char **argv, const char *prefix __maybe_unused)
 
 	argc = parse_options(argc, argv, record_options, record_usage,
 			    PARSE_OPT_STOP_AT_NON_OPTION);
+	if (quiet)
+		perf_quiet_option();
+
+	/* Make system wide (-a) the default target. */
 	if (!argc && target__none(&rec->opts.target))
-		usage_with_options(record_usage, record_options);
+		rec->opts.target.system_wide = true;
 
 	if (nr_cgroups && !rec->opts.target.system_wide) {
 		usage_with_options_msg(record_usage, record_options,

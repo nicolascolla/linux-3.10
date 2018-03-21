@@ -52,7 +52,8 @@ static const struct ipoib_stats ipoib_gstrings_stats[] = {
 	IPOIB_NETDEV_STAT(tx_bytes),
 	IPOIB_NETDEV_STAT(tx_errors),
 	IPOIB_NETDEV_STAT(rx_dropped),
-	IPOIB_NETDEV_STAT(tx_dropped)
+	IPOIB_NETDEV_STAT(tx_dropped),
+	IPOIB_NETDEV_STAT(multicast),
 };
 
 #define IPOIB_GLOBAL_STATS_LEN	ARRAY_SIZE(ipoib_gstrings_stats)
@@ -60,12 +61,11 @@ static const struct ipoib_stats ipoib_gstrings_stats[] = {
 static void ipoib_get_drvinfo(struct net_device *netdev,
 			      struct ethtool_drvinfo *drvinfo)
 {
-	struct ipoib_dev_priv *priv = netdev_priv(netdev);
+	struct ipoib_dev_priv *priv = ipoib_priv(netdev);
 
-	ib_get_device_fw_str(priv->ca, drvinfo->fw_version,
-			     sizeof(drvinfo->fw_version));
+	ib_get_device_fw_str(priv->ca, drvinfo->fw_version);
 
-	strlcpy(drvinfo->bus_info, dev_name(priv->ca->dma_device),
+	strlcpy(drvinfo->bus_info, dev_name(priv->ca->dev.parent),
 		sizeof(drvinfo->bus_info));
 
 	strlcpy(drvinfo->version, ipoib_driver_version,
@@ -77,7 +77,7 @@ static void ipoib_get_drvinfo(struct net_device *netdev,
 static int ipoib_get_coalesce(struct net_device *dev,
 			      struct ethtool_coalesce *coal)
 {
-	struct ipoib_dev_priv *priv = netdev_priv(dev);
+	struct ipoib_dev_priv *priv = ipoib_priv(dev);
 
 	coal->rx_coalesce_usecs = priv->ethtool.coalesce_usecs;
 	coal->rx_max_coalesced_frames = priv->ethtool.max_coalesced_frames;
@@ -88,7 +88,7 @@ static int ipoib_get_coalesce(struct net_device *dev,
 static int ipoib_set_coalesce(struct net_device *dev,
 			      struct ethtool_coalesce *coal)
 {
-	struct ipoib_dev_priv *priv = netdev_priv(dev);
+	struct ipoib_dev_priv *priv = ipoib_priv(dev);
 	int ret;
 
 	/*
@@ -178,7 +178,7 @@ static inline int ib_speed_enum_to_int(int speed)
 static int ipoib_get_link_ksettings(struct net_device *netdev,
 				    struct ethtool_link_ksettings *cmd)
 {
-	struct ipoib_dev_priv *priv = netdev_priv(netdev);
+	struct ipoib_dev_priv *priv = ipoib_priv(netdev);
 	struct ib_port_attr attr;
 	int ret, speed, width;
 

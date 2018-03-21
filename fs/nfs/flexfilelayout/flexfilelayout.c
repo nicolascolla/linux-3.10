@@ -28,6 +28,9 @@
 
 static struct group_info	*ff_zero_group;
 
+static void ff_layout_read_record_layoutstats_done(struct rpc_task *task,
+		struct nfs_pgio_header *hdr);
+
 static struct pnfs_layout_hdr *
 ff_layout_alloc_layout_hdr(struct inode *inode, gfp_t gfp_flags)
 {
@@ -838,6 +841,7 @@ ff_layout_pg_init_read(struct nfs_pageio_descriptor *pgio,
 	int ds_idx;
 
 retry:
+	pnfs_generic_pg_check_layout(pgio);
 	/* Use full layout for now */
 	if (!pgio->pg_lseg)
 		ff_layout_pg_get_read(pgio, req, false);
@@ -886,6 +890,7 @@ ff_layout_pg_init_write(struct nfs_pageio_descriptor *pgio,
 	int status;
 
 retry:
+	pnfs_generic_pg_check_layout(pgio);
 	if (!pgio->pg_lseg) {
 		pgio->pg_lseg = pnfs_update_layout(pgio->pg_inode,
 						   req->wb_context,
@@ -1039,37 +1044,10 @@ static int ff_layout_async_handle_error_v4(struct rpc_task *task,
 {
 	struct pnfs_layout_hdr *lo = lseg->pls_layout;
 	struct inode *inode = lo->plh_inode;
-	struct nfs_server *mds_server = NFS_SERVER(inode);
-
 	struct nfs4_deviceid_node *devid = FF_LAYOUT_DEVID_NODE(lseg, idx);
-	struct nfs_client *mds_client = mds_server->nfs_client;
 	struct nfs4_slot_table *tbl = &clp->cl_session->fc_slot_table;
 
-	if (task->tk_status >= 0)
-		return 0;
-
 	switch (task->tk_status) {
-	/* MDS state errors */
-	case -NFS4ERR_DELEG_REVOKED:
-	case -NFS4ERR_ADMIN_REVOKED:
-	case -NFS4ERR_BAD_STATEID:
-		if (state == NULL)
-			break;
-		nfs_remove_bad_delegation(state->inode, NULL);
-	case -NFS4ERR_OPENMODE:
-		if (state == NULL)
-			break;
-		if (nfs4_schedule_stateid_recovery(mds_server, state) < 0)
-			goto out_bad_stateid;
-		goto wait_on_recovery;
-	case -NFS4ERR_EXPIRED:
-		if (state != NULL) {
-			if (nfs4_schedule_stateid_recovery(mds_server, state) < 0)
-				goto out_bad_stateid;
-		}
-		nfs4_schedule_lease_recovery(mds_client);
-		goto wait_on_recovery;
-	/* DS session errors */
 	case -NFS4ERR_BADSESSION:
 	case -NFS4ERR_BADSLOT:
 	case -NFS4ERR_BAD_HIGH_SLOT:
@@ -1117,7 +1095,8 @@ static int ff_layout_async_handle_error_v4(struct rpc_task *task,
 	case -EPIPE:
 		dprintk("%s DS connection error %d\n", __func__,
 			task->tk_status);
-		nfs4_mark_deviceid_unavailable(devid);
+		nfs4_delete_deviceid(devid->ld, devid->nfs_client,
+				&devid->deviceid);
 		rpc_wake_up(&tbl->slot_tbl_waitq);
 		/* fall through */
 	default:
@@ -1128,17 +1107,8 @@ reset:
 			task->tk_status);
 		return -NFS4ERR_RESET_TO_MDS;
 	}
-out:
 	task->tk_status = 0;
 	return -EAGAIN;
-out_bad_stateid:
-	task->tk_status = -EIO;
-	return 0;
-wait_on_recovery:
-	rpc_sleep_on(&mds_client->cl_rpcwaitq, task, NULL);
-	if (test_bit(NFS4CLNT_MANAGER_RUNNING, &mds_client->cl_state) == 0)
-		rpc_wake_up_queued_task(&mds_client->cl_rpcwaitq, task);
-	goto out;
 }
 
 /* Retry all errors through either pNFS or MDS except for -EJUKEBOX */
@@ -1147,9 +1117,6 @@ static int ff_layout_async_handle_error_v3(struct rpc_task *task,
 					   int idx)
 {
 	struct nfs4_deviceid_node *devid = FF_LAYOUT_DEVID_NODE(lseg, idx);
-
-	if (task->tk_status >= 0)
-		return 0;
 
 	switch (task->tk_status) {
 	/* File access problems. Don't mark the device as unavailable */
@@ -1166,7 +1133,8 @@ static int ff_layout_async_handle_error_v3(struct rpc_task *task,
 	default:
 		dprintk("%s DS connection error %d\n", __func__,
 			task->tk_status);
-		nfs4_mark_deviceid_unavailable(devid);
+		nfs4_delete_deviceid(devid->ld, devid->nfs_client,
+				&devid->deviceid);
 	}
 	/* FIXME: Need to prevent infinite looping here. */
 	return -NFS4ERR_RESET_TO_PNFS;
@@ -1184,6 +1152,13 @@ static int ff_layout_async_handle_error(struct rpc_task *task,
 					int idx)
 {
 	int vers = clp->cl_nfs_mod->rpc_vers->number;
+
+	if (task->tk_status >= 0)
+		return 0;
+
+	/* Handle the case of an invalid layout segment */
+	if (!pnfs_is_valid_lseg(lseg))
+		return -NFS4ERR_RESET_TO_PNFS;
 
 	switch (vers) {
 	case 3:
@@ -1268,6 +1243,7 @@ static int ff_layout_read_done_cb(struct rpc_task *task,
 					hdr->pgio_mirror_idx + 1,
 					&hdr->pgio_mirror_idx))
 			goto out_eagain;
+		ff_layout_read_record_layoutstats_done(task, hdr);
 		pnfs_read_resend_pnfs(hdr);
 		return task->tk_status;
 	case -NFS4ERR_RESET_TO_MDS:
@@ -1804,16 +1780,16 @@ ff_layout_write_pagelist(struct nfs_pgio_header *hdr, int sync)
 
 	ds = nfs4_ff_layout_prepare_ds(lseg, idx, true);
 	if (!ds)
-		return PNFS_NOT_ATTEMPTED;
+		goto out_failed;
 
 	ds_clnt = nfs4_ff_find_or_create_ds_client(lseg, idx, ds->ds_clp,
 						   hdr->inode);
 	if (IS_ERR(ds_clnt))
-		return PNFS_NOT_ATTEMPTED;
+		goto out_failed;
 
 	ds_cred = ff_layout_get_ds_cred(lseg, idx, hdr->cred);
 	if (!ds_cred)
-		return PNFS_NOT_ATTEMPTED;
+		goto out_failed;
 
 	vers = nfs4_ff_layout_ds_version(lseg, idx);
 
@@ -1843,6 +1819,11 @@ ff_layout_write_pagelist(struct nfs_pgio_header *hdr, int sync)
 			  sync, RPC_TASK_SOFTCONN);
 	put_rpccred(ds_cred);
 	return PNFS_ATTEMPTED;
+
+out_failed:
+	if (ff_layout_avoid_mds_available_ds(lseg))
+		return PNFS_TRY_AGAIN;
+	return PNFS_NOT_ATTEMPTED;
 }
 
 static u32 calc_ds_index_from_commit(struct pnfs_layout_segment *lseg, u32 i)
@@ -1870,6 +1851,10 @@ static int ff_layout_initiate_commit(struct nfs_commit_data *data, int how)
 	u32 idx;
 	int vers, ret;
 	struct nfs_fh *fh;
+
+	if (!lseg || !(pnfs_is_valid_lseg(lseg) ||
+	    test_bit(NFS_LSEG_LAYOUTRETURN, &lseg->pls_flags)))
+		goto out_err;
 
 	idx = calc_ds_index_from_commit(lseg, data->ds_commit_index);
 	ds = nfs4_ff_layout_prepare_ds(lseg, idx, true);
@@ -1983,10 +1968,10 @@ ff_layout_alloc_deviceid_node(struct nfs_server *server,
 }
 
 static void
-ff_layout_encode_layoutreturn(struct pnfs_layout_hdr *lo,
-			      struct xdr_stream *xdr,
+ff_layout_encode_layoutreturn(struct xdr_stream *xdr,
 			      const struct nfs4_layoutreturn_args *args)
 {
+	struct pnfs_layout_hdr *lo = args->layout;
 	struct nfs4_flexfile_layout *flo = FF_LAYOUT_FROM_HDR(lo);
 	__be32 *start;
 

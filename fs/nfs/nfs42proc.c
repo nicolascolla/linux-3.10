@@ -143,7 +143,7 @@ static ssize_t _nfs42_proc_copy(struct file *src,
 	loff_t pos_src = args->src_pos;
 	loff_t pos_dst = args->dst_pos;
 	size_t count = args->count;
-	int status;
+	ssize_t status;
 
 	status = nfs4_set_rw_stateid(&args->src_stateid, src_lock->open_context,
 				     src_lock, FMODE_READ);
@@ -379,6 +379,7 @@ nfs42_layoutstat_done(struct rpc_task *task, void *calldata)
 			pnfs_mark_layout_stateid_invalid(lo, &head);
 			spin_unlock(&inode->i_lock);
 			pnfs_free_lseg_list(&head);
+			nfs_commit_inode(inode, 0);
 		} else
 			spin_unlock(&inode->i_lock);
 		break;

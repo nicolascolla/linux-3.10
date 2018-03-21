@@ -221,6 +221,7 @@ static struct snd_seq_client *seq_create_client1(int client_index, int poolsize)
 	rwlock_init(&client->ports_lock);
 	mutex_init(&client->ports_mutex);
 	INIT_LIST_HEAD(&client->ports_list_head);
+	mutex_init(&client->ioctl_mutex);
 
 	/* find free slot in the client table */
 	spin_lock_irqsave(&clients_lock, flags);
@@ -1259,6 +1260,7 @@ static int snd_seq_ioctl_create_port(struct snd_seq_client *client, void *arg)
 	struct snd_seq_port_info *info = arg;
 	struct snd_seq_client_port *port;
 	struct snd_seq_port_callback *callback;
+	int port_idx;
 
 	/* it is not allowed to create the port for an another client */
 	if (info->addr.client != client->number)
@@ -1269,7 +1271,9 @@ static int snd_seq_ioctl_create_port(struct snd_seq_client *client, void *arg)
 		return -ENOMEM;
 
 	if (client->type == USER_CLIENT && info->kernel) {
-		snd_seq_delete_port(client, port->addr.port);
+		port_idx = port->addr.port;
+		snd_seq_port_unlock(port);
+		snd_seq_delete_port(client, port_idx);
 		return -EINVAL;
 	}
 	if (client->type == KERNEL_CLIENT) {
@@ -1290,6 +1294,7 @@ static int snd_seq_ioctl_create_port(struct snd_seq_client *client, void *arg)
 
 	snd_seq_set_port_info(port, info);
 	snd_seq_system_client_ev_port_start(port->addr.client, port->addr.port);
+	snd_seq_port_unlock(port);
 
 	return 0;
 }
@@ -1502,16 +1507,11 @@ static int snd_seq_ioctl_unsubscribe_port(struct snd_seq_client *client,
 static int snd_seq_ioctl_create_queue(struct snd_seq_client *client, void *arg)
 {
 	struct snd_seq_queue_info *info = arg;
-	int result;
 	struct snd_seq_queue *q;
 
-	result = snd_seq_queue_alloc(client->number, info->locked, info->flags);
-	if (result < 0)
-		return result;
-
-	q = queueptr(result);
-	if (q == NULL)
-		return -EINVAL;
+	q = snd_seq_queue_alloc(client->number, info->locked, info->flags);
+	if (IS_ERR(q))
+		return PTR_ERR(q);
 
 	info->queue = q->queue;
 	info->locked = q->locked;
@@ -1521,7 +1521,7 @@ static int snd_seq_ioctl_create_queue(struct snd_seq_client *client, void *arg)
 	if (!info->name[0])
 		snprintf(info->name, sizeof(info->name), "Queue-%d", q->queue);
 	strlcpy(q->name, info->name, sizeof(q->name));
-	queuefree(q);
+	snd_use_lock_free(&q->use_lock);
 
 	return 0;
 }
@@ -1668,7 +1668,6 @@ int snd_seq_set_queue_tempo(int client, struct snd_seq_queue_tempo *tempo)
 		return -EPERM;
 	return snd_seq_queue_timer_set_tempo(tempo->queue, client, tempo);
 }
-
 EXPORT_SYMBOL(snd_seq_set_queue_tempo);
 
 static int snd_seq_ioctl_set_queue_tempo(struct snd_seq_client *client,
@@ -1832,6 +1831,7 @@ static int snd_seq_ioctl_set_client_pool(struct snd_seq_client *client,
 	     info->output_pool != client->pool->size)) {
 		if (snd_seq_write_pool_allocated(client)) {
 			/* remove all existing cells */
+			snd_seq_pool_mark_closing(client->pool);
 			snd_seq_queue_client_leave_cells(client->number);
 			snd_seq_pool_done(client->pool);
 		}
@@ -2127,7 +2127,9 @@ static long snd_seq_ioctl(struct file *file, unsigned int cmd,
 			return -EFAULT;
 	}
 
+	mutex_lock(&client->ioctl_mutex);
 	err = handler->func(client, &buf);
+	mutex_unlock(&client->ioctl_mutex);
 	if (err >= 0) {
 		/* Some commands includes a bug in 'dir' field. */
 		if (handler->cmd == SNDRV_SEQ_IOCTL_SET_QUEUE_CLIENT ||
@@ -2199,7 +2201,6 @@ int snd_seq_create_kernel_client(struct snd_card *card, int client_index,
 	/* return client number to caller */
 	return client->number;
 }
-
 EXPORT_SYMBOL(snd_seq_create_kernel_client);
 
 /* exported to kernel modules */
@@ -2218,7 +2219,6 @@ int snd_seq_delete_kernel_client(int client)
 	kfree(ptr);
 	return 0;
 }
-
 EXPORT_SYMBOL(snd_seq_delete_kernel_client);
 
 /* skeleton to enqueue event, called from snd_seq_kernel_client_enqueue
@@ -2268,7 +2268,6 @@ int snd_seq_kernel_client_enqueue(int client, struct snd_seq_event * ev,
 {
 	return kernel_client_enqueue(client, ev, NULL, 0, atomic, hop);
 }
-
 EXPORT_SYMBOL(snd_seq_kernel_client_enqueue);
 
 /*
@@ -2282,7 +2281,6 @@ int snd_seq_kernel_client_enqueue_blocking(int client, struct snd_seq_event * ev
 {
 	return kernel_client_enqueue(client, ev, file, 1, atomic, hop);
 }
-
 EXPORT_SYMBOL(snd_seq_kernel_client_enqueue_blocking);
 
 /* 
@@ -2320,7 +2318,6 @@ int snd_seq_kernel_client_dispatch(int client, struct snd_seq_event * ev,
 	snd_seq_client_unlock(cptr);
 	return result;
 }
-
 EXPORT_SYMBOL(snd_seq_kernel_client_dispatch);
 
 /**
@@ -2353,7 +2350,6 @@ int snd_seq_kernel_client_ctl(int clientid, unsigned int cmd, void *arg)
 		 cmd, _IOC_TYPE(cmd), _IOC_NR(cmd));
 	return -ENOTTY;
 }
-
 EXPORT_SYMBOL(snd_seq_kernel_client_ctl);
 
 /* exported (for OSS emulator) */
@@ -2371,7 +2367,6 @@ int snd_seq_kernel_client_write_poll(int clientid, struct file *file, poll_table
 		return 1;
 	return 0;
 }
-
 EXPORT_SYMBOL(snd_seq_kernel_client_write_poll);
 
 /*---------------------------------------------------------------------------*/

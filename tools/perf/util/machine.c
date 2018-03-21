@@ -1,3 +1,7 @@
+#include <dirent.h>
+#include <errno.h>
+#include <inttypes.h>
+#include <regex.h>
 #include "callchain.h"
 #include "debug.h"
 #include "event.h"
@@ -10,9 +14,14 @@
 #include "thread.h"
 #include "vdso.h"
 #include <stdbool.h>
-#include <symbol/kallsyms.h>
+#include <sys/types.h>
+#include <sys/stat.h>
+#include <unistd.h>
 #include "unwind.h"
 #include "linux/hash.h"
+
+#include "sane_ctype.h"
+#include <symbol/kallsyms.h>
 
 static void __machine__remove_thread(struct machine *machine, struct thread *th, bool lock);
 
@@ -531,16 +540,7 @@ static struct dso *machine__findnew_module_dso(struct machine *machine,
 		if (dso == NULL)
 			goto out_unlock;
 
-		if (machine__is_host(machine))
-			dso->symtab_type = DSO_BINARY_TYPE__SYSTEM_PATH_KMODULE;
-		else
-			dso->symtab_type = DSO_BINARY_TYPE__GUEST_KMODULE;
-
-		/* _KMODULE_COMP should be next to _KMODULE */
-		if (m->kmod && m->comp)
-			dso->symtab_type++;
-
-		dso__set_short_name(dso, strdup(m->name), true);
+		dso__set_module_info(dso, m, machine);
 		dso__set_long_name(dso, strdup(filename), true);
 	}
 
@@ -787,7 +787,7 @@ static int machine__get_running_kernel_start(struct machine *machine,
 int __machine__create_kernel_maps(struct machine *machine, struct dso *kernel)
 {
 	int type;
-	u64 start;
+	u64 start = 0;
 
 	if (machine__get_running_kernel_start(machine, NULL, &start))
 		return -1;
@@ -1105,7 +1105,8 @@ int __weak arch__fix_module_text_start(u64 *start __maybe_unused,
 	return 0;
 }
 
-static int machine__create_module(void *arg, const char *name, u64 start)
+static int machine__create_module(void *arg, const char *name, u64 start,
+				  u64 size)
 {
 	struct machine *machine = arg;
 	struct map *map;
@@ -1116,6 +1117,7 @@ static int machine__create_module(void *arg, const char *name, u64 start)
 	map = machine__findnew_module_map(machine, start, name);
 	if (map == NULL)
 		return -1;
+	map->end = start + size;
 
 	dso__kernel_module_get_build_id(map->dso, machine->root_dir);
 
@@ -1151,8 +1153,8 @@ static int machine__create_modules(struct machine *machine)
 int machine__create_kernel_maps(struct machine *machine)
 {
 	struct dso *kernel = machine__get_kernel(machine);
-	const char *name;
-	u64 addr;
+	const char *name = NULL;
+	u64 addr = 0;
 	int ret;
 
 	if (kernel == NULL)
@@ -1177,10 +1179,12 @@ int machine__create_kernel_maps(struct machine *machine)
 	 */
 	map_groups__fixup_end(&machine->kmaps);
 
-	if (machine__get_running_kernel_start(machine, &name, &addr)) {
-	} else if (maps__set_kallsyms_ref_reloc_sym(machine->vmlinux_maps, name, addr)) {
-		machine__destroy_kernel_maps(machine);
-		return -1;
+	if (!machine__get_running_kernel_start(machine, &name, &addr)) {
+		if (name &&
+		    maps__set_kallsyms_ref_reloc_sym(machine->vmlinux_maps, name, addr)) {
+			machine__destroy_kernel_maps(machine);
+			return -1;
+		}
 	}
 
 	return 0;
@@ -1445,7 +1449,7 @@ static void __machine__remove_thread(struct machine *machine, struct thread *th,
 	if (machine->last_match == th)
 		machine->last_match = NULL;
 
-	BUG_ON(atomic_read(&th->refcnt) == 0);
+	BUG_ON(refcount_read(&th->refcnt) == 0);
 	if (lock)
 		pthread_rwlock_wrlock(&machine->threads_lock);
 	rb_erase_init(&th->rb_node, &machine->threads);
@@ -1571,7 +1575,7 @@ int machine__process_event(struct machine *machine, union perf_event *event,
 
 static bool symbol__match_regex(struct symbol *sym, regex_t *regex)
 {
-	if (sym->name && !regexec(regex, sym->name, 0, NULL, 0))
+	if (!regexec(regex, sym->name, 0, NULL, 0))
 		return 1;
 	return 0;
 }

@@ -260,7 +260,19 @@ out:
 static int gfs2_writepages(struct address_space *mapping,
 			   struct writeback_control *wbc)
 {
-	return mpage_writepages(mapping, wbc, gfs2_get_block_noalloc);
+	struct gfs2_sbd *sdp = gfs2_mapping2sbd(mapping);
+	int ret = mpage_writepages(mapping, wbc, gfs2_get_block_noalloc);
+
+	/*
+	 * Even if we didn't write any pages here, we might still be holding
+	 * dirty pages in the ail. We forcibly flush the ail because we don't
+	 * want balance_dirty_pages() to loop indefinitely trying to write out
+	 * pages held in the ail that it can't find.
+	 */
+	if (ret == 0)
+		set_bit(SDF_FORCE_AIL_FLUSH, &sdp->sd_flags);
+
+	return ret;
 }
 
 /**
@@ -1102,7 +1114,7 @@ static ssize_t gfs2_direct_IO(int rw, struct kiocb *iocb,
 	gfs2_holder_init(ip->i_gl, LM_ST_DEFERRED, 0, &gh);
 	rv = gfs2_glock_nq(&gh);
 	if (rv)
-		return rv;
+		goto out_uninit;
 	rv = gfs2_ok_for_dio(ip, rw, offset);
 	if (rv != 1)
 		goto out; /* dio not valid, fall back to buffered i/o */
@@ -1142,6 +1154,7 @@ static ssize_t gfs2_direct_IO(int rw, struct kiocb *iocb,
 				  NULL, NULL, 0);
 out:
 	gfs2_glock_dq(&gh);
+out_uninit:
 	gfs2_holder_uninit(&gh);
 	return rv;
 }

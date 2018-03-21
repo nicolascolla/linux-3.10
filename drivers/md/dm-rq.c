@@ -139,8 +139,8 @@ static void end_clone_bio(struct bio *clone, int error)
 	struct dm_rq_clone_bio_info *info =
 		container_of(clone, struct dm_rq_clone_bio_info, clone);
 	struct dm_rq_target_io *tio = info->tio;
-	struct bio *bio = info->orig;
 	unsigned int nr_bytes = info->orig->bi_size;
+	bool is_last = !clone->bi_next;
 
 	bio_put(clone);
 
@@ -158,28 +158,23 @@ static void end_clone_bio(struct bio *clone, int error)
 		 * when the request is completed.
 		 */
 		tio->error = error;
-		return;
+		goto exit;
 	}
 
 	/*
 	 * I/O for the bio successfully completed.
 	 * Notice the data completion to the upper layer.
 	 */
-
-	/*
-	 * bios are processed from the head of the list.
-	 * So the completing bio should always be rq->bio.
-	 * If it's not, something wrong is happening.
-	 */
-	if (tio->orig->bio != bio)
-		DMERR("bio completion is going in the middle of the request");
+	tio->completed += nr_bytes;
 
 	/*
 	 * Update the original request.
 	 * Do not use blk_end_request() here, because it may complete
 	 * the original request before the clone, and break the ordering.
 	 */
-	blk_update_request(tio->orig, 0, nr_bytes);
+	if (is_last)
+exit:
+		blk_update_request(tio->orig, 0, tio->completed);
 }
 
 static struct dm_rq_target_io *tio_from_request(struct request *rq)
@@ -310,14 +305,14 @@ static void dm_unprep_request(struct request *rq)
 /*
  * Requeue the original request of a clone.
  */
-static void dm_old_requeue_request(struct request *rq)
+static void dm_old_requeue_request(struct request *rq, unsigned long delay_ms)
 {
 	struct request_queue *q = rq->q;
 	unsigned long flags;
 
 	spin_lock_irqsave(q->queue_lock, flags);
 	blk_requeue_request(q, rq);
-	blk_run_queue_async(q);
+	blk_delay_queue(q, delay_ms);
 	spin_unlock_irqrestore(q->queue_lock, flags);
 }
 
@@ -343,14 +338,15 @@ static void dm_requeue_original_request(struct dm_rq_target_io *tio, bool delay_
 	struct mapped_device *md = tio->md;
 	struct request *rq = tio->orig;
 	int rw = rq_data_dir(rq);
+	unsigned long delay_ms = delay_requeue ? 100 : 0;
 
 	rq_end_stats(md, rq);
 	dm_unprep_request(rq);
 
 	if (!rq->q->mq_ops)
-		dm_old_requeue_request(rq);
+		dm_old_requeue_request(rq, delay_ms);
 	else
-		dm_mq_delay_requeue_request(rq, delay_requeue ? 100/*ms*/ : 0);
+		dm_mq_delay_requeue_request(rq, delay_ms);
 
 	rq_completed(md, rw, false);
 }
@@ -554,6 +550,7 @@ static void init_tio(struct dm_rq_target_io *tio, struct request *rq,
 	tio->clone = NULL;
 	tio->orig = rq;
 	tio->error = 0;
+	tio->completed = 0;
 	/*
 	 * Avoid initializing info for blk-mq; it passes
 	 * target-specific data through info.ptr
@@ -846,8 +843,6 @@ int dm_old_init_request_queue(struct mapped_device *md)
 		return error;
 	}
 
-	elv_register_queue(md->queue);
-
 	return 0;
 }
 
@@ -914,7 +909,6 @@ static int dm_mq_queue_rq(struct blk_mq_hw_ctx *hctx,
 
 static struct blk_mq_ops dm_mq_ops = {
 	.queue_rq = dm_mq_queue_rq,
-	.map_queue = blk_mq_map_queue,
 	.complete = dm_softirq_done,
 	.init_request = dm_mq_init_request,
 };
@@ -958,10 +952,8 @@ int dm_mq_init_request_queue(struct mapped_device *md, struct dm_table *t)
 		err = PTR_ERR(q);
 		goto out_tag_set;
 	}
+	q->front_queue = 1;
 	dm_init_md_queue(md);
-
-	/* backfill 'mq' sysfs registration normally done in blk_register_queue */
-	blk_mq_register_disk(md->disk);
 
 	return 0;
 

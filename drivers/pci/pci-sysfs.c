@@ -1050,6 +1050,9 @@ static int pci_mmap_resource(struct kobject *kobj, struct bin_attribute *attr,
 	if (i >= PCI_ROM_RESOURCE)
 		return -ENODEV;
 
+	if (res->flags & IORESOURCE_MEM && iomem_is_exclusive(res->start))
+		return -EINVAL;
+
 	if (!pci_mmap_fits(pdev, i, vma, PCI_MMAP_SYSFS)) {
 		WARN(1, "process \"%s\" tried to map 0x%08lx bytes at page 0x%08lx on %s BAR %d (start 0x%16Lx, size 0x%16Lx)\n",
 			current->comm, vma->vm_end-vma->vm_start, vma->vm_pgoff,
@@ -1066,10 +1069,6 @@ static int pci_mmap_resource(struct kobject *kobj, struct bin_attribute *attr,
 	pci_resource_to_user(pdev, i, res, &start, &end);
 	vma->vm_pgoff += start >> PAGE_SHIFT;
 	mmap_type = res->flags & IORESOURCE_MEM ? pci_mmap_mem : pci_mmap_io;
-
-	if (res->flags & IORESOURCE_MEM && iomem_is_exclusive(start))
-		return -EINVAL;
-
 	return pci_mmap_page_range(pdev, vma, mmap_type, write_combine);
 }
 
@@ -1183,33 +1182,36 @@ static int pci_create_attr(struct pci_dev *pdev, int num, int write_combine)
 	/* allocate attribute structure, piggyback attribute name */
 	int name_len = write_combine ? 13 : 10;
 	struct bin_attribute *res_attr;
+	char *res_attr_name;
 	int retval;
 
 	res_attr = kzalloc(sizeof(*res_attr) + name_len, GFP_ATOMIC);
-	if (res_attr) {
-		char *res_attr_name = (char *)(res_attr + 1);
+	if (!res_attr)
+		return -ENOMEM;
 
-		sysfs_bin_attr_init(res_attr);
-		if (write_combine) {
-			pdev->res_attr_wc[num] = res_attr;
-			sprintf(res_attr_name, "resource%d_wc", num);
-			res_attr->mmap = pci_mmap_resource_wc;
-		} else {
-			pdev->res_attr[num] = res_attr;
-			sprintf(res_attr_name, "resource%d", num);
-			res_attr->mmap = pci_mmap_resource_uc;
-		}
-		if (pci_resource_flags(pdev, num) & IORESOURCE_IO) {
-			res_attr->read = pci_read_resource_io;
-			res_attr->write = pci_write_resource_io;
-		}
-		res_attr->attr.name = res_attr_name;
-		res_attr->attr.mode = S_IRUSR | S_IWUSR;
-		res_attr->size = pci_resource_len(pdev, num);
-		res_attr->private = &pdev->resource[num];
-		retval = sysfs_create_bin_file(&pdev->dev.kobj, res_attr);
-	} else
-		retval = -ENOMEM;
+	res_attr_name = (char *)(res_attr + 1);
+
+	sysfs_bin_attr_init(res_attr);
+	if (write_combine) {
+		pdev->res_attr_wc[num] = res_attr;
+		sprintf(res_attr_name, "resource%d_wc", num);
+		res_attr->mmap = pci_mmap_resource_wc;
+	} else {
+		pdev->res_attr[num] = res_attr;
+		sprintf(res_attr_name, "resource%d", num);
+		res_attr->mmap = pci_mmap_resource_uc;
+	}
+	if (pci_resource_flags(pdev, num) & IORESOURCE_IO) {
+		res_attr->read = pci_read_resource_io;
+		res_attr->write = pci_write_resource_io;
+	}
+	res_attr->attr.name = res_attr_name;
+	res_attr->attr.mode = S_IRUSR | S_IWUSR;
+	res_attr->size = pci_resource_len(pdev, num);
+	res_attr->private = &pdev->resource[num];
+	retval = sysfs_create_bin_file(&pdev->dev.kobj, res_attr);
+	if (retval)
+		kfree(res_attr);
 
 	return retval;
 }

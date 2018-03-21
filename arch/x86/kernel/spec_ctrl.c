@@ -13,6 +13,7 @@
 #include <asm/cpufeature.h>
 #include <asm/nospec-branch.h>
 #include <asm/intel-family.h>
+#include "cpu/cpu.h"
 
 static DEFINE_MUTEX(spec_ctrl_mutex);
 
@@ -21,7 +22,9 @@ static bool ibp_disabled __read_mostly;
 static bool unsafe_module __read_mostly;
 
 struct static_key retp_enabled_key = STATIC_KEY_INIT_FALSE;
+struct static_key ibrs_present_key = STATIC_KEY_INIT_FALSE;
 EXPORT_SYMBOL(retp_enabled_key);
+EXPORT_SYMBOL(ibrs_present_key);
 
 static void set_spec_ctrl_pcp(bool enable, int flag)
 {
@@ -111,9 +114,9 @@ static void sync_all_cpus_ibp(bool enable)
 
 static void set_spec_ctrl_retp(bool enable)
 {
-	if (!retp_enabled() && enable)
+	if (!static_key_enabled(&retp_enabled_key) && enable)
 		static_key_slow_inc(&retp_enabled_key);
-	else if (retp_enabled() && !enable)
+	else if (static_key_enabled(&retp_enabled_key) && !enable)
 		static_key_slow_dec(&retp_enabled_key);
 }
 
@@ -156,11 +159,6 @@ static bool is_skylake_era(void)
 		}
 	}
 	return false;
-}
-
-static bool retp_enabled_full(void)
-{
-	return retp_enabled() && retp_compiler();
 }
 
 bool spec_ctrl_force_enable_ibrs(void)
@@ -258,7 +256,7 @@ enum spectre_v2_mitigation spec_ctrl_get_mitigation(void)
 	else if (retp_enabled()) {
 		if (!retp_enabled_full())
 			mode = SPECTRE_V2_RETPOLINE_MINIMAL;
-		else if (!boot_cpu_has(X86_FEATURE_IBPB_SUPPORT))
+		else if (!boot_cpu_has(X86_FEATURE_IBPB))
 			mode = SPECTRE_V2_RETPOLINE_NO_IBPB;
 		else if (is_skylake_era())
 			mode = SPECTRE_V2_RETPOLINE_SKYLAKE;
@@ -281,12 +279,12 @@ static void spec_ctrl_print_features(void)
 		return;
 	}
 
-	if (cpu_has_spec_ctrl())
+	if (boot_cpu_has(X86_FEATURE_IBRS))
 		printk(KERN_INFO "FEATURE SPEC_CTRL Present\n");
 	else
 		printk(KERN_INFO "FEATURE SPEC_CTRL Not Present\n");
 
-	if (boot_cpu_has(X86_FEATURE_IBPB_SUPPORT))
+	if (boot_cpu_has(X86_FEATURE_IBPB))
 		printk(KERN_INFO "FEATURE IBPB_SUPPORT Present\n");
 	else
 		printk(KERN_INFO "FEATURE IBPB_SUPPORT Not Present\n");
@@ -319,13 +317,17 @@ static void spec_ctrl_reinit_all_cpus(void)
 
 void spec_ctrl_init(void)
 {
+	if (!static_key_enabled(&ibrs_present_key) && boot_cpu_has(X86_FEATURE_IBRS))
+		static_key_slow_inc(&ibrs_present_key);
+	else if (static_key_enabled(&ibrs_present_key) && !boot_cpu_has(X86_FEATURE_IBRS))
+		static_key_slow_dec(&ibrs_present_key);
 	spec_ctrl_print_features();
 }
 
 void spec_ctrl_rescan_cpuid(void)
 {
 	enum spectre_v2_mitigation old_mode;
-	bool old_spec, old_ibpb;
+	bool old_ibrs, old_ibpb;
 	int cpu;
 
 	if (boot_cpu_has(X86_FEATURE_IBP_DISABLE))
@@ -335,34 +337,34 @@ void spec_ctrl_rescan_cpuid(void)
 	if (boot_cpu_data.x86_vendor == X86_VENDOR_INTEL ||
 	    boot_cpu_data.x86_vendor == X86_VENDOR_AMD) {
 
-		old_spec = boot_cpu_has(X86_FEATURE_SPEC_CTRL);
-		old_ibpb = boot_cpu_has(X86_FEATURE_IBPB_SUPPORT);
+		old_ibrs = boot_cpu_has(X86_FEATURE_IBRS);
+		old_ibpb = boot_cpu_has(X86_FEATURE_IBPB);
 		old_mode = spec_ctrl_get_mitigation();
 
 		/* detect spec ctrl related cpuid additions */
-		init_scattered_cpuid_features(&boot_cpu_data);
+		get_cpu_cap(&boot_cpu_data);
 
 		/* if there were no spec ctrl related changes, we're done */
-		if (old_spec == boot_cpu_has(X86_FEATURE_SPEC_CTRL) &&
-		    old_ibpb == boot_cpu_has(X86_FEATURE_IBPB_SUPPORT))
+		if (old_ibrs == boot_cpu_has(X86_FEATURE_IBRS) &&
+		    old_ibpb == boot_cpu_has(X86_FEATURE_IBPB))
 			goto done;
 
 		/*
-		 * The SPEC_CTRL and IBPB_SUPPORT cpuid bits may have
+		 * The SPEC_CTRL and IBPB cpuid bits may have
 		 * just been set in the boot_cpu_data, transfer them
 		 * to the per-cpu data too.
 		 */
-		if (cpu_has_spec_ctrl())
+		if (boot_cpu_has(X86_FEATURE_IBRS))
 			for_each_online_cpu(cpu)
 				set_cpu_cap(&cpu_data(cpu),
-					    X86_FEATURE_SPEC_CTRL);
-		if (boot_cpu_has(X86_FEATURE_IBPB_SUPPORT))
+					    X86_FEATURE_IBRS);
+		if (boot_cpu_has(X86_FEATURE_IBPB))
 			for_each_online_cpu(cpu)
 				set_cpu_cap(&cpu_data(cpu),
-					    X86_FEATURE_IBPB_SUPPORT);
+					    X86_FEATURE_IBPB);
 
-		/* print the changed IBRS/IBPB features */
-		spec_ctrl_print_features();
+		/* update static key, print the changed IBRS/IBPB features */
+		spec_ctrl_init();
 
 		/*
 		 * Re-execute the v2 mitigation logic based on any new CPU
@@ -583,6 +585,7 @@ EXPORT_SYMBOL_GPL(unprotected_firmware_end);
 #else
 bool unprotected_firmware_begin(void)
 {
+	return false;
 }
 EXPORT_SYMBOL_GPL(unprotected_firmware_begin);
 

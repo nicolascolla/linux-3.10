@@ -408,7 +408,6 @@ struct cache {
 	int sectors_per_block_shift;
 
 	spinlock_t lock;
-	struct list_head deferred_cells;
 	struct bio_list deferred_bios;
 	struct bio_list deferred_writethrough_bios;
 	sector_t migration_threshold;
@@ -515,19 +514,19 @@ struct dm_cache_migration {
 
 /*----------------------------------------------------------------*/
 
-static bool writethrough_mode(struct cache_features *f)
+static bool writethrough_mode(struct cache *cache)
 {
-	return f->io_mode == CM_IO_WRITETHROUGH;
+	return cache->features.io_mode == CM_IO_WRITETHROUGH;
 }
 
-static bool writeback_mode(struct cache_features *f)
+static bool writeback_mode(struct cache *cache)
 {
-	return f->io_mode == CM_IO_WRITEBACK;
+	return cache->features.io_mode == CM_IO_WRITEBACK;
 }
 
-static inline bool passthrough_mode(struct cache_features *f)
+static inline bool passthrough_mode(struct cache *cache)
 {
-	return unlikely(f->io_mode == CM_IO_PASSTHROUGH);
+	return unlikely(cache->features.io_mode == CM_IO_PASSTHROUGH);
 }
 
 /*----------------------------------------------------------------*/
@@ -544,7 +543,7 @@ static void wake_deferred_writethrough_worker(struct cache *cache)
 
 static void wake_migration_worker(struct cache *cache)
 {
-	if (passthrough_mode(&cache->features))
+	if (passthrough_mode(cache))
 		return;
 
 	queue_work(cache->wq, &cache->migration_worker);
@@ -567,10 +566,13 @@ static struct dm_cache_migration *alloc_migration(struct cache *cache)
 	struct dm_cache_migration *mg;
 
 	mg = mempool_alloc(cache->migration_pool, GFP_NOWAIT);
-	if (mg) {
-		mg->cache = cache;
-		atomic_inc(&mg->cache->nr_allocated_migrations);
-	}
+	if (!mg)
+		return NULL;
+
+	memset(mg, 0, sizeof(*mg));
+
+	mg->cache = cache;
+	atomic_inc(&cache->nr_allocated_migrations);
 
 	return mg;
 }
@@ -626,7 +628,7 @@ static unsigned lock_level(struct bio *bio)
 
 static size_t get_per_bio_data_size(struct cache *cache)
 {
-	return writethrough_mode(&cache->features) ? PB_DATA_SIZE_WT : PB_DATA_SIZE_WB;
+	return writethrough_mode(cache) ? PB_DATA_SIZE_WT : PB_DATA_SIZE_WB;
 }
 
 static struct per_bio_data *get_per_bio_data(struct bio *bio, size_t data_size)
@@ -1209,7 +1211,7 @@ static bool bio_writes_complete_block(struct cache *cache, struct bio *bio)
 
 static bool optimisable_bio(struct cache *cache, struct bio *bio, dm_oblock_t block)
 {
-	return writeback_mode(&cache->features) &&
+	return writeback_mode(cache) &&
 		(is_discarded_oblock(cache, block) || bio_writes_complete_block(cache, bio));
 }
 
@@ -1598,9 +1600,6 @@ static int mg_start(struct cache *cache, struct policy_work *op, struct bio *bio
 		return -ENOMEM;
 	}
 
-	memset(mg, 0, sizeof(*mg));
-
-	mg->cache = cache;
 	mg->op = op;
 	mg->overwrite_bio = bio;
 
@@ -1734,9 +1733,6 @@ static int invalidate_start(struct cache *cache, dm_cblock_t cblock,
 		return -ENOMEM;
 	}
 
-	memset(mg, 0, sizeof(*mg));
-
-	mg->cache = cache;
 	mg->overwrite_bio = bio;
 	mg->invalidate_cblock = cblock;
 	mg->invalidate_oblock = oblock;
@@ -1861,7 +1857,7 @@ static int map_bio(struct cache *cache, struct bio *bio, dm_oblock_t block,
 		 * Passthrough always maps to the origin, invalidating any
 		 * cache blocks that are written to.
 		 */
-		if (passthrough_mode(&cache->features)) {
+		if (passthrough_mode(cache)) {
 			if (bio_data_dir(bio) == WRITE) {
 				bio_drop_shared_lock(cache, bio);
 				atomic_inc(&cache->stats.demotion);
@@ -1870,7 +1866,7 @@ static int map_bio(struct cache *cache, struct bio *bio, dm_oblock_t block,
 				remap_to_origin_clear_discard(cache, bio, block);
 
 		} else {
-			if (bio_data_dir(bio) == WRITE && writethrough_mode(&cache->features) &&
+			if (bio_data_dir(bio) == WRITE && writethrough_mode(cache) &&
 			    !is_dirty(cache, cblock)) {
 				remap_to_origin_then_cache(cache, bio, block, cblock);
 				accounted_begin(cache, bio);
@@ -2323,7 +2319,7 @@ static void init_features(struct cache_features *cf)
 static int parse_features(struct cache_args *ca, struct dm_arg_set *as,
 			  char **error)
 {
-	static struct dm_arg _args[] = {
+	static const struct dm_arg _args[] = {
 		{0, 2, "Invalid number of cache feature arguments"},
 	};
 
@@ -2365,7 +2361,7 @@ static int parse_features(struct cache_args *ca, struct dm_arg_set *as,
 static int parse_policy(struct cache_args *ca, struct dm_arg_set *as,
 			char **error)
 {
-	static struct dm_arg _args[] = {
+	static const struct dm_arg _args[] = {
 		{0, 1024, "Invalid number of policy arguments"},
 	};
 
@@ -2636,7 +2632,7 @@ static int cache_create(struct cache_args *ca, struct cache **result)
 		goto bad;
 	}
 
-	if (passthrough_mode(&cache->features)) {
+	if (passthrough_mode(cache)) {
 		bool all_clean;
 
 		r = dm_cache_metadata_all_clean(cache->cmd, &all_clean);
@@ -2655,7 +2651,6 @@ static int cache_create(struct cache_args *ca, struct cache **result)
 	}
 
 	spin_lock_init(&cache->lock);
-	INIT_LIST_HEAD(&cache->deferred_cells);
 	bio_list_init(&cache->deferred_bios);
 	bio_list_init(&cache->deferred_writethrough_bios);
 	atomic_set(&cache->nr_allocated_migrations, 0);
@@ -3260,13 +3255,13 @@ static void cache_status(struct dm_target *ti, status_type_t type,
 		else
 			DMEMIT("1 ");
 
-		if (writethrough_mode(&cache->features))
+		if (writethrough_mode(cache))
 			DMEMIT("writethrough ");
 
-		else if (passthrough_mode(&cache->features))
+		else if (passthrough_mode(cache))
 			DMEMIT("passthrough ");
 
-		else if (writeback_mode(&cache->features))
+		else if (writeback_mode(cache))
 			DMEMIT("writeback ");
 
 		else {
@@ -3432,7 +3427,7 @@ static int process_invalidate_cblocks_message(struct cache *cache, unsigned coun
 	unsigned i;
 	struct cblock_range range;
 
-	if (!passthrough_mode(&cache->features)) {
+	if (!passthrough_mode(cache)) {
 		DMERR("%s: cache has to be in passthrough mode for invalidation",
 		      cache_device_name(cache));
 		return -EPERM;

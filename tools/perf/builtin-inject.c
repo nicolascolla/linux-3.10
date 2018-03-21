@@ -18,10 +18,13 @@
 #include "util/data.h"
 #include "util/auxtrace.h"
 #include "util/jit.h"
+#include "util/thread.h"
 
 #include <subcmd/parse-options.h>
 
 #include <linux/list.h>
+#include <errno.h>
+#include <signal.h>
 
 struct perf_inject {
 	struct perf_tool	tool;
@@ -681,6 +684,8 @@ static int __cmd_inject(struct perf_inject *inject)
 		lseek(fd, output_data_offset, SEEK_SET);
 
 	ret = perf_session__process_events(session);
+	if (ret)
+		return ret;
 
 	if (!file_out->is_pipe) {
 		if (inject->build_ids)
@@ -725,7 +730,7 @@ static int __cmd_inject(struct perf_inject *inject)
 	return ret;
 }
 
-int cmd_inject(int argc, const char **argv, const char *prefix __maybe_unused)
+int cmd_inject(int argc, const char **argv)
 {
 	struct perf_inject inject = {
 		.tool = {

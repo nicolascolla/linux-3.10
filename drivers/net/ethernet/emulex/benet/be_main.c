@@ -26,7 +26,6 @@
 #include <net/vxlan.h>
 
 MODULE_VERSION(DRV_VER);
-MODULE_DEVICE_TABLE(pci, be_dev_ids);
 MODULE_DESCRIPTION(DRV_DESC " " DRV_VER);
 MODULE_AUTHOR("Emulex Corporation");
 MODULE_LICENSE("GPL");
@@ -648,8 +647,8 @@ void be_parse_stats(struct be_adapter *adapter)
 	}
 }
 
-static struct rtnl_link_stats64 *be_get_stats64(struct net_device *netdev,
-						struct rtnl_link_stats64 *stats)
+static void be_get_stats64(struct net_device *netdev,
+			   struct rtnl_link_stats64 *stats)
 {
 	struct be_adapter *adapter = netdev_priv(netdev);
 	struct be_drv_stats *drvs = &adapter->drv_stats;
@@ -713,7 +712,6 @@ static struct rtnl_link_stats64 *be_get_stats64(struct net_device *netdev,
 	stats->rx_fifo_errors = drvs->rxpp_fifo_overflow_drop +
 				drvs->rx_input_fifo_overflow_drop +
 				drvs->rx_drops_no_pbuf;
-	return stats;
 }
 
 void be_link_status_update(struct be_adapter *adapter, u8 link_status)
@@ -1413,23 +1411,6 @@ drop:
 		be_xmit_flush(adapter, txo);
 
 	return NETDEV_TX_OK;
-}
-
-static int be_change_mtu(struct net_device *netdev, int new_mtu)
-{
-	struct be_adapter *adapter = netdev_priv(netdev);
-	struct device *dev = &adapter->pdev->dev;
-
-	if (new_mtu < BE_MIN_MTU || new_mtu > BE_MAX_MTU) {
-		dev_info(dev, "MTU must be between %d and %d bytes\n",
-			 BE_MIN_MTU, BE_MAX_MTU);
-		return -EINVAL;
-	}
-
-	dev_info(dev, "MTU changed from %d to %d bytes\n",
-		 netdev->mtu, new_mtu);
-	netdev->mtu = new_mtu;
-	return 0;
 }
 
 static inline bool be_in_all_promisc(struct be_adapter *adapter)
@@ -4653,6 +4634,15 @@ int be_update_queues(struct be_adapter *adapter)
 
 	be_schedule_worker(adapter);
 
+	/*
+	 * The IF was destroyed and re-created. We need to clear
+	 * all promiscuous flags valid for the destroyed IF.
+	 * Without this promisc mode is not restored during
+	 * be_open() because the driver thinks that it is
+	 * already enabled in HW.
+	 */
+	adapter->if_flags &= ~BE_IF_FLAGS_ALL_PROMISCUOUS;
+
 	if (netif_running(netdev))
 		status = be_open(netdev);
 
@@ -5108,6 +5098,20 @@ static netdev_features_t be_features_check(struct sk_buff *skb,
 	struct be_adapter *adapter = netdev_priv(dev);
 	u8 l4_hdr = 0;
 
+	if (skb_is_gso(skb)) {
+		/* IPv6 TSO requests with extension hdrs are a problem
+		 * to Lancer and BE3 HW. Disable TSO6 feature.
+		 */
+		if (!skyhawk_chip(adapter) && is_ipv6_ext_hdr(skb))
+			features &= ~NETIF_F_TSO6;
+
+		/* Lancer cannot handle the packet with MSS less than 256.
+		 * Disable the GSO support in such cases
+		 */
+		if (lancer_chip(adapter) && skb_shinfo(skb)->gso_size < 256)
+			features &= ~NETIF_F_GSO_MASK;
+	}
+
 	/* The code below restricts offload features for some tunneled and
 	 * Q-in-Q packets.
 	 * Offload features for normal (non tunnel) packets are unchanged.
@@ -5184,7 +5188,6 @@ static const struct net_device_ops be_netdev_ops = {
 	.ndo_start_xmit		= be_xmit,
 	.ndo_set_rx_mode	= be_set_rx_mode,
 	.ndo_set_mac_address	= be_mac_addr_set,
-	.ndo_change_mtu		= be_change_mtu,
 	.ndo_get_stats64	= be_get_stats64,
 	.ndo_validate_addr	= eth_validate_addr,
 	.ndo_vlan_rx_add_vid	= be_vlan_add_vid,
@@ -5231,6 +5234,10 @@ static void be_netdev_init(struct net_device *netdev)
 	netdev->netdev_ops = &be_netdev_ops;
 
 	netdev->ethtool_ops = &be_ethtool_ops;
+
+	/* MTU range: 256 - 9000 */
+	netdev->extended->min_mtu = BE_MIN_MTU;
+	netdev->extended->max_mtu = BE_MAX_MTU;
 }
 
 static void be_cleanup(struct be_adapter *adapter)
@@ -5298,15 +5305,15 @@ static bool be_err_is_recoverable(struct be_adapter *adapter)
 	dev_err(&adapter->pdev->dev, "Recoverable HW error code: 0x%x\n",
 		ue_err_code);
 
-	if (jiffies - err_rec->probe_time <= initial_idle_time) {
+	if (time_before_eq(jiffies - err_rec->probe_time, initial_idle_time)) {
 		dev_err(&adapter->pdev->dev,
 			"Cannot recover within %lu sec from driver load\n",
 			jiffies_to_msecs(initial_idle_time) / MSEC_PER_SEC);
 		return false;
 	}
 
-	if (err_rec->last_recovery_time &&
-	    (jiffies - err_rec->last_recovery_time <= recovery_interval)) {
+	if (err_rec->last_recovery_time && time_before_eq(
+		jiffies - err_rec->last_recovery_time, recovery_interval)) {
 		dev_err(&adapter->pdev->dev,
 			"Cannot recover within %lu sec from last recovery\n",
 			jiffies_to_msecs(recovery_interval) / MSEC_PER_SEC);

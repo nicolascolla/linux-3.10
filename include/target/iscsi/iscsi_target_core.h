@@ -20,6 +20,8 @@
 #define ISCSIT_MIN_TAGS			16
 #define ISCSIT_EXTRA_TAGS		8
 #define ISCSIT_TCP_BACKLOG		256
+#define ISCSI_RX_THREAD_NAME		"iscsi_trx"
+#define ISCSI_TX_THREAD_NAME		"iscsi_ttx"
 
 /* struct iscsi_node_attrib sanity values */
 #define NA_DATAOUT_TIMEOUT		3
@@ -60,6 +62,7 @@
 #define TA_CACHE_CORE_NPS		0
 /* T10 protection information disabled by default */
 #define TA_DEFAULT_T10_PI		0
+#define TA_DEFAULT_FABRIC_PROT_TYPE     0
 /* TPG status needs to be enabled to return sendtargets discovery endpoint info */
 #define TA_DEFAULT_TPG_ENABLED_SENDTARGETS 1
 
@@ -248,10 +251,6 @@ struct iscsi_conn_ops {
 	u8	DataDigest;			/* [0,1] == [None,CRC32C] */
 	u32	MaxRecvDataSegmentLength;	/* [512..2**24-1] */
 	u32	MaxXmitDataSegmentLength;	/* [512..2**24-1] */
-	u8	OFMarker;			/* [0,1] == [No,Yes] */
-	u8	IFMarker;			/* [0,1] == [No,Yes] */
-	u32	OFMarkInt;			/* [1..65535] */
-	u32	IFMarkInt;			/* [1..65535] */
 	/*
 	 * iSER specific connection parameters
 	 */
@@ -531,12 +530,6 @@ struct iscsi_conn {
 	u32			exp_statsn;
 	/* Per connection status sequence number */
 	u32			stat_sn;
-	/* IFMarkInt's Current Value */
-	u32			if_marker;
-	/* OFMarkInt's Current Value */
-	u32			of_marker;
-	/* Used for calculating OFMarker offset to next PDU */
-	u32			of_marker_offset;
 	struct sockaddr_storage login_sockaddr;
 	struct sockaddr_storage local_sockaddr;
 	int			conn_usage_count;
@@ -563,6 +556,7 @@ struct iscsi_conn {
 #define LOGIN_FLAGS_READ_ACTIVE		1
 #define LOGIN_FLAGS_CLOSED		2
 #define LOGIN_FLAGS_READY		4
+#define LOGIN_FLAGS_INITIAL_PDU		8
 	unsigned long		login_flags;
 	struct delayed_work	login_work;
 	struct delayed_work	login_cleanup_work;
@@ -601,8 +595,6 @@ struct iscsi_conn {
 	struct iscsi_tpg_np	*tpg_np;
 	/* Pointer to parent session */
 	struct iscsi_session	*sess;
-	/* Pointer to thread_set in use for this conn's threads */
-	struct iscsi_thread_set	*thread_set;
 	int			bitmap_id;
 	int			rx_thread_active;
 	struct task_struct	*rx_thread;
@@ -647,7 +639,7 @@ struct iscsi_session {
 	/* session wide counter: expected command sequence number */
 	u32			exp_cmd_sn;
 	/* session wide counter: maximum allowed command sequence number */
-	u32			max_cmd_sn;
+	atomic_t		max_cmd_sn;
 	struct list_head	sess_ooo_cmdsn_list;
 
 	/* LIO specific session ID */
@@ -756,10 +748,10 @@ struct iscsi_node_stat_grps {
 };
 
 struct iscsi_node_acl {
+	struct se_node_acl	se_node_acl;
 	struct iscsi_node_attrib node_attrib;
 	struct iscsi_node_auth	node_auth;
 	struct iscsi_node_stat_grps node_stat_grps;
-	struct se_node_acl	se_node_acl;
 };
 
 struct iscsi_tpg_attrib {
@@ -774,6 +766,7 @@ struct iscsi_tpg_attrib {
 	u32			demo_mode_discovery;
 	u32			default_erl;
 	u8			t10_pi;
+	u32                     fabric_prot_type;
 	u32			tpg_enabled_sendtargets;
 	struct iscsi_portal_group *tpg;
 };
@@ -878,8 +871,6 @@ struct iscsit_global {
 	u32			auth_id;
 	u32			inactive_ts;
 #define ISCSIT_BITMAP_BITS	262144
-	/* Thread Set bitmap count */
-	int			ts_bitmap_count;
 	/* Thread Set bitmap pointer */
 	unsigned long		*ts_bitmap;
 	spinlock_t		ts_bitmap_lock;

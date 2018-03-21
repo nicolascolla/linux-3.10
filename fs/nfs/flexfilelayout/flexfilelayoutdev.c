@@ -32,6 +32,7 @@ void nfs4_ff_layout_free_deviceid(struct nfs4_ff_layout_ds *mirror_ds)
 {
 	nfs4_print_deviceid(&mirror_ds->id_node.deviceid);
 	nfs4_pnfs_ds_put(mirror_ds->ds);
+	kfree(mirror_ds->ds_versions);
 	kfree_rcu(mirror_ds, id_node.rcu);
 }
 
@@ -119,7 +120,13 @@ nfs4_ff_alloc_deviceid_node(struct nfs_server *server, struct pnfs_device *pdev,
 		if (ds_versions[i].wsize > NFS_MAX_FILE_IO_SIZE)
 			ds_versions[i].wsize = NFS_MAX_FILE_IO_SIZE;
 
-		if (ds_versions[i].version != 3 || ds_versions[i].minor_version != 0) {
+		/*
+		 * check for valid major/minor combination.
+		 * currently we support dataserver which talk:
+		 *   v3, v4.0, v4.1, v4.2
+		 */
+		if (!((ds_versions[i].version == 3 && ds_versions[i].minor_version == 0) ||
+			(ds_versions[i].version == 4 && ds_versions[i].minor_version < 3))) {
 			dprintk("%s: [%d] unsupported ds version %d-%d\n", __func__,
 				i, ds_versions[i].version,
 				ds_versions[i].minor_version);
@@ -177,7 +184,7 @@ out_err:
 static void ff_layout_mark_devid_invalid(struct pnfs_layout_segment *lseg,
 		struct nfs4_deviceid_node *devid)
 {
-	nfs4_mark_deviceid_unavailable(devid);
+	nfs4_delete_deviceid(devid->ld, devid->nfs_client, &devid->deviceid);
 	if (!ff_layout_has_available_ds(lseg))
 		pnfs_error_mark_layout_for_return(lseg->pls_layout->plh_inode,
 				lseg);
@@ -208,6 +215,10 @@ static bool ff_layout_mirror_valid(struct pnfs_layout_segment *lseg,
 		} else
 			goto outerr;
 	}
+
+	if (IS_ERR(mirror->mirror_ds))
+		goto outerr;
+
 	if (mirror->mirror_ds->ds == NULL) {
 		struct nfs4_deviceid_node *devid;
 		devid = &mirror->mirror_ds->id_node;
@@ -276,8 +287,9 @@ ff_layout_add_ds_error_locked(struct nfs4_flexfile_layout *flo,
 		}
 		/* Entries match, so merge "err" into "dserr" */
 		extend_ds_error(dserr, err->offset, err->length);
-		list_del(&err->list);
+		list_replace(&err->list, &dserr->list);
 		kfree(err);
+		return;
 	}
 
 	list_add_tail(&dserr->list, head);
@@ -421,11 +433,11 @@ nfs4_ff_layout_prepare_ds(struct pnfs_layout_segment *lseg, u32 ds_idx,
 			mirror->mirror_ds->ds_versions[0].wsize = max_payload;
 		goto out;
 	}
+out_fail:
 	ff_layout_track_ds_error(FF_LAYOUT_FROM_HDR(lseg->pls_layout),
 				 mirror, lseg->pls_range.offset,
 				 lseg->pls_range.length, NFS4ERR_NXIO,
 				 OP_ILLEGAL, GFP_NOIO);
-out_fail:
 	if (fail_return || !ff_layout_has_available_ds(lseg))
 		pnfs_error_mark_layout_for_return(ino, lseg);
 	ds = NULL;

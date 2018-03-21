@@ -25,7 +25,7 @@ static long ceph_ioctl_get_layout(struct file *file, void __user *arg)
 		l.stripe_count = ceph_file_layout_stripe_count(ci->i_layout);
 		l.object_size = ceph_file_layout_object_size(ci->i_layout);
 		l.data_pool = le32_to_cpu(ci->i_layout.fl_pg_pool);
-		l.preferred_osd = (s32)-1;
+		l.preferred_osd = -1;
 		if (copy_to_user(arg, &l, sizeof(l)))
 			return -EFAULT;
 	}
@@ -97,7 +97,7 @@ static long ceph_ioctl_set_layout(struct file *file, void __user *arg)
 		nl.data_pool = ceph_file_layout_pg_pool(ci->i_layout);
 
 	/* this is obsolete, and always -1 */
-	nl.preferred_osd = le64_to_cpu(-1);
+	nl.preferred_osd = -1;
 
 	err = __validate_layout(mdsc, &nl);
 	if (err)
@@ -247,9 +247,8 @@ static long ceph_ioctl_lazyio(struct file *file)
 
 	if ((fi->fmode & CEPH_FILE_MODE_LAZY) == 0) {
 		spin_lock(&ci->i_ceph_lock);
-		ci->i_nr_by_mode[fi->fmode]--;
 		fi->fmode |= CEPH_FILE_MODE_LAZY;
-		ci->i_nr_by_mode[fi->fmode]++;
+		ci->i_nr_by_mode[ffs(CEPH_FILE_MODE_LAZY)]++;
 		spin_unlock(&ci->i_ceph_lock);
 		dout("ioctl_layzio: file %p marked lazy\n", file);
 

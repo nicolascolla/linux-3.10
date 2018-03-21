@@ -379,6 +379,7 @@ ENTRY(ret_from_fork)
 	popfq_cfi				# reset kernel eflags
 
 	call schedule_tail			# rdi: 'prev' task parameter
+	UNWIND_END_OF_STACK
 
 	GET_THREAD_INFO(%rcx)
 
@@ -400,7 +401,16 @@ ENTRY(ret_from_fork)
 	subq $REST_SKIP, %rsp	# leave space for volatiles
 	CFI_ADJUST_CFA_OFFSET	REST_SKIP
 	movq %rbp, %rdi
+
+	/* RHEL-specific hack to make livepatch work with spectre retpolines */
+	.global ret_from_fork_nospec_begin
+	.global ret_from_fork_nospec_end
+
+ret_from_fork_nospec_begin:
 	CALL_NOSPEC %rbx
+	UNWIND_END_OF_STACK
+ret_from_fork_nospec_end:
+
 	movl $0, RAX(%rsp)
 	RESTORE_REST
 	jmp int_ret_from_sys_call
@@ -488,6 +498,7 @@ system_call_fastpath:
 	call *sys_call_table(, %rax, 8)  # XXX:	 rip relative
 #endif
 
+	UNWIND_END_OF_STACK
 	movq %rax,RAX(%rsp)
 /*
  * Syscall return path ending with SYSRET (fast path)
@@ -528,6 +539,7 @@ sysret_careful:
 	ENABLE_INTERRUPTS(CLBR_NONE)
 	pushq_cfi %rdi
 	SCHEDULE_USER
+	UNWIND_END_OF_STACK
 	popq_cfi %rdi
 	jmp sysret_check
 
@@ -614,6 +626,7 @@ tracesys:
 	call *sys_call_table(, %rax, 8)  # XXX:	 rip relative
 #endif
 
+	UNWIND_END_OF_STACK
 	movq %rax,RAX(%rsp)
 1:	RESTORE_REST
 /* Use IRET because user could have changed frame */
@@ -646,6 +659,7 @@ int_careful:
 	ENABLE_INTERRUPTS(CLBR_NONE)
 	pushq_cfi %rdi
 	SCHEDULE_USER
+	UNWIND_END_OF_STACK
 	popq_cfi %rdi
 	DISABLE_INTERRUPTS(CLBR_NONE)
 	TRACE_IRQS_OFF
@@ -688,6 +702,7 @@ ENTRY(stub_\func)
 	DEFAULT_FRAME 0 8		/* offset 8: return address */
 	FIXUP_TOP_OF_STACK %r11, 8
 	call sys_\func
+	UNWIND_END_OF_STACK
 	RESTORE_TOP_OF_STACK %r11, 8
 	ret
 	CFI_ENDPROC
@@ -700,6 +715,7 @@ ENTRY(\label)
 	DEFAULT_FRAME 0 8		/* offset 8: return address */
 	FIXUP_TOP_OF_STACK %r11, 8
 	call \func
+	UNWIND_END_OF_STACK
 	RESTORE_TOP_OF_STACK %r11, 8
 	ret
 	CFI_ENDPROC
@@ -717,6 +733,7 @@ ENTRY(stub_execve)
 	DEFAULT_FRAME 0
 	FIXUP_TOP_OF_STACK %r11
 	call sys_execve
+	UNWIND_END_OF_STACK
 	movq %rax,RAX(%rsp)
 	RESTORE_REST
 	jmp int_ret_from_sys_call
@@ -733,6 +750,7 @@ ENTRY(stub_rt_sigreturn)
 	DEFAULT_FRAME 0
 	FIXUP_TOP_OF_STACK %r11
 	call sys_rt_sigreturn
+	UNWIND_END_OF_STACK
 	movq %rax,RAX(%rsp) # fixme, this could be done at the higher layer
 	RESTORE_REST
 	jmp int_ret_from_sys_call
@@ -746,6 +764,7 @@ ENTRY(stub_x32_rt_sigreturn)
 	DEFAULT_FRAME 0
 	FIXUP_TOP_OF_STACK %r11
 	call sys32_x32_rt_sigreturn
+	UNWIND_END_OF_STACK
 	movq %rax,RAX(%rsp) # fixme, this could be done at the higher layer
 	RESTORE_REST
 	jmp int_ret_from_sys_call
@@ -758,6 +777,7 @@ ENTRY(stub_x32_execve)
 	DEFAULT_FRAME 0
 	FIXUP_TOP_OF_STACK %r11
 	call compat_sys_execve
+	UNWIND_END_OF_STACK
 	RESTORE_TOP_OF_STACK %r11
 	movq %rax,RAX(%rsp)
 	RESTORE_REST
@@ -821,6 +841,7 @@ END(interrupt)
 	CFI_ADJUST_CFA_OFFSET ORIG_RAX-RBP
 	SAVE_ARGS_IRQ
 	call \func
+	UNWIND_UNSAFE_STACK
 	.endm
 
 /*
@@ -1053,6 +1074,8 @@ apicinterrupt3 POSTED_INTR_VECTOR \
 	kvm_posted_intr_ipi smp_kvm_posted_intr_ipi
 apicinterrupt3 POSTED_INTR_WAKEUP_VECTOR \
 	kvm_posted_intr_wakeup_ipi smp_kvm_posted_intr_wakeup_ipi
+apicinterrupt3 POSTED_INTR_WAKEUP_VECTOR \
+	kvm_posted_intr_nested_ipi smp_kvm_posted_intr_nested_ipi
 #endif
 
 #ifdef CONFIG_X86_MCE_THRESHOLD
@@ -1105,6 +1128,7 @@ ENTRY(\sym)
 	movq %rsp,%rdi		/* pt_regs pointer */
 	xorl %esi,%esi		/* no error code */
 	call \do_sym
+	UNWIND_UNSAFE_STACK
 	jmp error_exit		/* %ebx: no swapgs flag */
 	CFI_ENDPROC
 END(\sym)
@@ -1123,6 +1147,7 @@ ENTRY(\sym)
 	movq %rsp,%rdi		/* pt_regs pointer */
 	xorl %esi,%esi		/* no error code */
 	call \do_sym
+	UNWIND_UNSAFE_STACK
 	jmp paranoid_exit	/* %ebx: no swapgs flag */
 	CFI_ENDPROC
 END(\sym)
@@ -1143,6 +1168,7 @@ ENTRY(\sym)
 	xorl %esi,%esi		/* no error code */
 	subq $EXCEPTION_STKSZ, INIT_TSS_IST(\ist)
 	call \do_sym
+	UNWIND_UNSAFE_STACK
 	addq $EXCEPTION_STKSZ, INIT_TSS_IST(\ist)
 	jmp paranoid_exit	/* %ebx: no swapgs flag */
 	CFI_ENDPROC
@@ -1162,6 +1188,7 @@ ENTRY(\sym)
 	movq ORIG_RAX(%rsp),%rsi	/* get error code */
 	movq $-1,ORIG_RAX(%rsp)		/* no syscall to restart */
 	call \do_sym
+	UNWIND_UNSAFE_STACK
 	jmp error_exit			/* %ebx: no swapgs flag */
 	CFI_ENDPROC
 END(\sym)
@@ -1193,6 +1220,7 @@ ENTRY(\sym)
 	movq ORIG_RAX(%rsp),%rsi	/* get error code */
 	movq $-1,ORIG_RAX(%rsp)		/* no syscall to restart */
 	call \do_sym
+	UNWIND_UNSAFE_STACK
 	jmp paranoid_exit		/* %ebx: no swapgs flag */
 	CFI_ENDPROC
 END(\sym)
@@ -1680,6 +1708,7 @@ ENTRY(nmi)
 	movq	%rsp, %rdi
 	movq	$-1, %rsi
 	call	do_nmi
+	UNWIND_UNSAFE_STACK
 
 	/*
 	 * Return back to user mode.  We must *not* do the normal exit
@@ -1894,6 +1923,7 @@ end_repeat_nmi:
 	movq %rsp,%rdi
 	movq $-1,%rsi
 	call do_nmi
+	UNWIND_UNSAFE_STACK
 
 	IBRS_EXIT_RESTORE_CLOBBER save_reg=%r13d
 

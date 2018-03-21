@@ -65,7 +65,7 @@ static struct fsnotify_group *audit_watch_group;
 
 /* fsnotify events we care about. */
 #define AUDIT_FS_WATCH (FS_MOVE | FS_CREATE | FS_DELETE | FS_DELETE_SELF |\
-			FS_MOVE_SELF | FS_EVENT_ON_CHILD)
+			FS_MOVE_SELF | FS_EVENT_ON_CHILD | FS_UNMOUNT)
 
 static void audit_free_parent(struct audit_parent *parent)
 {
@@ -102,7 +102,7 @@ static inline struct audit_parent *audit_find_parent(struct inode *inode)
 	struct audit_parent *parent = NULL;
 	struct fsnotify_mark *entry;
 
-	entry = fsnotify_find_inode_mark(audit_watch_group, inode);
+	entry = fsnotify_find_mark(&inode->i_fsnotify_marks, audit_watch_group);
 	if (entry)
 		parent = container_of(entry, struct audit_parent, mark);
 
@@ -157,9 +157,9 @@ static struct audit_parent *audit_init_parent(struct path *path)
 
 	INIT_LIST_HEAD(&parent->watches);
 
-	fsnotify_init_mark(&parent->mark, audit_watch_free_mark);
+	fsnotify_init_mark(&parent->mark, audit_watch_group);
 	parent->mark.mask = AUDIT_FS_WATCH;
-	ret = fsnotify_add_mark(&parent->mark, audit_watch_group, inode, NULL, 0);
+	ret = fsnotify_add_mark(&parent->mark, inode, NULL, 0);
 	if (ret < 0) {
 		audit_free_parent(parent);
 		return ERR_PTR(ret);
@@ -456,13 +456,15 @@ void audit_remove_watch_rule(struct audit_krule *krule)
 	list_del(&krule->rlist);
 
 	if (list_empty(&watch->rules)) {
+		/*
+		 * audit_remove_watch() drops our reference to 'parent' which
+		 * can get freed. Grab our own reference to be safe.
+		 */
+		audit_get_parent(parent);
 		audit_remove_watch(watch);
-
-		if (list_empty(&parent->watches)) {
-			audit_get_parent(parent);
+		if (list_empty(&parent->watches))
 			fsnotify_destroy_mark(&parent->mark, audit_watch_group);
-			audit_put_parent(parent);
-		}
+		audit_put_parent(parent);
 	}
 }
 
@@ -472,7 +474,8 @@ static int audit_watch_handle_event(struct fsnotify_group *group,
 				    struct fsnotify_mark *inode_mark,
 				    struct fsnotify_mark *vfsmount_mark,
 				    u32 mask, const void *data, int data_type,
-				    const unsigned char *dname, u32 cookie)
+				    const unsigned char *dname, u32 cookie,
+				    struct fsnotify_iter_info *iter_info)
 {
 	const struct inode *inode;
 	struct audit_parent *parent;
@@ -506,6 +509,7 @@ static int audit_watch_handle_event(struct fsnotify_group *group,
 
 static const struct fsnotify_ops audit_watch_fsnotify_ops = {
 	.handle_event = 	audit_watch_handle_event,
+	.free_mark =		audit_watch_free_mark,
 };
 
 static int __init audit_watch_init(void)

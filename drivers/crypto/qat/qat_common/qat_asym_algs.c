@@ -491,7 +491,7 @@ static void qat_dh_clear_ctx(struct device *dev, struct qat_dh_ctx *ctx)
 	ctx->g2 = false;
 }
 
-static int qat_dh_set_secret(struct crypto_kpp *tfm, void *buf,
+static int qat_dh_set_secret(struct crypto_kpp *tfm, const void *buf,
 			     unsigned int len)
 {
 	struct qat_dh_ctx *ctx = kpp_tfm_ctx(tfm);
@@ -525,7 +525,7 @@ static int qat_dh_max_size(struct crypto_kpp *tfm)
 {
 	struct qat_dh_ctx *ctx = kpp_tfm_ctx(tfm);
 
-	return ctx->p ? ctx->p_size : -EINVAL;
+	return ctx->p_size;
 }
 
 static int qat_dh_init_tfm(struct crypto_kpp *tfm)
@@ -1260,7 +1260,7 @@ static int qat_rsa_max_size(struct crypto_akcipher *tfm)
 {
 	struct qat_rsa_ctx *ctx = akcipher_tfm_ctx(tfm);
 
-	return (ctx->n) ? ctx->key_sz : -EINVAL;
+	return ctx->key_sz;
 }
 
 static int qat_rsa_init_tfm(struct crypto_akcipher *tfm)

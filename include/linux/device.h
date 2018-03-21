@@ -447,8 +447,7 @@ struct class_attribute {
 			char *buf);
 	ssize_t (*store)(struct class *class, struct class_attribute *attr,
 			const char *buf, size_t count);
-	const void *(*namespace)(struct class *class,
-				 const struct class_attribute *attr);
+	RH_KABI_DEPRECATE_FN(const void *, namespace, struct class *, const struct class_attribute *)
 };
 
 #define CLASS_ATTR(_name, _mode, _show, _store) \
@@ -458,10 +457,24 @@ struct class_attribute {
 #define CLASS_ATTR_RO(_name) \
 	struct class_attribute class_attr_##_name = __ATTR_RO(_name)
 
-extern int __must_check class_create_file(struct class *class,
-					  const struct class_attribute *attr);
-extern void class_remove_file(struct class *class,
-			      const struct class_attribute *attr);
+extern int __must_check class_create_file_ns(struct class *class,
+					     const struct class_attribute *attr,
+					     const void *ns);
+extern void class_remove_file_ns(struct class *class,
+				 const struct class_attribute *attr,
+				 const void *ns);
+
+static inline int __must_check class_create_file(struct class *class,
+					const struct class_attribute *attr)
+{
+	return class_create_file_ns(class, attr, NULL);
+}
+
+static inline void class_remove_file(struct class *class,
+				     const struct class_attribute *attr)
+{
+	return class_remove_file_ns(class, attr, NULL);
+}
 
 /* Simple class attribute that is just a static string */
 struct class_attribute_string {
@@ -575,6 +588,8 @@ extern int device_create_file(struct device *device,
 			      const struct device_attribute *entry);
 extern void device_remove_file(struct device *dev,
 			       const struct device_attribute *attr);
+extern bool device_remove_file_self(struct device *dev,
+				    const struct device_attribute *attr);
 extern int __must_check device_create_bin_file(struct device *dev,
 					const struct bin_attribute *attr);
 extern void device_remove_bin_file(struct device *dev,
@@ -843,6 +858,9 @@ struct device_rh {
 #endif
 	RH_KABI_EXTEND(struct fwnode_handle *fwnode)
 	RH_KABI_EXTEND(struct dma_map_ops *dma_ops)
+
+	/* RHEL7: due to KABI this can't go into struct class */
+	RH_KABI_EXTEND(int (*class_shutdown_pre)(struct device *dev))
 };
 /* allocator for device_rh */
 extern void device_rh_alloc(struct device *dev);

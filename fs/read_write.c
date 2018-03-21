@@ -574,7 +574,8 @@ SYSCALL_DEFINE3(read, unsigned int, fd, char __user *, buf, size_t, count)
 	if (f.file) {
 		loff_t pos = file_pos_read(f.file);
 		ret = vfs_read(f.file, buf, count, &pos);
-		file_pos_write(f.file, pos);
+		if (ret >= 0)
+			file_pos_write(f.file, pos);
 		fdput_pos(f);
 	}
 	return ret;
@@ -589,7 +590,8 @@ SYSCALL_DEFINE3(write, unsigned int, fd, const char __user *, buf,
 	if (f.file) {
 		loff_t pos = file_pos_read(f.file);
 		ret = vfs_write(f.file, buf, count, &pos);
-		file_pos_write(f.file, pos);
+		if (ret >= 0)
+			file_pos_write(f.file, pos);
 		fdput_pos(f);
 	}
 
@@ -877,7 +879,8 @@ SYSCALL_DEFINE3(readv, unsigned long, fd, const struct iovec __user *, vec,
 	if (f.file) {
 		loff_t pos = file_pos_read(f.file);
 		ret = vfs_readv(f.file, vec, vlen, &pos);
-		file_pos_write(f.file, pos);
+		if (ret >= 0)
+			file_pos_write(f.file, pos);
 		fdput_pos(f);
 	}
 
@@ -896,7 +899,8 @@ SYSCALL_DEFINE3(writev, unsigned long, fd, const struct iovec __user *, vec,
 	if (f.file) {
 		loff_t pos = file_pos_read(f.file);
 		ret = vfs_writev(f.file, vec, vlen, &pos);
-		file_pos_write(f.file, pos);
+		if (ret >= 0)
+			file_pos_write(f.file, pos);
 		fdput_pos(f);
 	}
 
@@ -1056,7 +1060,8 @@ COMPAT_SYSCALL_DEFINE3(readv, compat_ulong_t, fd,
 		return -EBADF;
 	pos = f.file->f_pos;
 	ret = compat_readv(f.file, vec, vlen, &pos);
-	f.file->f_pos = pos;
+	if (ret >= 0)
+		f.file->f_pos = pos;
 	fdput_pos(f);
 	return ret;
 }
@@ -1122,7 +1127,8 @@ COMPAT_SYSCALL_DEFINE3(writev, compat_ulong_t, fd,
 		return -EBADF;
 	pos = f.file->f_pos;
 	ret = compat_writev(f.file, vec, vlen, &pos);
-	f.file->f_pos = pos;
+	if (ret >= 0)
+		f.file->f_pos = pos;
 	fdput_pos(f);
 	return ret;
 }
@@ -1505,14 +1511,18 @@ int vfs_clone_file_range(struct file *file_in, loff_t pos_in,
 	struct file_operations_extend *fop = get_fo_extend(file_in);
 	int ret;
 
-	if (inode_in->i_sb != inode_out->i_sb ||
-	    file_in->f_path.mnt != file_out->f_path.mnt)
-		return -EXDEV;
-
 	if (S_ISDIR(inode_in->i_mode) || S_ISDIR(inode_out->i_mode))
 		return -EISDIR;
 	if (!S_ISREG(inode_in->i_mode) || !S_ISREG(inode_out->i_mode))
-		return -EOPNOTSUPP;
+		return -EINVAL;
+
+	/*
+	 * FICLONE/FICLONERANGE ioctls enforce that src and dest files are on
+	 * the same mount. Practically, they only need to be on the same file
+	 * system.
+	 */
+	if (inode_in->i_sb != inode_out->i_sb)
+		return -EXDEV;
 
 	if (!(file_in->f_mode & FMODE_READ) ||
 	    !(file_out->f_mode & FMODE_WRITE) ||

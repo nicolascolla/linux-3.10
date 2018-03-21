@@ -28,6 +28,11 @@ struct file_system_type;
 struct kernfs_open_node;
 struct kernfs_iattrs;
 
+#ifndef __GENKSYMS__
+
+/* +1 to avoid triggering overflow warning when negating it */
+#define KN_DEACTIVATED_BIAS		(INT_MIN + 1)
+
 enum kernfs_node_type {
 	KERNFS_DIR		= 0x0001,
 	KERNFS_FILE		= 0x0002,
@@ -46,6 +51,7 @@ enum kernfs_node_flag {
 	KERNFS_STATIC_NAME	= 0x0200,
 	KERNFS_SUICIDAL		= 0x0400,
 	KERNFS_SUICIDED		= 0x0800,
+	KERNFS_EMPTY_DIR	= 0x1000,
 };
 
 /* @flags for kernfs_create_root() */
@@ -91,6 +97,7 @@ struct kernfs_elem_attr {
 	const struct kernfs_ops	*ops;
 	struct kernfs_open_node	*open;
 	loff_t			size;
+	struct kernfs_node	*notify_next;	/* for kernfs_notify() */
 };
 
 /*
@@ -153,6 +160,8 @@ struct kernfs_syscall_ops {
 		      const char *new_name);
 };
 
+#endif /* __GENKSYMS__ */
+
 struct kernfs_root {
 	/* published fields */
 	struct kernfs_node	*kn;
@@ -161,6 +170,10 @@ struct kernfs_root {
 	/* private fields, do not use outside kernfs proper */
 	struct ida		ino_ida;
 	struct kernfs_syscall_ops *syscall_ops;
+
+	/* list of kernfs_super_info of this root, protected by kernfs_mutex */
+	struct list_head	supers;
+
 	wait_queue_head_t	deactivate_waitq;
 };
 
@@ -273,6 +286,8 @@ void kernfs_destroy_root(struct kernfs_root *root);
 struct kernfs_node *kernfs_create_dir_ns(struct kernfs_node *parent,
 					 const char *name, umode_t mode,
 					 void *priv, const void *ns);
+struct kernfs_node *kernfs_create_empty_dir(struct kernfs_node *parent,
+					    const char *name);
 struct kernfs_node *__kernfs_create_file(struct kernfs_node *parent,
 					 const char *name,
 					 umode_t mode, loff_t size,
@@ -300,6 +315,7 @@ struct dentry *kernfs_mount_ns(struct file_system_type *fs_type, int flags,
 			       struct kernfs_root *root, unsigned long magic,
 			       bool *new_sb_created, const void *ns);
 void kernfs_kill_sb(struct super_block *sb);
+struct super_block *kernfs_pin_sb(struct kernfs_root *root, const void *ns);
 
 void kernfs_init(void);
 

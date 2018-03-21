@@ -870,10 +870,23 @@ static void rx_queue_release(struct kobject *kobj)
 	dev_put(queue->dev);
 }
 
+static const void *rx_queue_namespace(struct kobject *kobj)
+{
+	struct netdev_rx_queue *queue = to_rx_queue(kobj);
+	struct device *dev = &queue->dev->dev;
+	const void *ns = NULL;
+
+	if (dev->class && dev->class->ns_type)
+		ns = dev->class->namespace(dev);
+
+	return ns;
+}
+
 static struct kobj_type rx_queue_ktype = {
 	.sysfs_ops = &rx_queue_sysfs_ops,
 	.release = rx_queue_release,
 	.default_attrs = rx_queue_default_attrs,
+	.namespace = rx_queue_namespace
 };
 
 static int rx_queue_add_kobject(struct net_device *net, int index)
@@ -1241,10 +1254,23 @@ static void netdev_queue_release(struct kobject *kobj)
 	dev_put(queue->dev);
 }
 
+static const void *netdev_queue_namespace(struct kobject *kobj)
+{
+	struct netdev_queue *queue = to_netdev_queue(kobj);
+	struct device *dev = &queue->dev->dev;
+	const void *ns = NULL;
+
+	if (dev->class && dev->class->ns_type)
+		ns = dev->class->namespace(dev);
+
+	return ns;
+}
+
 static struct kobj_type netdev_queue_ktype = {
 	.sysfs_ops = &netdev_queue_sysfs_ops,
 	.release = netdev_queue_release,
 	.default_attrs = netdev_queue_default_attrs,
+	.namespace = netdev_queue_namespace,
 };
 
 static int netdev_queue_add_kobject(struct net_device *net, int index)
@@ -1355,6 +1381,13 @@ static void remove_queue_kobjects(struct net_device *net)
 #endif
 }
 
+static bool net_current_may_mount(void)
+{
+	struct net *net = current->nsproxy->net_ns;
+
+	return ns_capable(net->user_ns, CAP_SYS_ADMIN);
+}
+
 static void *net_grab_current_ns(void)
 {
 	struct net *ns = current->nsproxy->net_ns;
@@ -1377,6 +1410,7 @@ static const void *net_netlink_ns(struct sock *sk)
 
 struct kobj_ns_type_operations net_ns_type_operations = {
 	.type = KOBJ_NS_TYPE_NET,
+	.current_may_mount = net_current_may_mount,
 	.grab_current_ns = net_grab_current_ns,
 	.netlink_ns = net_netlink_ns,
 	.initial_ns = net_initial_ns,
@@ -1495,17 +1529,19 @@ int netdev_register_kobject(struct net_device *net)
 	return error;
 }
 
-int netdev_class_create_file(struct class_attribute *class_attr)
+int netdev_class_create_file_ns(struct class_attribute *class_attr,
+				const void *ns)
 {
-	return class_create_file(&net_class, class_attr);
+	return class_create_file_ns(&net_class, class_attr, ns);
 }
-EXPORT_SYMBOL(netdev_class_create_file);
+EXPORT_SYMBOL(netdev_class_create_file_ns);
 
-void netdev_class_remove_file(struct class_attribute *class_attr)
+void netdev_class_remove_file_ns(struct class_attribute *class_attr,
+				 const void *ns)
 {
-	class_remove_file(&net_class, class_attr);
+	class_remove_file_ns(&net_class, class_attr, ns);
 }
-EXPORT_SYMBOL(netdev_class_remove_file);
+EXPORT_SYMBOL(netdev_class_remove_file_ns);
 
 int netdev_kobject_init(void)
 {

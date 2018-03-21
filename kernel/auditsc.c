@@ -69,6 +69,7 @@
 #include <linux/fs_struct.h>
 #include <linux/compat.h>
 #include <linux/ctype.h>
+#include <linux/fsnotify_backend.h>
 
 #include "audit.h"
 
@@ -1225,7 +1226,7 @@ static void show_special(struct audit_context *context, int *call_panic)
 				context->ipc.perm_mode);
 		}
 		break; }
-	case AUDIT_MQ_OPEN: {
+	case AUDIT_MQ_OPEN:
 		audit_log_format(ab,
 			"oflag=0x%x mode=%#ho mq_flags=0x%lx mq_maxmsg=%ld "
 			"mq_msgsize=%ld mq_curmsgs=%ld",
@@ -1234,8 +1235,8 @@ static void show_special(struct audit_context *context, int *call_panic)
 			context->mq_open.attr.mq_maxmsg,
 			context->mq_open.attr.mq_msgsize,
 			context->mq_open.attr.mq_curmsgs);
-		break; }
-	case AUDIT_MQ_SENDRECV: {
+		break;
+	case AUDIT_MQ_SENDRECV:
 		audit_log_format(ab,
 			"mqdes=%d msg_len=%zd msg_prio=%u "
 			"abs_timeout_sec=%ld abs_timeout_nsec=%ld",
@@ -1244,12 +1245,12 @@ static void show_special(struct audit_context *context, int *call_panic)
 			context->mq_sendrecv.msg_prio,
 			context->mq_sendrecv.abs_timeout.tv_sec,
 			context->mq_sendrecv.abs_timeout.tv_nsec);
-		break; }
-	case AUDIT_MQ_NOTIFY: {
+		break;
+	case AUDIT_MQ_NOTIFY:
 		audit_log_format(ab, "mqdes=%d sigev_signo=%d",
 				context->mq_notify.mqdes,
 				context->mq_notify.sigev_signo);
-		break; }
+		break;
 	case AUDIT_MQ_GETSETATTR: {
 		struct mq_attr *attr = &context->mq_getsetattr.mqstat;
 		audit_log_format(ab,
@@ -1259,19 +1260,20 @@ static void show_special(struct audit_context *context, int *call_panic)
 			attr->mq_flags, attr->mq_maxmsg,
 			attr->mq_msgsize, attr->mq_curmsgs);
 		break; }
-	case AUDIT_CAPSET: {
+	case AUDIT_CAPSET:
 		audit_log_format(ab, "pid=%d", context->capset.pid);
 		audit_log_cap(ab, "cap_pi", &context->capset.cap.inheritable);
 		audit_log_cap(ab, "cap_pp", &context->capset.cap.permitted);
 		audit_log_cap(ab, "cap_pe", &context->capset.cap.effective);
-		break; }
-	case AUDIT_MMAP: {
+		audit_log_cap(ab, "cap_pa", &context->capset.cap.ambient);
+		break;
+	case AUDIT_MMAP:
 		audit_log_format(ab, "fd=%d flags=0x%x", context->mmap.fd,
 				 context->mmap.flags);
-		break; }
-	case AUDIT_EXECVE: {
+		break;
+	case AUDIT_EXECVE:
 		audit_log_execve_info(context, &ab);
-		break; }
+		break;
 	case AUDIT_KERN_MODULE:
 		audit_log_format(ab, "name=");
 		audit_log_untrustedstring(ab, context->module.name);
@@ -1385,9 +1387,11 @@ static void audit_log_exit(struct audit_context *context, struct task_struct *ts
 			audit_log_cap(ab, "old_pp", &axs->old_pcap.permitted);
 			audit_log_cap(ab, "old_pi", &axs->old_pcap.inheritable);
 			audit_log_cap(ab, "old_pe", &axs->old_pcap.effective);
-			audit_log_cap(ab, "new_pp", &axs->new_pcap.permitted);
-			audit_log_cap(ab, "new_pi", &axs->new_pcap.inheritable);
-			audit_log_cap(ab, "new_pe", &axs->new_pcap.effective);
+			audit_log_cap(ab, "old_pa", &axs->old_pcap.ambient);
+			audit_log_cap(ab, "pp", &axs->new_pcap.permitted);
+			audit_log_cap(ab, "pi", &axs->new_pcap.inheritable);
+			audit_log_cap(ab, "pe", &axs->new_pcap.effective);
+			audit_log_cap(ab, "pa", &axs->new_pcap.ambient);
 			break; }
 
 		}
@@ -1600,7 +1604,7 @@ static inline void handle_one(const struct inode *inode)
 	struct audit_tree_refs *p;
 	struct audit_chunk *chunk;
 	int count;
-	if (likely(hlist_empty(&inode->i_fsnotify_marks)))
+	if (likely(!inode->i_fsnotify_marks))
 		return;
 	context = current->audit_context;
 	p = context->trees;
@@ -1643,7 +1647,7 @@ retry:
 	seq = read_seqbegin(&rename_lock);
 	for(;;) {
 		struct inode *inode = d->d_inode;
-		if (inode && unlikely(!hlist_empty(&inode->i_fsnotify_marks))) {
+		if (inode && unlikely(inode->i_fsnotify_marks)) {
 			struct audit_chunk *chunk;
 			chunk = audit_tree_lookup(inode);
 			if (chunk) {
@@ -2344,10 +2348,12 @@ int __audit_log_bprm_fcaps(struct linux_binprm *bprm,
 	ax->old_pcap.permitted   = old->cap_permitted;
 	ax->old_pcap.inheritable = old->cap_inheritable;
 	ax->old_pcap.effective   = old->cap_effective;
+	ax->old_pcap.ambient     = old->cap_ambient;
 
 	ax->new_pcap.permitted   = new->cap_permitted;
 	ax->new_pcap.inheritable = new->cap_inheritable;
 	ax->new_pcap.effective   = new->cap_effective;
+	ax->new_pcap.ambient     = new->cap_ambient;
 	return 0;
 }
 
@@ -2366,6 +2372,7 @@ void __audit_log_capset(const struct cred *new, const struct cred *old)
 	context->capset.cap.effective   = new->cap_effective;
 	context->capset.cap.inheritable = new->cap_effective;
 	context->capset.cap.permitted   = new->cap_permitted;
+	context->capset.cap.ambient     = new->cap_ambient;
 	context->type = AUDIT_CAPSET;
 }
 
@@ -2384,6 +2391,12 @@ void __audit_log_kern_module(char *name)
 	context->module.name = kmalloc(strlen(name) + 1, GFP_KERNEL);
 	strcpy(context->module.name, name);
 	context->type = AUDIT_KERN_MODULE;
+}
+
+void __audit_fanotify(unsigned int response)
+{
+	audit_log(current->audit_context, GFP_KERNEL,
+		AUDIT_FANOTIFY,	"resp=%u", response);
 }
 
 static void audit_log_task(struct audit_buffer *ab)

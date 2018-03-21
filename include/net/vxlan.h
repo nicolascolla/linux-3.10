@@ -168,12 +168,6 @@ reserved_flags2:2;
 #define VXLAN_GPE_USED_BITS (VXLAN_HF_VER | VXLAN_HF_NP | VXLAN_HF_OAM | \
 			     cpu_to_be32(0xff))
 
-/* VXLAN-GPE header Next Protocol. */
-#define VXLAN_GPE_NP_IPV4      0x01
-#define VXLAN_GPE_NP_IPV6      0x02
-#define VXLAN_GPE_NP_ETHERNET  0x03
-#define VXLAN_GPE_NP_NSH       0x04
-
 struct vxlan_metadata {
 	u32		gbp;
 };
@@ -233,14 +227,13 @@ struct vxlan_dev {
 	struct vxlan_dev_node hlist6;	/* vni hash table for IPv6 socket */
 #endif
 	struct list_head  next;		/* vxlan's per namespace list */
-	struct vxlan_sock *vn4_sock;	/* listening socket for IPv4 */
+	struct vxlan_sock __rcu *vn4_sock;	/* listening socket for IPv4 */
 #if IS_ENABLED(CONFIG_IPV6)
-	struct vxlan_sock *vn6_sock;	/* listening socket for IPv6 */
+	struct vxlan_sock __rcu *vn6_sock;	/* listening socket for IPv6 */
 #endif
 	struct net_device *dev;
 	struct net	  *net;		/* netns for packet i/o */
 	struct vxlan_rdst default_dst;	/* default destination */
-	u32		  flags;	/* VXLAN_F_* in vxlan.h */
 
 	struct timer_list age_timer;
 	spinlock_t	  hash_lock;
@@ -267,6 +260,7 @@ struct vxlan_dev {
 #define VXLAN_F_REMCSUM_NOPARTIAL	0x1000
 #define VXLAN_F_COLLECT_METADATA	0x2000
 #define VXLAN_F_GPE			0x4000
+#define VXLAN_F_IPV6_LINKLOCAL		0x8000
 
 /* Flags that are used in the receive path. These flags must match in
  * order for a socket to be shareable
@@ -281,6 +275,7 @@ struct vxlan_dev {
 /* Flags that can be set together with VXLAN_F_GPE. */
 #define VXLAN_F_ALLOWED_GPE		(VXLAN_F_GPE |			\
 					 VXLAN_F_IPV6 |			\
+					 VXLAN_F_IPV6_LINKLOCAL |	\
 					 VXLAN_F_UDP_ZERO_CSUM_TX |	\
 					 VXLAN_F_UDP_ZERO_CSUM6_TX |	\
 					 VXLAN_F_UDP_ZERO_CSUM6_RX |	\
@@ -288,16 +283,6 @@ struct vxlan_dev {
 
 struct net_device *vxlan_dev_create(struct net *net, const char *name,
 				    struct vxlan_config *conf);
-
-static inline __be16 vxlan_dev_dst_port(struct vxlan_dev *vxlan,
-					unsigned short family)
-{
-#if IS_ENABLED(CONFIG_IPV6)
-	if (family == AF_INET6)
-		return inet_sk(vxlan->vn6_sock->sock->sk)->inet_sport;
-#endif
-	return inet_sk(vxlan->vn4_sock->sock->sk)->inet_sport;
-}
 
 static inline netdev_features_t vxlan_features_check(struct sk_buff *skb,
 						     netdev_features_t features)
@@ -377,11 +362,6 @@ static inline __be32 vxlan_compute_rco(unsigned int start, unsigned int offset)
 	if (offset == offsetof(struct udphdr, check))
 		vni_field |= VXLAN_RCO_UDP;
 	return vni_field;
-}
-
-static inline void vxlan_get_rx_port(struct net_device *netdev)
-{
-	udp_tunnel_get_rx_info(netdev);
 }
 
 static inline unsigned short vxlan_get_sk_family(struct vxlan_sock *vs)

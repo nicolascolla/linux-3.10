@@ -111,7 +111,7 @@ ssize_t drm_dp_dual_mode_write(struct i2c_adapter *adapter,
 	void *data;
 	int ret;
 
-	data = kmalloc(msg.len, GFP_TEMPORARY);
+	data = kmalloc(msg.len, GFP_KERNEL);
 	if (!data)
 		return -ENOMEM;
 
@@ -386,6 +386,8 @@ const char *drm_dp_get_dual_mode_type_name(enum drm_dp_dual_mode_type type)
 		return "type 2 DVI";
 	case DRM_DP_DUAL_MODE_TYPE2_HDMI:
 		return "type 2 HDMI";
+	case DRM_DP_DUAL_MODE_LSPCON:
+		return "lspcon";
 	default:
 		WARN_ON(type != DRM_DP_DUAL_MODE_UNKNOWN);
 		return "unknown";
@@ -408,6 +410,7 @@ int drm_lspcon_get_mode(struct i2c_adapter *adapter,
 {
 	u8 data;
 	int ret = 0;
+	int retry;
 
 	if (!mode) {
 		DRM_ERROR("NULL input\n");
@@ -415,10 +418,19 @@ int drm_lspcon_get_mode(struct i2c_adapter *adapter,
 	}
 
 	/* Read Status: i2c over aux */
-	ret = drm_dp_dual_mode_read(adapter, DP_DUAL_MODE_LSPCON_CURRENT_MODE,
-				    &data, sizeof(data));
+	for (retry = 0; retry < 6; retry++) {
+		if (retry)
+			usleep_range(500, 1000);
+
+		ret = drm_dp_dual_mode_read(adapter,
+					    DP_DUAL_MODE_LSPCON_CURRENT_MODE,
+					    &data, sizeof(data));
+		if (!ret)
+			break;
+	}
+
 	if (ret < 0) {
-		DRM_ERROR("LSPCON read(0x80, 0x41) failed\n");
+		DRM_DEBUG_KMS("LSPCON read(0x80, 0x41) failed\n");
 		return -EFAULT;
 	}
 

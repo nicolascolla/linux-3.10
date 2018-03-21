@@ -135,6 +135,8 @@ extern char initial_stab[];
 #define TLBIEL_INVAL_SET_SHIFT	12
 
 #define POWER7_TLB_SETS		128	/* # sets in POWER7 TLB */
+#define POWER8_TLB_SETS		512	/* # sets in POWER8 TLB */
+#define POWER9_TLB_SETS_HASH	256	/* # sets in POWER9 TLB Hash mode */
 
 #ifndef __ASSEMBLY__
 

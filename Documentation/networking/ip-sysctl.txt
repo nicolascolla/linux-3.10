@@ -45,6 +45,13 @@ ip_forward_use_pmtu - BOOLEAN
 	0 - disabled
 	1 - enabled
 
+fwmark_reflect - BOOLEAN
+	Controls the fwmark of kernel-generated IPv4 reply packets that are not
+	associated with a socket for example, TCP RSTs or ICMP echo replies).
+	If unset, these packets have a fwmark of zero. If set, they have the
+	fwmark of the packet they are replying to.
+	Default: 0
+
 route/max_size - INTEGER
 	Maximum number of routes allowed in the kernel.  Increase
 	this when using large numbers of interfaces and/or routes.
@@ -1221,6 +1228,13 @@ conf/all/forwarding - BOOLEAN
 proxy_ndp - BOOLEAN
 	Do proxy ndp.
 
+fwmark_reflect - BOOLEAN
+	Controls the fwmark of kernel-generated IPv6 reply packets that are not
+	associated with a socket for example, TCP RSTs or ICMPv6 echo replies).
+	If unset, these packets have a fwmark of zero. If set, they have the
+	fwmark of the packet they are replying to.
+	Default: 0
+
 conf/interface/*:
 	Change special settings per interface.
 
@@ -1420,6 +1434,9 @@ accept_dad - INTEGER
 	2: Enable DAD, and disable IPv6 operation if MAC-based duplicate
 	   link-local address has been found.
 
+	DAD operation and mode on a given interface will be selected according
+	to the maximum value of conf/{all,interface}/accept_dad.
+
 force_tllao - BOOLEAN
 	Enable sending the target link-layer address option even when
 	responding to a unicast neighbor solicitation.
@@ -1458,6 +1475,26 @@ force_mld_version - INTEGER
 	0 - (default) No enforcement of a MLD version, MLDv1 fallback allowed
 	1 - Enforce to use MLD version 1
 	2 - Enforce to use MLD version 2
+
+optimistic_dad - BOOLEAN
+	Whether to perform Optimistic Duplicate Address Detection (RFC 4429).
+	0: disabled (default)
+	1: enabled
+
+	Optimistic Duplicate Address Detection for the interface will be enabled
+	if at least one of conf/{all,interface}/optimistic_dad is set to 1,
+	it will be disabled otherwise.
+
+use_optimistic - BOOLEAN
+	If enabled, do not classify optimistic addresses as deprecated during
+	source address selection.  Preferred addresses will still be chosen
+	before optimistic addresses, subject to other ranking in the source
+	address selection algorithm.
+	0: disabled (default)
+	1: enabled
+
+	This will be enabled if at least one of
+	conf/{all,interface}/use_optimistic is set to 1, disabled otherwise.
 
 stable_secret - IPv6 address
 	This IPv6 address will be used as a secret to generate IPv6

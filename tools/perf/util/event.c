@@ -1,15 +1,24 @@
+#include <dirent.h>
+#include <errno.h>
+#include <inttypes.h>
+#include <linux/kernel.h>
 #include <linux/types.h>
+#include <sys/types.h>
+#include <sys/stat.h>
+#include <unistd.h>
 #include <uapi/linux/mman.h> /* To get things like MAP_HUGETLB even on older libc headers */
 #include <api/fs/fs.h>
+#include <linux/perf_event.h>
 #include "event.h"
 #include "debug.h"
 #include "hist.h"
 #include "machine.h"
 #include "sort.h"
-#include "string.h"
+#include "string2.h"
 #include "strlist.h"
 #include "thread.h"
 #include "thread_map.h"
+#include "sane_ctype.h"
 #include "symbol/kallsyms.h"
 #include "asm/bug.h"
 #include "stat.h"
@@ -88,7 +97,7 @@ static int perf_event__get_comm_ids(pid_t pid, char *comm, size_t len,
 	int fd;
 	size_t size = 0;
 	ssize_t n;
-	char *nl, *name, *tgids, *ppids;
+	char *name, *tgids, *ppids;
 
 	*tgid = -1;
 	*ppid = -1;
@@ -115,10 +124,10 @@ static int perf_event__get_comm_ids(pid_t pid, char *comm, size_t len,
 	ppids = strstr(bf, "PPid:");
 
 	if (name) {
-		name += 5;  /* strlen("Name:") */
+		char *nl;
 
-		while (*name && isspace(*name))
-			++name;
+		name += 5;  /* strlen("Name:") */
+		name = ltrim(name);
 
 		nl = strchr(name, '\n');
 		if (nl)
@@ -255,8 +264,8 @@ int perf_event__synthesize_mmap_events(struct perf_tool *tool,
 	if (machine__is_default_guest(machine))
 		return 0;
 
-	snprintf(filename, sizeof(filename), "%s/proc/%d/maps",
-		 machine->root_dir, pid);
+	snprintf(filename, sizeof(filename), "%s/proc/%d/task/%d/maps",
+		 machine->root_dir, pid, pid);
 
 	fp = fopen(filename, "r");
 	if (fp == NULL) {
@@ -1154,11 +1163,12 @@ int perf_event__process_exit(struct perf_tool *tool __maybe_unused,
 
 size_t perf_event__fprintf_aux(union perf_event *event, FILE *fp)
 {
-	return fprintf(fp, " offset: %#"PRIx64" size: %#"PRIx64" flags: %#"PRIx64" [%s%s]\n",
+	return fprintf(fp, " offset: %#"PRIx64" size: %#"PRIx64" flags: %#"PRIx64" [%s%s%s]\n",
 		       event->aux.aux_offset, event->aux.aux_size,
 		       event->aux.flags,
 		       event->aux.flags & PERF_AUX_FLAG_TRUNCATED ? "T" : "",
-		       event->aux.flags & PERF_AUX_FLAG_OVERWRITE ? "O" : "");
+		       event->aux.flags & PERF_AUX_FLAG_OVERWRITE ? "O" : "",
+		       event->aux.flags & PERF_AUX_FLAG_PARTIAL   ? "P" : "");
 }
 
 size_t perf_event__fprintf_itrace_start(union perf_event *event, FILE *fp)

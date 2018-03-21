@@ -14,6 +14,7 @@
 #include <linux/slab.h>
 #include <linux/acpi.h>
 #include <linux/gpio/driver.h>
+#include <linux/pinctrl/consumer.h>
 
 #include "gpiolib.h"
 
@@ -428,7 +429,7 @@ static const DEVICE_ATTR(value, 0644,
 
 static irqreturn_t gpio_sysfs_irq(int irq, void *priv)
 {
-	struct sysfs_dirent	*value_sd = priv;
+	struct kernfs_node	*value_sd = priv;
 
 	sysfs_notify_dirent(value_sd);
 	return IRQ_HANDLED;
@@ -437,7 +438,7 @@ static irqreturn_t gpio_sysfs_irq(int irq, void *priv)
 static int gpio_setup_irq(struct gpio_desc *desc, struct device *dev,
 		unsigned long gpio_flags)
 {
-	struct sysfs_dirent	*value_sd;
+	struct kernfs_node	*value_sd;
 	unsigned long		irq_flags;
 	int			ret, irq, id;
 
@@ -470,7 +471,7 @@ static int gpio_setup_irq(struct gpio_desc *desc, struct device *dev,
 			IRQF_TRIGGER_FALLING : IRQF_TRIGGER_RISING;
 
 	if (!value_sd) {
-		value_sd = sysfs_get_dirent(dev->kobj.sd, NULL, "value");
+		value_sd = sysfs_get_dirent(dev->kobj.sd, "value");
 		if (!value_sd) {
 			ret = -ENODEV;
 			goto err_out;
@@ -1197,7 +1198,7 @@ static void gpiodevice_release(struct device *dev)
 }
 
 /**
- * gpiochip_add() - register a gpio_chip
+ * gpiochip_add_data() - register a gpio_chip
  * @chip: the chip to register, with chip->base initialized
  * Context: potentially before irqs will work
  *
@@ -1205,7 +1206,7 @@ static void gpiodevice_release(struct device *dev)
  * because the chip->base is invalid or already associated with a
  * different chip.  Otherwise it returns zero as a success code.
  *
- * When gpiochip_add() is called very early during boot, so that GPIOs
+ * When gpiochip_add_data() is called very early during boot, so that GPIOs
  * can be freely used, the chip->dev device must be registered before
  * the gpio framework's arch_initcall().  Otherwise sysfs initialization
  * for GPIOs will fail rudely.
@@ -1213,7 +1214,7 @@ static void gpiodevice_release(struct device *dev)
  * If chip->base is negative, this requests dynamic assignment of
  * a range of valid GPIOs.
  */
-int gpiochip_add(struct gpio_chip *chip)
+int gpiochip_add_data(struct gpio_chip *chip, void *data)
 {
 	unsigned long	flags;
 	int		status = 0;
@@ -1266,6 +1267,8 @@ int gpiochip_add(struct gpio_chip *chip)
 	}
 
 	/* FIXME: move driver data into gpio_device dev_set_drvdata() */
+
+	chip->data = data;
 
 	if (chip->ngpio == 0) {
 		chip_err(chip, "tried to insert a GPIO chip with zero lines\n");
@@ -1355,7 +1358,7 @@ err_free_gdev:
 		chip->label ? : "generic");
 	return status;
 }
-EXPORT_SYMBOL_GPL(gpiochip_add);
+EXPORT_SYMBOL_GPL(gpiochip_add_data);
 
 /* Forward-declaration */
 static void gpiochip_irqchip_remove(struct gpio_chip *gpiochip);
@@ -1471,25 +1474,47 @@ static struct gpio_chip *find_chip_by_name(const char *name)
  */
 
 /**
- * gpiochip_add_chained_irqchip() - adds a chained irqchip to a gpiochip
- * @gpiochip: the gpiochip to add the irqchip to
- * @irqchip: the irqchip to add to the gpiochip
+ * gpiochip_set_chained_irqchip() - sets a chained irqchip to a gpiochip
+ * @gpiochip: the gpiochip to set the irqchip chain to
+ * @irqchip: the irqchip to chain to the gpiochip
  * @parent_irq: the irq number corresponding to the parent IRQ for this
  * chained irqchip
  * @parent_handler: the parent interrupt handler for the accumulated IRQ
- * coming out of the gpiochip
+ * coming out of the gpiochip. If the interrupt is nested rather than
+ * cascaded, pass NULL in this handler argument
  */
 void gpiochip_set_chained_irqchip(struct gpio_chip *gpiochip,
 				  struct irq_chip *irqchip,
 				  int parent_irq,
 				  irq_flow_handler_t parent_handler)
 {
-	irq_set_chained_handler(parent_irq, parent_handler);
-	/*
-	 * The parent irqchip is already using the chip_data for this
-	 * irqchip, so our callbacks simply use the handler_data.
-	 */
-	irq_set_handler_data(parent_irq, gpiochip);
+	unsigned int offset;
+
+	if (!gpiochip->irqdomain) {
+		chip_err(gpiochip, "called %s before setting up irqchip\n",
+			 __func__);
+		return;
+	}
+
+	if (parent_handler) {
+		if (gpiochip->can_sleep) {
+			chip_err(gpiochip,
+				 "you cannot have chained interrupts on a "
+				 "chip that may sleep\n");
+			return;
+		}
+		irq_set_chained_handler(parent_irq, parent_handler);
+		/*
+		 * The parent irqchip is already using the chip_data for this
+		 * irqchip, so our callbacks simply use the handler_data.
+		 */
+		irq_set_handler_data(parent_irq, gpiochip);
+	}
+
+	/* Set the parent IRQ for all affected IRQs */
+	for (offset = 0; offset < gpiochip->ngpio; offset++)
+		irq_set_parent(irq_find_mapping(gpiochip->irqdomain, offset),
+			       parent_irq);
 }
 EXPORT_SYMBOL_GPL(gpiochip_set_chained_irqchip);
 
@@ -1508,20 +1533,42 @@ static int gpiochip_irq_map(struct irq_domain *d, unsigned int irq,
 {
 	struct gpio_chip *chip = d->host_data;
 
-	irq_set_chip_and_handler(irq, chip->irqchip, chip->irq_handler);
 	irq_set_chip_data(irq, chip);
+	irq_set_chip_and_handler(irq, chip->irqchip, chip->irq_handler);
+	/* Chips that can sleep need nested thread handlers */
+	if (chip->can_sleep)
+		irq_set_nested_thread(irq, 1);
 #ifdef CONFIG_ARM
 	set_irq_flags(irq, IRQF_VALID);
 #else
 	irq_set_noprobe(irq);
 #endif
-	irq_set_irq_type(irq, chip->irq_default_type);
+	/*
+	 * No set-up of the hardware will happen if IRQ_TYPE_NONE
+	 * is passed as default type.
+	 */
+	if (chip->irq_default_type != IRQ_TYPE_NONE)
+		irq_set_irq_type(irq, chip->irq_default_type);
 
 	return 0;
 }
 
+static void gpiochip_irq_unmap(struct irq_domain *d, unsigned int irq)
+{
+	struct gpio_chip *chip = d->host_data;
+
+#ifdef CONFIG_ARM
+	set_irq_flags(irq, 0);
+#endif
+	if (chip->can_sleep)
+		irq_set_nested_thread(irq, 0);
+	irq_set_chip_and_handler(irq, NULL, NULL);
+	irq_set_chip_data(irq, NULL);
+}
+
 static const struct irq_domain_ops gpiochip_domain_ops = {
 	.map	= gpiochip_irq_map,
+	.unmap	= gpiochip_irq_unmap,
 	/* Virtually all GPIO irqchips are twocell:ed */
 	.xlate	= irq_domain_xlate_twocell,
 };
@@ -1559,8 +1606,14 @@ static int gpiochip_to_irq(struct gpio_chip *chip, unsigned offset)
  */
 static void gpiochip_irqchip_remove(struct gpio_chip *gpiochip)
 {
-	if (gpiochip->irqdomain)
+	unsigned int offset;
+
+	/* Remove all IRQ mappings and delete the domain */
+	if (gpiochip->irqdomain) {
+		for (offset = 0; offset < gpiochip->ngpio; offset++)
+			irq_dispose_mapping(gpiochip->irq_base + offset);
 		irq_domain_remove(gpiochip->irqdomain);
+	}
 
 	if (gpiochip->irqchip) {
 		gpiochip->irqchip->irq_request_resources = NULL;
@@ -1576,7 +1629,8 @@ static void gpiochip_irqchip_remove(struct gpio_chip *gpiochip)
  * @first_irq: if not dynamically assigned, the base (first) IRQ to
  * allocate gpiochip irqs from
  * @handler: the irq handler to use (often a predefined irq core function)
- * @type: the default type for IRQs on this irqchip
+ * @type: the default type for IRQs on this irqchip, pass IRQ_TYPE_NONE
+ * to have the core avoid setting up any default type in the hardware.
  *
  * This function closely associates a certain irqchip with a certain
  * gpiochip, providing an irq domain to translate the local IRQs to
@@ -1588,7 +1642,8 @@ static void gpiochip_irqchip_remove(struct gpio_chip *gpiochip)
  * translation. The gpiochip will need to be initialized and registered
  * before calling this function.
  *
- * This function will handle two cell:ed simple IRQs. Everything else
+ * This function will handle two cell:ed simple IRQs and assumes all
+ * the pins on the gpiochip can generate a unique IRQ. Everything else
  * need to be open coded.
  */
 int gpiochip_irqchip_add(struct gpio_chip *gpiochip,
@@ -1599,6 +1654,7 @@ int gpiochip_irqchip_add(struct gpio_chip *gpiochip,
 {
 	struct device_node *of_node;
 	unsigned int offset;
+	unsigned irq_base = 0;
 
 	if (!gpiochip || !irqchip)
 		return -EINVAL;
@@ -1635,8 +1691,15 @@ int gpiochip_irqchip_add(struct gpio_chip *gpiochip,
 	 * any gpiochip calls. If the first_irq was zero, this is
 	 * necessary to allocate descriptors for all IRQs.
 	 */
-	for (offset = 0; offset < gpiochip->ngpio; offset++)
-		irq_create_mapping(gpiochip->irqdomain, offset);
+	for (offset = 0; offset < gpiochip->ngpio; offset++) {
+		irq_base = irq_create_mapping(gpiochip->irqdomain, offset);
+		if (offset == 0)
+			/*
+			 * Store the base into the gpiochip to be used when
+			 * unmapping the irqs.
+			 */
+			gpiochip->irq_base = irq_base;
+	}
 
 	return 0;
 }
@@ -1647,6 +1710,19 @@ EXPORT_SYMBOL_GPL(gpiochip_irqchip_add);
 static void gpiochip_irqchip_remove(struct gpio_chip *gpiochip) {}
 
 #endif /* CONFIG_GPIOLIB_IRQCHIP */
+
+/**
+ * gpiochip_generic_config() - apply configuration for a pin
+ * @chip: the gpiochip owning the GPIO
+ * @offset: the offset of the GPIO to apply the configuration
+ * @config: the configuration to be applied
+ */
+int gpiochip_generic_config(struct gpio_chip *chip, unsigned offset,
+			    unsigned long config)
+{
+	return pinctrl_gpio_set_config(chip->gpiodev->base + offset, config);
+}
+EXPORT_SYMBOL_GPL(gpiochip_generic_config);
 
 #ifdef CONFIG_PINCTRL
 
@@ -1746,6 +1822,19 @@ int gpiochip_add_pin_range(struct gpio_chip *chip, const char *pinctl_name,
 	return 0;
 }
 EXPORT_SYMBOL_GPL(gpiochip_add_pin_range);
+
+bool gpiochip_line_is_irq(struct gpio_chip *chip, unsigned int offset)
+{
+	struct gpio_desc *desc;
+
+	if (offset >= chip->ngpio)
+		return false;
+
+	desc = &chip->desc[offset];
+
+	return test_bit(FLAG_USED_AS_IRQ, &desc->flags);
+}
+EXPORT_SYMBOL_GPL(gpiochip_line_is_irq);
 
 /**
  * gpiochip_remove_pin_ranges() - remove all the GPIO <-> pin mappings
@@ -2167,6 +2256,7 @@ int gpiod_set_debounce(struct gpio_desc *desc, unsigned debounce)
 {
 	unsigned long		flags;
 	struct gpio_chip	*chip;
+	unsigned long		config;
 	int			status = -EINVAL;
 	int			offset;
 
@@ -2176,9 +2266,9 @@ int gpiod_set_debounce(struct gpio_desc *desc, unsigned debounce)
 	}
 
 	chip = desc->chip;
-	if (!chip->set || !chip->set_debounce) {
+	if (!chip->set || !chip->set_config) {
 		gpiod_dbg(desc,
-			  "%s: missing set() or set_debounce() operations\n",
+			  "%s: missing set() or set_config() operations\n",
 			  __func__);
 		return -ENOTSUPP;
 	}
@@ -2196,7 +2286,8 @@ int gpiod_set_debounce(struct gpio_desc *desc, unsigned debounce)
 	might_sleep_if(chip->can_sleep);
 
 	offset = gpio_chip_hwgpio(desc);
-	return chip->set_debounce(chip, offset, debounce);
+	config = pinconf_to_config_packed(PIN_CONFIG_INPUT_DEBOUNCE, debounce);
+	return chip->set_config(chip, offset, config);
 
 fail:
 	spin_unlock_irqrestore(&gpio_lock, flags);

@@ -46,6 +46,9 @@
 /* Max default timeout in ms, */
 #define I40E_MAX_NVM_TIMEOUT		18000
 
+/* Max timeout in ms for the phy to respond */
+#define I40E_MAX_PHY_TIMEOUT		500
+
 /* Switch from ms to the 1usec global time (this is the GTIME resolution) */
 #define I40E_MS_TO_GTIME(time)		((time) * 1000)
 
@@ -78,6 +81,7 @@ enum i40e_debug_mask {
 	I40E_DEBUG_DCB			= 0x00000400,
 	I40E_DEBUG_DIAG			= 0x00000800,
 	I40E_DEBUG_FD			= 0x00001000,
+	I40E_DEBUG_PACKAGE		= 0x00002000,
 
 	I40E_DEBUG_AQ_MESSAGE		= 0x01000000,
 	I40E_DEBUG_AQ_DESCRIPTOR	= 0x02000000,
@@ -158,6 +162,7 @@ struct i40e_link_status {
 	enum i40e_aq_link_speed link_speed;
 	u8 link_info;
 	u8 an_info;
+	u8 req_fec_info;
 	u8 fec_info;
 	u8 ext_info;
 	u8 loopback;
@@ -399,6 +404,18 @@ struct i40e_nvm_access {
 	u8 data[1];
 };
 
+/* (Q)SFP module access definitions */
+#define I40E_I2C_EEPROM_DEV_ADDR	0xA0
+#define I40E_I2C_EEPROM_DEV_ADDR2	0xA2
+#define I40E_MODULE_TYPE_ADDR		0x00
+#define I40E_MODULE_REVISION_ADDR	0x01
+#define I40E_MODULE_SFF_8472_COMP	0x5E
+#define I40E_MODULE_SFF_8472_SWAP	0x5C
+#define I40E_MODULE_SFF_ADDR_MODE	0x04
+#define I40E_MODULE_TYPE_QSFP_PLUS	0x0D
+#define I40E_MODULE_TYPE_QSFP28		0x11
+#define I40E_MODULE_QSFP_MAX_LEN	640
+
 /* PCI bus types */
 enum i40e_bus_type {
 	i40e_bus_type_unknown = 0,
@@ -554,10 +571,18 @@ struct i40e_hw {
 	/* LLDP/DCBX Status */
 	u16 dcbx_status;
 
+#define I40E_HW_FLAG_802_1AD_CAPABLE        BIT_ULL(1)
+#define I40E_HW_FLAG_AQ_PHY_ACCESS_CAPABLE  BIT_ULL(2)
+
 	/* DCBX info */
 	struct i40e_dcbx_config local_dcbx_config; /* Oper/Local Cfg */
 	struct i40e_dcbx_config remote_dcbx_config; /* Peer Cfg */
 	struct i40e_dcbx_config desired_dcbx_config; /* CEE Desired Cfg */
+
+	/* Used in set switch config AQ command */
+	u16 switch_tag;
+	u16 first_tag;
+	u16 second_tag;
 
 	/* debug mask */
 	u32 debug_mask;
@@ -1396,4 +1421,83 @@ enum i40e_reset_type {
 #define I40E_FD_INSET_FLEX_WORD57_SHIFT		10
 #define I40E_FD_INSET_FLEX_WORD57_MASK		(0x1ULL << \
 					I40E_FD_INSET_FLEX_WORD57_SHIFT)
+
+/* Version format for PPP */
+struct i40e_ppp_version {
+	u8 major;
+	u8 minor;
+	u8 update;
+	u8 draft;
+};
+
+#define I40E_PPP_NAME_SIZE	32
+
+/* Package header */
+struct i40e_package_header {
+	struct i40e_ppp_version version;
+	u32 segment_count;
+	u32 segment_offset[1];
+};
+
+/* Generic segment header */
+struct i40e_generic_seg_header {
+#define SEGMENT_TYPE_METADATA	0x00000001
+#define SEGMENT_TYPE_NOTES	0x00000002
+#define SEGMENT_TYPE_I40E	0x00000011
+#define SEGMENT_TYPE_X722	0x00000012
+	u32 type;
+	struct i40e_ppp_version version;
+	u32 size;
+	char name[I40E_PPP_NAME_SIZE];
+};
+
+struct i40e_metadata_segment {
+	struct i40e_generic_seg_header header;
+	struct i40e_ppp_version version;
+	u32 track_id;
+	char name[I40E_PPP_NAME_SIZE];
+};
+
+struct i40e_device_id_entry {
+	u32 vendor_dev_id;
+	u32 sub_vendor_dev_id;
+};
+
+struct i40e_profile_segment {
+	struct i40e_generic_seg_header header;
+	struct i40e_ppp_version version;
+	char name[I40E_PPP_NAME_SIZE];
+	u32 device_table_count;
+	struct i40e_device_id_entry device_table[1];
+};
+
+struct i40e_section_table {
+	u32 section_count;
+	u32 section_offset[1];
+};
+
+struct i40e_profile_section_header {
+	u16 tbl_size;
+	u16 data_end;
+	struct {
+#define SECTION_TYPE_INFO	0x00000010
+#define SECTION_TYPE_MMIO	0x00000800
+#define SECTION_TYPE_AQ		0x00000801
+#define SECTION_TYPE_NOTE	0x80000000
+#define SECTION_TYPE_NAME	0x80000001
+		u32 type;
+		u32 offset;
+		u32 size;
+	} section;
+};
+
+struct i40e_profile_info {
+	u32 track_id;
+	struct i40e_ppp_version version;
+	u8 op;
+#define I40E_PPP_ADD_TRACKID		0x01
+#define I40E_PPP_REMOVE_TRACKID	0x02
+	u8 reserved[7];
+	u8 name[I40E_PPP_NAME_SIZE];
+};
 #endif /* _I40E_TYPE_H_ */

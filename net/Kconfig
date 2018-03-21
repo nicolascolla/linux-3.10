@@ -43,6 +43,12 @@ config COMPAT_NETLINK_MESSAGES
 	  Newly written code should NEVER need this option but do
 	  compat-independent messages instead!
 
+config NET_INGRESS
+	bool
+
+config NET_EGRESS
+	bool
+
 menu "Networking options"
 
 source "net/packet/Kconfig"
@@ -344,6 +350,8 @@ source "net/9p/Kconfig"
 source "net/caif/Kconfig"
 source "net/ceph/Kconfig"
 source "net/nfc/Kconfig"
+source "net/psample/Kconfig"
+source "net/ife/Kconfig"
 
 config LWTUNNEL
 	bool "Network light weight tunnels"

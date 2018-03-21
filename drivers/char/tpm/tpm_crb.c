@@ -20,6 +20,9 @@
 #include <linux/rculist.h>
 #include <linux/module.h>
 #include <linux/pm_runtime.h>
+#ifdef CONFIG_ARM64
+#include <linux/arm-smccc.h>
+#endif
 #include "tpm.h"
 
 #define ACPI_SIG_TPM2 "TPM2"
@@ -93,6 +96,7 @@ enum crb_status {
 enum crb_flags {
 	CRB_FL_ACPI_START	= BIT(0),
 	CRB_FL_CRB_START	= BIT(1),
+	CRB_FL_CRB_SMC_START	= BIT(2),
 };
 
 struct crb_priv {
@@ -103,6 +107,15 @@ struct crb_priv {
 	u8 __iomem *cmd;
 	u8 __iomem *rsp;
 	u32 cmd_size;
+	u32 smc_func_id;
+};
+
+struct tpm2_crb_smc {
+	u32 interrupt;
+	u8 interrupt_flags;
+	u8 op_flags;
+	u16 reserved2;
+	u32 smc_func_id;
 };
 
 /**
@@ -122,7 +135,8 @@ struct crb_priv {
  */
 static int __maybe_unused crb_go_idle(struct device *dev, struct crb_priv *priv)
 {
-	if (priv->flags & CRB_FL_ACPI_START)
+	if ((priv->flags & CRB_FL_ACPI_START) ||
+	    (priv->flags & CRB_FL_CRB_SMC_START))
 		return 0;
 
 	iowrite32(CRB_CTRL_REQ_GO_IDLE, &priv->regs_t->ctrl_req);
@@ -167,7 +181,8 @@ static bool crb_wait_for_reg_32(u32 __iomem *reg, u32 mask, u32 value,
 static int __maybe_unused crb_cmd_ready(struct device *dev,
 					struct crb_priv *priv)
 {
-	if (priv->flags & CRB_FL_ACPI_START)
+	if ((priv->flags & CRB_FL_ACPI_START) ||
+	    (priv->flags & CRB_FL_CRB_SMC_START))
 		return 0;
 
 	iowrite32(CRB_CTRL_REQ_CMD_READY, &priv->regs_t->ctrl_req);
@@ -262,6 +277,34 @@ static int crb_do_acpi_start(struct tpm_chip *chip)
 	return rc;
 }
 
+#ifdef CONFIG_ARM64
+/*
+ * This is a TPM Command Response Buffer start method that invokes a
+ * Secure Monitor Call to requrest the firmware to execute or cancel
+ * a TPM 2.0 command.
+ */
+static int tpm_crb_smc_start(struct device *dev, unsigned long func_id)
+{
+	struct arm_smccc_res res;
+
+	arm_smccc_smc(func_id, 0, 0, 0, 0, 0, 0, 0, &res);
+	if (res.a0 != 0) {
+		dev_err(dev,
+			FW_BUG "tpm_crb_smc_start() returns res.a0 = 0x%lx\n",
+			res.a0);
+		return -EIO;
+	}
+
+	return 0;
+}
+#else
+static int tpm_crb_smc_start(struct device *dev, unsigned long func_id)
+{
+	dev_err(dev, FW_BUG "tpm_crb: incorrect start method\n");
+	return -EINVAL;
+}
+#endif
+
 static int crb_send(struct tpm_chip *chip, u8 *buf, size_t len)
 {
 	struct crb_priv *priv = dev_get_drvdata(&chip->dev);
@@ -288,6 +331,11 @@ static int crb_send(struct tpm_chip *chip, u8 *buf, size_t len)
 
 	if (priv->flags & CRB_FL_ACPI_START)
 		rc = crb_do_acpi_start(chip);
+
+	if (priv->flags & CRB_FL_CRB_SMC_START) {
+		iowrite32(CRB_START_INVOKE, &priv->regs_t->ctrl_start);
+		rc = tpm_crb_smc_start(&chip->dev, priv->smc_func_id);
+	}
 
 	return rc;
 }
@@ -326,10 +374,12 @@ static const struct tpm_class_ops tpm_crb = {
 static int crb_check_resource(struct acpi_resource *ares, void *data)
 {
 	struct resource *io_res = data;
-	struct resource res;
+	struct resource_win win;
+	struct resource *res = &(win.res);
 
-	if (acpi_dev_resource_memory(ares, &res)) {
-		*io_res = res;
+	if (acpi_dev_resource_memory(ares, res) ||
+	    acpi_dev_resource_address_space(ares, &win)) {
+		*io_res = *res;
 		io_res->name = NULL;
 	}
 
@@ -465,11 +515,12 @@ static int crb_map_io(struct acpi_device *device, struct crb_priv *priv,
 		goto out;
 	}
 
-	priv->cmd_size = cmd_size;
-
 	priv->rsp = priv->cmd;
 
 out:
+	if (!ret)
+		priv->cmd_size = cmd_size;
+
 	crb_go_idle(dev, priv);
 
 	return ret;
@@ -481,6 +532,7 @@ static int crb_acpi_add(struct acpi_device *device)
 	struct crb_priv *priv;
 	struct tpm_chip *chip;
 	struct device *dev = &device->dev;
+	struct tpm2_crb_smc *crb_smc;
 	acpi_status status;
 	u32 sm;
 	int rc;
@@ -512,6 +564,19 @@ static int crb_acpi_add(struct acpi_device *device)
 	if (sm == ACPI_TPM2_START_METHOD ||
 	    sm == ACPI_TPM2_COMMAND_BUFFER_WITH_START_METHOD)
 		priv->flags |= CRB_FL_ACPI_START;
+
+	if (sm == ACPI_TPM2_COMMAND_BUFFER_WITH_ARM_SMC) {
+		if (buf->header.length < (sizeof(*buf) + sizeof(*crb_smc))) {
+			dev_err(dev,
+				FW_BUG "TPM2 ACPI table has wrong size %u for start method type %d\n",
+				buf->header.length,
+				ACPI_TPM2_COMMAND_BUFFER_WITH_ARM_SMC);
+			return -EINVAL;
+		}
+		crb_smc = ACPI_ADD_PTR(struct tpm2_crb_smc, buf, sizeof(*buf));
+		priv->smc_func_id = crb_smc->smc_func_id;
+		priv->flags |= CRB_FL_CRB_SMC_START;
+	}
 
 	rc = crb_map_io(device, priv, buf);
 	if (rc)
@@ -558,8 +623,7 @@ static int crb_acpi_remove(struct acpi_device *device)
 	return 0;
 }
 
-#ifdef CONFIG_PM
-static int crb_pm_runtime_suspend(struct device *dev)
+static int __maybe_unused crb_pm_runtime_suspend(struct device *dev)
 {
 	struct tpm_chip *chip = dev_get_drvdata(dev);
 	struct crb_priv *priv = dev_get_drvdata(&chip->dev);
@@ -567,7 +631,7 @@ static int crb_pm_runtime_suspend(struct device *dev)
 	return crb_go_idle(dev, priv);
 }
 
-static int crb_pm_runtime_resume(struct device *dev)
+static int __maybe_unused crb_pm_runtime_resume(struct device *dev)
 {
 	struct tpm_chip *chip = dev_get_drvdata(dev);
 	struct crb_priv *priv = dev_get_drvdata(&chip->dev);
@@ -575,7 +639,7 @@ static int crb_pm_runtime_resume(struct device *dev)
 	return crb_cmd_ready(dev, priv);
 }
 
-static int crb_pm_suspend(struct device *dev)
+static int __maybe_unused crb_pm_suspend(struct device *dev)
 {
 	int ret;
 
@@ -586,7 +650,7 @@ static int crb_pm_suspend(struct device *dev)
 	return crb_pm_runtime_suspend(dev);
 }
 
-static int crb_pm_resume(struct device *dev)
+static int __maybe_unused crb_pm_resume(struct device *dev)
 {
 	int ret;
 
@@ -596,8 +660,6 @@ static int crb_pm_resume(struct device *dev)
 
 	return tpm_pm_resume(dev);
 }
-
-#endif /* CONFIG_PM */
 
 static const struct dev_pm_ops crb_pm = {
 	SET_SYSTEM_SLEEP_PM_OPS(crb_pm_suspend, crb_pm_resume)

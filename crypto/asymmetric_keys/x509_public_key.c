@@ -112,6 +112,8 @@ int x509_get_sig_params(struct x509_certificate *cert)
 
 	pr_devel("==>%s()\n", __func__);
 
+	if (cert->unsupported_crypto)
+		return -ENOPKG;
 	if (cert->sig.rsa.s)
 		return 0;
 
@@ -124,8 +126,13 @@ int x509_get_sig_params(struct x509_certificate *cert)
 	 * big the hash operational data will be.
 	 */
 	tfm = crypto_alloc_shash(hash_algo_name[cert->sig.pkey_hash_algo], 0, 0);
-	if (IS_ERR(tfm))
-		return (PTR_ERR(tfm) == -ENOENT) ? -ENOPKG : PTR_ERR(tfm);
+	if (IS_ERR(tfm)) {
+		if (PTR_ERR(tfm) == -ENOENT) {
+			cert->unsupported_crypto = true;
+			return -ENOPKG;
+		}
+		return PTR_ERR(tfm);
+	}
 
 	desc_size = crypto_shash_descsize(tfm) + sizeof(*desc);
 	digest_size = crypto_shash_digestsize(tfm);
@@ -134,14 +141,15 @@ int x509_get_sig_params(struct x509_certificate *cert)
 	 * digest storage space.
 	 */
 	ret = -ENOMEM;
-	digest = kzalloc(digest_size + desc_size, GFP_KERNEL);
+	digest = kzalloc(ALIGN(digest_size, __alignof__(*desc)) + desc_size,
+			 GFP_KERNEL);
 	if (!digest)
 		goto error;
 
 	cert->sig.digest = digest;
 	cert->sig.digest_size = digest_size;
 
-	desc = digest + digest_size;
+	desc = PTR_ALIGN(digest + digest_size, __alignof__(*desc));
 	desc->tfm = tfm;
 	desc->flags = CRYPTO_TFM_REQ_MAY_SLEEP;
 
@@ -172,6 +180,8 @@ int x509_check_signature(const struct public_key *pub,
 		return ret;
 
 	ret = public_key_verify_signature(pub, &cert->sig);
+	if (ret == -ENOPKG)
+		cert->unsupported_crypto = true;
 	pr_debug("Cert Verification: %d\n", ret);
 	return ret;
 }
@@ -237,15 +247,9 @@ static int x509_key_preparse(struct key_preparsed_payload *prep)
 	}
 
 	pr_devel("Cert Key Algo: %s\n", pkey_algo_name[cert->pub->pkey_algo]);
-	pr_devel("Cert Valid From: %04ld-%02d-%02d %02d:%02d:%02d\n",
-		 cert->valid_from.tm_year + 1900, cert->valid_from.tm_mon + 1,
-		 cert->valid_from.tm_mday, cert->valid_from.tm_hour,
-		 cert->valid_from.tm_min,  cert->valid_from.tm_sec);
-	pr_devel("Cert Valid To: %04ld-%02d-%02d %02d:%02d:%02d\n",
-		 cert->valid_to.tm_year + 1900, cert->valid_to.tm_mon + 1,
-		 cert->valid_to.tm_mday, cert->valid_to.tm_hour,
-		 cert->valid_to.tm_min,  cert->valid_to.tm_sec);
-	pr_devel("Cert Signature: %s\n",
+	pr_devel("Cert Valid period: %lld-%lld\n", cert->valid_from, cert->valid_to);
+	pr_devel("Cert Signature: %s + %s\n",
+		 pkey_algo_name[cert->sig.pkey_algo],
 		 hash_algo_name[cert->sig.pkey_hash_algo]);
 
 	if (!cert->fingerprint) {

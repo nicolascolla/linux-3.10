@@ -368,6 +368,7 @@ static int __set_xattr(struct ceph_inode_info *ci,
 
 	if (update_xattr) {
 		int err = 0;
+
 		if (xattr && (flags & XATTR_CREATE))
 			err = -EEXIST;
 		else if (!xattr && (flags & XATTR_REPLACE))
@@ -375,12 +376,14 @@ static int __set_xattr(struct ceph_inode_info *ci,
 		if (err) {
 			kfree(name);
 			kfree(val);
+			kfree(*newxattr);
 			return err;
 		}
 		if (update_xattr < 0) {
 			if (xattr)
 				__remove_xattr(ci, xattr);
 			kfree(name);
+			kfree(*newxattr);
 			return 0;
 		}
 	}
@@ -745,6 +748,9 @@ ssize_t __ceph_getxattr(struct inode *inode, const char *name, void *value,
 	/* let's see if a virtual xattr was requested */
 	vxattr = ceph_match_vxattr(inode, name);
 	if (vxattr) {
+		err = ceph_do_getattr(inode, 0, true);
+		if (err)
+			return err;
 		err = -ENODATA;
 		if (!(vxattr->exists_cb && !vxattr->exists_cb(ci)))
 			err = vxattr->getxattr_cb(ci, value, size);
@@ -763,7 +769,7 @@ ssize_t __ceph_getxattr(struct inode *inode, const char *name, void *value,
 		spin_unlock(&ci->i_ceph_lock);
 
 		/* security module gets xattr while filling trace */
-		if (current->journal_info != NULL) {
+		if (current->journal_info) {
 			pr_warn_ratelimited("sync getxattr %p "
 					    "during filling trace\n", inode);
 			return -EBUSY;
@@ -795,7 +801,7 @@ ssize_t __ceph_getxattr(struct inode *inode, const char *name, void *value,
 
 	memcpy(value, xattr->val, xattr->val_len);
 
-	if (current->journal_info != NULL &&
+	if (current->journal_info &&
 	    !strncmp(name, XATTR_SECURITY_PREFIX, XATTR_SECURITY_PREFIX_LEN))
 		ci->i_ceph_flags |= CEPH_I_SEC_INITED;
 out:
@@ -885,6 +891,7 @@ static int ceph_sync_setxattr(struct dentry *dentry, const char *name,
 	struct ceph_mds_request *req;
 	struct ceph_mds_client *mdsc = fsc->mdsc;
 	struct ceph_pagelist *pagelist = NULL;
+	int op = CEPH_MDS_OP_SETXATTR;
 	int err;
 
 	if (size > 0) {
@@ -898,20 +905,21 @@ static int ceph_sync_setxattr(struct dentry *dentry, const char *name,
 		if (err)
 			goto out;
 	} else if (!value) {
-		flags |= CEPH_XATTR_REMOVE;
+		if (flags & CEPH_XATTR_REPLACE)
+			op = CEPH_MDS_OP_RMXATTR;
+		else
+			flags |= CEPH_XATTR_REMOVE;
 	}
 
 	dout("setxattr value=%.*s\n", (int)size, value);
 
 	/* do request */
-	req = ceph_mdsc_create_request(mdsc, CEPH_MDS_OP_SETXATTR,
-				       USE_AUTH_MDS);
+	req = ceph_mdsc_create_request(mdsc, op, USE_AUTH_MDS);
 	if (IS_ERR(req)) {
 		err = PTR_ERR(req);
 		goto out;
 	}
 
-	req->r_args.setxattr.flags = cpu_to_le32(flags);
 	req->r_path2 = kstrdup(name, GFP_NOFS);
 	if (!req->r_path2) {
 		ceph_mdsc_put_request(req);
@@ -919,8 +927,11 @@ static int ceph_sync_setxattr(struct dentry *dentry, const char *name,
 		goto out;
 	}
 
-	req->r_pagelist = pagelist;
-	pagelist = NULL;
+	if (op == CEPH_MDS_OP_SETXATTR) {
+		req->r_args.setxattr.flags = cpu_to_le32(flags);
+		req->r_pagelist = pagelist;
+		pagelist = NULL;
+	}
 
 	req->r_inode = inode;
 	ihold(inode);
@@ -1053,7 +1064,7 @@ do_sync_unlocked:
 		up_read(&mdsc->snap_rwsem);
 
 	/* security module set xattr while filling trace */
-	if (current->journal_info != NULL) {
+	if (current->journal_info) {
 		pr_warn_ratelimited("sync setxattr %p "
 				    "during filling trace\n", inode);
 		err = -EBUSY;
@@ -1219,7 +1230,7 @@ bool ceph_security_xattr_deadlock(struct inode *in)
 {
 	struct ceph_inode_info *ci;
 	bool ret;
-	if (in->i_security == NULL)
+	if (!in->i_security)
 		return false;
 	ci = ceph_inode(in);
 	spin_lock(&ci->i_ceph_lock);

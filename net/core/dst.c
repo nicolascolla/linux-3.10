@@ -368,7 +368,8 @@ static int dst_md_discard(struct sk_buff *skb)
 	return 0;
 }
 
-struct metadata_dst *metadata_dst_alloc(u8 optslen, gfp_t flags)
+struct metadata_dst *metadata_dst_alloc(u8 optslen, enum metadata_type type,
+					gfp_t flags)
 {
 	struct metadata_dst *md_dst;
 	struct dst_entry *dst;
@@ -386,6 +387,7 @@ struct metadata_dst *metadata_dst_alloc(u8 optslen, gfp_t flags)
 
 	memset(dst + 1, 0, sizeof(*md_dst) + optslen - sizeof(*dst));
 	md_dst->opts_len = optslen;
+	md_dst->type = type;
 
 	return md_dst;
 }
@@ -394,7 +396,8 @@ EXPORT_SYMBOL_GPL(metadata_dst_alloc);
 void metadata_dst_free(struct metadata_dst *md_dst)
 {
 #ifdef CONFIG_DST_CACHE
-	dst_cache_destroy(&md_dst->u.tun_info.dst_cache);
+	if (md_dst->type == METADATA_IP_TUNNEL)
+		dst_cache_destroy(&md_dst->u.tun_info.dst_cache);
 #endif
 	kfree(md_dst);
 }

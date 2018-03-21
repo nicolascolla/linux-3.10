@@ -608,6 +608,7 @@ xfs_log_mount(
 	xfs_daddr_t	blk_offset,
 	int		num_bblks)
 {
+	bool		fatal = xfs_sb_version_hascrc(&mp->m_sb);
 	int		error = 0;
 	int		min_logfsbs;
 
@@ -659,9 +660,20 @@ xfs_log_mount(
 			 XFS_FSB_TO_B(mp, mp->m_sb.sb_logblocks),
 			 XFS_MAX_LOG_BYTES);
 		error = -EINVAL;
+	} else if (mp->m_sb.sb_logsunit > 1 &&
+		   mp->m_sb.sb_logsunit % mp->m_sb.sb_blocksize) {
+		xfs_warn(mp,
+		"log stripe unit %u bytes must be a multiple of block size",
+			 mp->m_sb.sb_logsunit);
+		error = -EINVAL;
+		fatal = true;
 	}
 	if (error) {
-		if (xfs_sb_version_hascrc(&mp->m_sb)) {
+		/*
+		 * Log check errors are always fatal on v5; or whenever bad
+		 * metadata leads to a crash.
+		 */
+		if (fatal) {
 			xfs_crit(mp, "AAIEEE! Log failed size checks. Abort!");
 			ASSERT(0);
 			goto out_free_log;
@@ -743,15 +755,22 @@ xfs_log_mount_finish(
 	struct xfs_mount	*mp)
 {
 	int	error = 0;
+	bool	readonly = (mp->m_flags & XFS_MOUNT_RDONLY);
 
 	if (mp->m_flags & XFS_MOUNT_NORECOVERY) {
 		ASSERT(mp->m_flags & XFS_MOUNT_RDONLY);
 		return 0;
+	} else if (readonly) {
+		/* Allow unlinked processing to proceed */
+		mp->m_flags &= ~XFS_MOUNT_RDONLY;
 	}
 
 	error = xlog_recover_finish(mp->m_log);
 	if (!error)
 		xfs_log_work_queue(mp);
+
+	if (readonly)
+		mp->m_flags |= XFS_MOUNT_RDONLY;
 
 	return error;
 }
@@ -788,7 +807,7 @@ xfs_log_mount_cancel(
  * As far as I know, there weren't any dependencies on the old behaviour.
  */
 
-int
+static int
 xfs_log_unmount_write(xfs_mount_t *mp)
 {
 	struct xlog	 *log = mp->m_log;
@@ -801,11 +820,14 @@ xfs_log_unmount_write(xfs_mount_t *mp)
 	int		 error;
 
 	/*
-	 * Don't write out unmount record on read-only mounts.
+	 * Don't write out unmount record on norecovery mounts or ro devices.
 	 * Or, if we are doing a forced umount (typically because of IO errors).
 	 */
-	if (mp->m_flags & XFS_MOUNT_RDONLY)
+	if (mp->m_flags & XFS_MOUNT_NORECOVERY ||
+	    xfs_readonly_buftarg(log->l_mp->m_logdev_targp)) {
+		ASSERT(mp->m_flags & XFS_MOUNT_RDONLY);
 		return 0;
+	}
 
 	error = _xfs_log_force(mp, XFS_LOG_SYNC, NULL);
 	ASSERT(error || !(XLOG_FORCED_SHUTDOWN(log)));
@@ -1036,7 +1058,7 @@ xfs_log_space_wake(
  * there's no point in running a dummy transaction at this point because we
  * can't start trying to idle the log until both the CIL and AIL are empty.
  */
-int
+static int
 xfs_log_need_covered(xfs_mount_t *mp)
 {
 	struct xlog	*log = mp->m_log;
@@ -1177,7 +1199,7 @@ xlog_space_left(
  * The log manager needs its own routine, in order to control what
  * happens with the buffer after the write completes.
  */
-void
+static void
 xlog_iodone(xfs_buf_t *bp)
 {
 	struct xlog_in_core	*iclog = bp->b_fspriv;
@@ -1302,7 +1324,7 @@ xfs_log_work_queue(
  * disk. If there is nothing dirty, then we might need to cover the log to
  * indicate that the filesystem is idle.
  */
-void
+static void
 xfs_log_worker(
 	struct work_struct	*work)
 {
@@ -2031,7 +2053,7 @@ xlog_print_tic_res(
 	};
 #undef REG_TYPE_STR
 
-	xfs_warn(mp, "xlog_write: reservation summary:");
+	xfs_warn(mp, "ticket reservation summary:");
 	xfs_warn(mp, "  unit res    = %d bytes",
 		 ticket->t_unit_res);
 	xfs_warn(mp, "  current res = %d bytes",
@@ -2052,10 +2074,57 @@ xlog_print_tic_res(
 			    "bad-rtype" : res_type_str[r_type]),
 			    ticket->t_res_arr[i].r_len);
 	}
+}
 
-	xfs_alert_tag(mp, XFS_PTAG_LOGRES,
-		"xlog_write: reservation ran out. Need to up reservation");
-	xfs_force_shutdown(mp, SHUTDOWN_LOG_IO_ERROR);
+/*
+ * Print a summary of the transaction.
+ */
+void
+xlog_print_trans(
+	struct xfs_trans		*tp)
+{
+	struct xfs_mount		*mp = tp->t_mountp;
+	struct xfs_log_item_desc	*lidp;
+
+	/* dump core transaction and ticket info */
+	xfs_warn(mp, "transaction summary:");
+	xfs_warn(mp, "  log res   = %d", tp->t_log_res);
+	xfs_warn(mp, "  log count = %d", tp->t_log_count);
+	xfs_warn(mp, "  flags     = 0x%x", tp->t_flags);
+
+	xlog_print_tic_res(mp, tp->t_ticket);
+
+	/* dump each log item */
+	list_for_each_entry(lidp, &tp->t_items, lid_trans) {
+		struct xfs_log_item	*lip = lidp->lid_item;
+		struct xfs_log_vec	*lv = lip->li_lv;
+		struct xfs_log_iovec	*vec;
+		int			i;
+
+		xfs_warn(mp, "log item: ");
+		xfs_warn(mp, "  type	= 0x%x", lip->li_type);
+		xfs_warn(mp, "  flags	= 0x%x", lip->li_flags);
+		if (!lv)
+			continue;
+		xfs_warn(mp, "  niovecs	= %d", lv->lv_niovecs);
+		xfs_warn(mp, "  size	= %d", lv->lv_size);
+		xfs_warn(mp, "  bytes	= %d", lv->lv_bytes);
+		xfs_warn(mp, "  buf len	= %d", lv->lv_buf_len);
+
+		/* dump each iovec for the log item */
+		vec = lv->lv_iovecp;
+		for (i = 0; i < lv->lv_niovecs; i++) {
+			int dumplen = min(vec->i_len, 32);
+
+			xfs_warn(mp, "  iovec[%d]", i);
+			xfs_warn(mp, "    type	= 0x%x", vec->i_type);
+			xfs_warn(mp, "    len	= %d", vec->i_len);
+			xfs_warn(mp, "    first %d bytes of iovec[%d]:", dumplen, i);
+			xfs_hex_dump(vec->i_addr, dumplen);;
+
+			vec++;
+		}
+	}
 }
 
 /*
@@ -2328,8 +2397,12 @@ xlog_write(
 	if (flags & (XLOG_COMMIT_TRANS | XLOG_UNMOUNT_TRANS))
 		ticket->t_curr_res -= sizeof(xlog_op_header_t);
 
-	if (ticket->t_curr_res < 0)
+	if (ticket->t_curr_res < 0) {
+		xfs_alert_tag(log->l_mp, XFS_PTAG_LOGRES,
+		     "ctx ticket reservation ran out. Need to up reservation");
 		xlog_print_tic_res(log->l_mp, ticket);
+		xfs_force_shutdown(log->l_mp, SHUTDOWN_LOG_IO_ERROR);
+	}
 
 	index = 0;
 	lv = log_vector;

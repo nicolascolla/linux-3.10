@@ -62,11 +62,9 @@ static irqreturn_t btmrvl_wake_irq_bt(int irq, void *priv)
 {
 	struct btmrvl_plt_wake_cfg *cfg = priv;
 
-	if (cfg->irq_bt >= 0) {
-		pr_info("%s: wake by bt", __func__);
-		cfg->wake_by_bt = true;
-		disable_irq_nosync(irq);
-	}
+	pr_info("%s: wake by bt", __func__);
+	cfg->wake_by_bt = true;
+	disable_irq_nosync(irq);
 
 	return IRQ_HANDLED;
 }
@@ -1574,7 +1572,7 @@ static void btmrvl_sdio_remove(struct sdio_func *func)
 							MODULE_SHUTDOWN_REQ);
 				btmrvl_sdio_disable_host_int(card);
 			}
-			BT_DBG("unregester dev");
+			BT_DBG("unregister dev");
 			card->priv->surprise_removed = true;
 			btmrvl_sdio_unregister_dev(card);
 			btmrvl_remove_card(card->priv);
@@ -1625,6 +1623,13 @@ static int btmrvl_sdio_suspend(struct device *dev)
 	if (priv->adapter->hs_state != HS_ACTIVATED) {
 		if (btmrvl_enable_hs(priv)) {
 			BT_ERR("HS not actived, suspend failed!");
+			/* Disable platform specific wakeup interrupt */
+			if (card->plt_wake_cfg &&
+			    card->plt_wake_cfg->irq_bt >= 0) {
+				disable_irq_wake(card->plt_wake_cfg->irq_bt);
+				disable_irq(card->plt_wake_cfg->irq_bt);
+			}
+
 			priv->adapter->is_suspending = false;
 			return -EBUSY;
 		}
@@ -1637,10 +1642,10 @@ static int btmrvl_sdio_suspend(struct device *dev)
 	if (priv->adapter->hs_state == HS_ACTIVATED) {
 		BT_DBG("suspend with MMC_PM_KEEP_POWER");
 		return sdio_set_host_pm_flags(func, MMC_PM_KEEP_POWER);
-	} else {
-		BT_DBG("suspend without MMC_PM_KEEP_POWER");
-		return 0;
 	}
+
+	BT_DBG("suspend without MMC_PM_KEEP_POWER");
+	return 0;
 }
 
 static int btmrvl_sdio_resume(struct device *dev)

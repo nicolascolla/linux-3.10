@@ -15,7 +15,7 @@ menuconfig IOMMU_SUPPORT
 if IOMMU_SUPPORT
 
 config IOMMU_IOVA
-	bool
+	tristate
 
 config OF_IOMMU
        def_bool y
@@ -46,6 +46,7 @@ config AMD_IOMMU
 	select PCI_PRI
 	select PCI_PASID
 	select IOMMU_API
+	select IOMMU_IOVA
 	depends on X86_64 && PCI && ACPI && X86_IO_APIC
 	---help---
 	  With this option you can enable support for AMD IOMMU hardware in
@@ -57,16 +58,6 @@ config AMD_IOMMU
 	  You can find out if your system has an AMD IOMMU if you look into
 	  your BIOS for an option to enable it or if you have an IVRS ACPI
 	  table.
-
-config AMD_IOMMU_STATS
-	bool "Export AMD IOMMU statistics to debugfs"
-	depends on AMD_IOMMU
-	select DEBUG_FS
-	---help---
-	  This option enables code in the AMD IOMMU driver to collect various
-	  statistics about whats happening in the driver and exports that
-	  information to userspace via debugfs.
-	  If unsure, say N.
 
 config AMD_IOMMU_V2
 	tristate "AMD IOMMU Version 2 driver"

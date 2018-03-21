@@ -21,6 +21,7 @@ extern pud_t level3_ident_pgt[512];
 extern pmd_t level2_kernel_pgt[512];
 extern pmd_t level2_fixmap_pgt[512];
 extern pmd_t level2_ident_pgt[512];
+extern pte_t level1_fixmap_pgt[512];
 extern pgd_t init_level4_pgt[];
 
 #define swapper_pg_dir init_level4_pgt
@@ -111,6 +112,21 @@ static inline void native_set_pud(pud_t *pudp, pud_t pud)
 static inline void native_pud_clear(pud_t *pud)
 {
 	native_set_pud(pud, native_make_pud(0));
+}
+
+static inline pud_t native_pudp_get_and_clear(pud_t *xp)
+{
+#ifdef CONFIG_SMP
+	return native_make_pud(xchg(&xp->pud, 0));
+#else
+	/* native_local_pudp_get_and_clear,
+	 * but duplicated because of cyclic dependency
+	 */
+	pud_t ret = *xp;
+
+	native_pud_clear(xp);
+	return ret;
+#endif
 }
 
 #ifdef CONFIG_KAISER
@@ -207,6 +223,15 @@ static inline void kaiser_unpoison_pgd_atomic(pgd_t *pgd)
 static inline pgd_t kaiser_set_shadow_pgd(pgd_t *pgdp, pgd_t pgd)
 {
 #ifdef CONFIG_KAISER
+	extern bool in_efi_virtual_mode;
+
+	/*
+	 * EFI virtual mode doesn't use 8k PGD, so there is no user
+	 * page tables to set up.
+	 */
+	if (unlikely(in_efi_virtual_mode))
+		goto ret;
+
 	if (pgd_userspace_access(pgd)) {
 		if (pgdp_maps_userspace(pgdp)) {
 			VM_WARN_ON_ONCE(!is_kaiser_pgd(pgdp));
@@ -253,6 +278,7 @@ static inline pgd_t kaiser_set_shadow_pgd(pgd_t *pgdp, pgd_t pgd)
 		VM_WARN_ON_ONCE(system_state == SYSTEM_RUNNING &&
 				is_kaiser_pgd(pgdp));
 	}
+ret:
 #endif
 	/* return the copy of the PGD we want the kernel to use: */
 	return pgd;

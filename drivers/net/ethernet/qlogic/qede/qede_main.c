@@ -47,12 +47,7 @@
 #include <linux/netdev_features.h>
 #include <linux/udp.h>
 #include <linux/tcp.h>
-#ifdef CONFIG_QEDE_VXLAN
-#include <net/vxlan.h>
-#endif
-#ifdef CONFIG_QEDE_GENEVE
-#include <net/geneve.h>
-#endif
+#include <net/udp_tunnel.h>
 #include <linux/ip.h>
 #include <net/ipv6.h>
 #include <net/tcp.h>
@@ -65,8 +60,8 @@
 #include <net/ip6_checksum.h>
 #include <linux/bitops.h>
 #include <linux/vmalloc.h>
-#include <linux/qed/qede_roce.h>
 #include "qede.h"
+#include "qede_ptp.h"
 
 static char version[] =
 	"QLogic FastLinQ 4xxxx Ethernet Driver qede " DRV_MODULE_VERSION "\n";
@@ -226,9 +221,13 @@ static struct pci_driver qede_pci_driver = {
 
 static struct qed_eth_cb_ops qede_ll_ops = {
 	{
+#ifdef CONFIG_RFS_ACCEL
+		.arfs_filter_op = qede_arfs_filter_op,
+#endif
 		.link_update = qede_link_update,
 	},
 	.force_mac = qede_force_mac,
+	.ports_update = qede_udp_ports_update,
 };
 
 static int qede_netdev_event(struct notifier_block *this, unsigned long event,
@@ -256,11 +255,11 @@ static int qede_netdev_event(struct notifier_block *this, unsigned long event,
 		/* Notify qed of the name change */
 		if (!edev->ops || !edev->ops->common)
 			goto done;
-		edev->ops->common->set_id(edev->cdev, edev->ndev->name, "qede");
+		edev->ops->common->set_name(edev->cdev, edev->ndev->name);
 		break;
 	case NETDEV_CHANGEADDR:
 		edev = netdev_priv(ndev);
-		qede_roce_event_changeaddr(edev);
+		qede_rdma_event_changeaddr(edev);
 		break;
 	}
 
@@ -425,9 +424,8 @@ void qede_fill_by_demand_stats(struct qede_dev *edev)
 	}
 }
 
-static
-struct rtnl_link_stats64 *qede_get_stats64(struct net_device *dev,
-					   struct rtnl_link_stats64 *stats)
+static void qede_get_stats64(struct net_device *dev,
+			     struct rtnl_link_stats64 *stats)
 {
 	struct qede_dev *edev = netdev_priv(dev);
 	struct qede_stats_common *p_common;
@@ -454,8 +452,6 @@ struct rtnl_link_stats64 *qede_get_stats64(struct net_device *dev,
 		stats->collisions = edev->stats.bb.tx_total_collisions;
 	stats->rx_crc_errors = p_common->rx_crc_errors;
 	stats->rx_frame_errors = p_common->rx_align_errors;
-
-	return stats;
 }
 
 #ifdef CONFIG_QED_SRIOV
@@ -499,7 +495,36 @@ static int qede_set_vf_link_state(struct net_device *dev, int vfidx,
 
 	return edev->ops->iov->set_link_state(edev->cdev, vfidx, link_state);
 }
+
+static int qede_set_vf_trust(struct net_device *dev, int vfidx, bool setting)
+{
+	struct qede_dev *edev = netdev_priv(dev);
+
+	if (!edev->ops)
+		return -EINVAL;
+
+	return edev->ops->iov->set_trust(edev->cdev, vfidx, setting);
+}
 #endif
+
+static int qede_ioctl(struct net_device *dev, struct ifreq *ifr, int cmd)
+{
+	struct qede_dev *edev = netdev_priv(dev);
+
+	if (!netif_running(dev))
+		return -EAGAIN;
+
+	switch (cmd) {
+	case SIOCSHWTSTAMP:
+		return qede_ptp_hw_ts(edev, ifr);
+	default:
+		DP_VERBOSE(edev, QED_MSG_DEBUG,
+			   "default IOCTL cmd 0x%x\n", cmd);
+		return -EOPNOTSUPP;
+	}
+
+	return 0;
+}
 
 static const struct net_device_ops qede_netdev_ops = {
 	.ndo_size = sizeof(struct net_device_ops),
@@ -509,10 +534,12 @@ static const struct net_device_ops qede_netdev_ops = {
 	.ndo_set_rx_mode = qede_set_rx_mode,
 	.ndo_set_mac_address = qede_set_mac_addr,
 	.ndo_validate_addr = eth_validate_addr,
-	.ndo_change_mtu = qede_change_mtu,
+	.ndo_change_mtu_rh74 = qede_change_mtu,
+	.ndo_do_ioctl = qede_ioctl,
 #ifdef CONFIG_QED_SRIOV
 	.ndo_set_vf_mac = qede_set_vf_mac,
 	.extended.ndo_set_vf_vlan = qede_set_vf_vlan,
+	.extended.ndo_set_vf_trust = qede_set_vf_trust,
 #endif
 	.ndo_vlan_rx_add_vid = qede_vlan_rx_add_vid,
 	.ndo_vlan_rx_kill_vid = qede_vlan_rx_kill_vid,
@@ -524,14 +551,26 @@ static const struct net_device_ops qede_netdev_ops = {
 	.ndo_get_vf_config = qede_get_vf_config,
 	.ndo_set_vf_rate = qede_set_vf_rate,
 #endif
-#ifdef CONFIG_QEDE_VXLAN
-	.ndo_add_vxlan_port = qede_add_vxlan_port,
-	.ndo_del_vxlan_port = qede_del_vxlan_port,
+	.extended.ndo_udp_tunnel_add = qede_udp_tunnel_add,
+	.extended.ndo_udp_tunnel_del = qede_udp_tunnel_del,
+	.ndo_features_check = qede_features_check,
+#ifdef CONFIG_RFS_ACCEL
+	.ndo_rx_flow_steer = qede_rx_flow_steer,
 #endif
-#ifdef CONFIG_QEDE_GENEVE
-	.ndo_add_geneve_port = qede_add_geneve_port,
-	.ndo_del_geneve_port = qede_del_geneve_port,
-#endif
+};
+
+static const struct net_device_ops qede_netdev_vf_ops = {
+	.ndo_open = qede_open,
+	.ndo_stop = qede_close,
+	.ndo_start_xmit = qede_start_xmit,
+	.ndo_set_rx_mode = qede_set_rx_mode,
+	.ndo_set_mac_address = qede_set_mac_addr,
+	.ndo_validate_addr = eth_validate_addr,
+	.ndo_change_mtu_rh74 = qede_change_mtu,
+	.ndo_vlan_rx_add_vid = qede_vlan_rx_add_vid,
+	.ndo_vlan_rx_kill_vid = qede_vlan_rx_kill_vid,
+	.ndo_set_features = qede_set_features,
+	.ndo_get_stats64 = qede_get_stats64,
 	.ndo_features_check = qede_features_check,
 };
 
@@ -573,6 +612,12 @@ static struct qede_dev *qede_alloc_etherdev(struct qed_dev *cdev,
 	memset(&edev->stats, 0, sizeof(edev->stats));
 	memcpy(&edev->dev_info, info, sizeof(*info));
 
+	/* As ethtool doesn't have the ability to show WoL behavior as
+	 * 'default', if device supports it declare it's enabled.
+	 */
+	if (edev->dev_info.common.wol_support)
+		edev->wol_enabled = true;
+
 	INIT_LIST_HEAD(&edev->vlan_list);
 
 	return edev;
@@ -582,7 +627,8 @@ static void qede_init_ndev(struct qede_dev *edev)
 {
 	struct net_device *ndev = edev->ndev;
 	struct pci_dev *pdev = edev->pdev;
-	u32 hw_features;
+	bool udp_tunnel_enable = false;
+	netdev_features_t hw_features;
 
 	pci_set_drvdata(pdev, ndev);
 
@@ -593,7 +639,10 @@ static void qede_init_ndev(struct qede_dev *edev)
 
 	ndev->watchdog_timeo = TX_TIMEOUT;
 
-	ndev->netdev_ops = &qede_netdev_ops;
+	if (IS_VF(edev))
+		ndev->netdev_ops = &qede_netdev_vf_ops;
+	else
+		ndev->netdev_ops = &qede_netdev_ops;
 
 	qede_set_ethtool_ops(ndev);
 
@@ -604,16 +653,33 @@ static void qede_init_ndev(struct qede_dev *edev)
 		      NETIF_F_IP_CSUM | NETIF_F_IPV6_CSUM |
 		      NETIF_F_TSO | NETIF_F_TSO6;
 
-	/* Encap features*/
-	hw_features |= NETIF_F_GSO_GRE | NETIF_F_GSO_UDP_TUNNEL |
-		       NETIF_F_TSO_ECN | NETIF_F_GSO_UDP_TUNNEL_CSUM |
-		       NETIF_F_GSO_GRE_CSUM;
-	ndev->hw_enc_features = NETIF_F_IP_CSUM | NETIF_F_IPV6_CSUM |
-				NETIF_F_SG | NETIF_F_TSO | NETIF_F_TSO_ECN |
-				NETIF_F_TSO6 | NETIF_F_GSO_GRE |
-				NETIF_F_GSO_UDP_TUNNEL | NETIF_F_RXCSUM |
-				NETIF_F_GSO_UDP_TUNNEL_CSUM |
-				NETIF_F_GSO_GRE_CSUM;
+	if (!IS_VF(edev) && edev->dev_info.common.num_hwfns == 1)
+		hw_features |= NETIF_F_NTUPLE;
+
+	if (edev->dev_info.common.vxlan_enable ||
+	    edev->dev_info.common.geneve_enable)
+		udp_tunnel_enable = true;
+
+	if (udp_tunnel_enable || edev->dev_info.common.gre_enable) {
+		hw_features |= NETIF_F_TSO_ECN;
+		ndev->hw_enc_features = NETIF_F_IP_CSUM | NETIF_F_IPV6_CSUM |
+					NETIF_F_SG | NETIF_F_TSO |
+					NETIF_F_TSO_ECN | NETIF_F_TSO6 |
+					NETIF_F_RXCSUM;
+	}
+
+	if (udp_tunnel_enable) {
+		hw_features |= (NETIF_F_GSO_UDP_TUNNEL |
+				NETIF_F_GSO_UDP_TUNNEL_CSUM);
+		ndev->hw_enc_features |= (NETIF_F_GSO_UDP_TUNNEL |
+					  NETIF_F_GSO_UDP_TUNNEL_CSUM);
+	}
+
+	if (edev->dev_info.common.gre_enable) {
+		hw_features |= (NETIF_F_GSO_GRE | NETIF_F_GSO_GRE_CSUM);
+		ndev->hw_enc_features |= (NETIF_F_GSO_GRE |
+					  NETIF_F_GSO_GRE_CSUM);
+	}
 
 	ndev->vlan_features = hw_features | NETIF_F_RXHASH | NETIF_F_RXCSUM |
 			      NETIF_F_HIGHDMA;
@@ -622,6 +688,10 @@ static void qede_init_ndev(struct qede_dev *edev)
 			 NETIF_F_HW_VLAN_CTAG_FILTER | NETIF_F_HW_VLAN_CTAG_TX;
 
 	ndev->hw_features = hw_features;
+
+	/* MTU range: 46 - 9600 */
+	ndev->extended->min_mtu = ETH_ZLEN - ETH_HLEN;
+	ndev->extended->max_mtu = QEDE_MAX_JUMBO_PACKET_SIZE;
 
 	/* Set network device HW mac */
 	ether_addr_copy(edev->ndev->dev_addr, edev->dev_info.common.hw_mac);
@@ -738,7 +808,6 @@ static void qede_sp_task(struct work_struct *work)
 {
 	struct qede_dev *edev = container_of(work, struct qede_dev,
 					     sp_task.work);
-	struct qed_dev *cdev = edev->cdev;
 
 	__qede_lock(edev);
 
@@ -746,24 +815,12 @@ static void qede_sp_task(struct work_struct *work)
 		if (edev->state == QEDE_STATE_OPEN)
 			qede_config_rx_mode(edev->ndev);
 
-	if (test_and_clear_bit(QEDE_SP_VXLAN_PORT_CONFIG, &edev->sp_flags)) {
-		struct qed_tunn_params tunn_params;
-
-		memset(&tunn_params, 0, sizeof(tunn_params));
-		tunn_params.update_vxlan_port = 1;
-		tunn_params.vxlan_port = edev->vxlan_dst_port;
-		qed_ops->tunn_config(cdev, &tunn_params);
+#ifdef CONFIG_RFS_ACCEL
+	if (test_and_clear_bit(QEDE_SP_ARFS_CONFIG, &edev->sp_flags)) {
+		if (edev->state == QEDE_STATE_OPEN)
+			qede_process_arfs_filters(edev, false);
 	}
-
-	if (test_and_clear_bit(QEDE_SP_GENEVE_PORT_CONFIG, &edev->sp_flags)) {
-		struct qed_tunn_params tunn_params;
-
-		memset(&tunn_params, 0, sizeof(tunn_params));
-		tunn_params.update_geneve_port = 1;
-		tunn_params.geneve_port = edev->geneve_dst_port;
-		qed_ops->tunn_config(cdev, &tunn_params);
-	}
-
+#endif
 	__qede_unlock(edev);
 }
 
@@ -774,7 +831,45 @@ static void qede_update_pf_params(struct qed_dev *cdev)
 	/* 64 rx + 64 tx */
 	memset(&pf_params, 0, sizeof(struct qed_pf_params));
 	pf_params.eth_pf_params.num_cons = (MAX_SB_PER_PF_MIMD - 1) * 2;
+	pf_params.eth_pf_params.num_arfs_filters = QEDE_RFS_MAX_FLTR;
 	qed_ops->common->update_pf_params(cdev, &pf_params);
+}
+
+#define QEDE_FW_VER_STR_SIZE	80
+
+static void qede_log_probe(struct qede_dev *edev)
+{
+	struct qed_dev_info *p_dev_info = &edev->dev_info.common;
+	u8 buf[QEDE_FW_VER_STR_SIZE];
+	size_t left_size;
+
+	snprintf(buf, QEDE_FW_VER_STR_SIZE,
+		 "Storm FW %d.%d.%d.%d, Management FW %d.%d.%d.%d",
+		 p_dev_info->fw_major, p_dev_info->fw_minor, p_dev_info->fw_rev,
+		 p_dev_info->fw_eng,
+		 (p_dev_info->mfw_rev & QED_MFW_VERSION_3_MASK) >>
+		 QED_MFW_VERSION_3_OFFSET,
+		 (p_dev_info->mfw_rev & QED_MFW_VERSION_2_MASK) >>
+		 QED_MFW_VERSION_2_OFFSET,
+		 (p_dev_info->mfw_rev & QED_MFW_VERSION_1_MASK) >>
+		 QED_MFW_VERSION_1_OFFSET,
+		 (p_dev_info->mfw_rev & QED_MFW_VERSION_0_MASK) >>
+		 QED_MFW_VERSION_0_OFFSET);
+
+	left_size = QEDE_FW_VER_STR_SIZE - strlen(buf);
+	if (p_dev_info->mbi_version && left_size)
+		snprintf(buf + strlen(buf), left_size,
+			 " [MBI %d.%d.%d]",
+			 (p_dev_info->mbi_version & QED_MBI_VERSION_2_MASK) >>
+			 QED_MBI_VERSION_2_OFFSET,
+			 (p_dev_info->mbi_version & QED_MBI_VERSION_1_MASK) >>
+			 QED_MBI_VERSION_1_OFFSET,
+			 (p_dev_info->mbi_version & QED_MBI_VERSION_0_MASK) >>
+			 QED_MBI_VERSION_0_OFFSET);
+
+	pr_info("qede %02x:%02x.%02x: %s [%s]\n", edev->pdev->bus->number,
+		PCI_SLOT(edev->pdev->devfn), PCI_FUNC(edev->pdev->devfn),
+		buf, edev->ndev->name);
 }
 
 enum qede_probe_mode {
@@ -838,17 +933,28 @@ static int __qede_probe(struct pci_dev *pdev, u32 dp_module, u8 dp_level,
 
 	qede_init_ndev(edev);
 
-	rc = qede_roce_dev_add(edev);
+	rc = qede_rdma_dev_add(edev);
 	if (rc)
 		goto err3;
 
+	/* Prepare the lock prior to the registeration of the netdev,
+	 * as once it's registered we might reach flows requiring it
+	 * [it's even possible to reach a flow needing it directly
+	 * from there, although it's unlikely].
+	 */
+	INIT_DELAYED_WORK(&edev->sp_task, qede_sp_task);
+	mutex_init(&edev->qede_lock);
 	rc = register_netdev(edev->ndev);
 	if (rc) {
 		DP_NOTICE(edev, "Cannot register net-device\n");
 		goto err4;
 	}
 
-	edev->ops->common->set_id(cdev, edev->ndev->name, DRV_MODULE_VERSION);
+	edev->ops->common->set_name(cdev, edev->ndev->name);
+
+	/* PTP not supported on VFs */
+	if (!is_vf)
+		qede_ptp_enable(edev, true);
 
 	edev->ops->register_ops(cdev, &qede_ll_ops, edev);
 
@@ -857,16 +963,13 @@ static int __qede_probe(struct pci_dev *pdev, u32 dp_module, u8 dp_level,
 		qede_set_dcbnl_ops(edev->ndev);
 #endif
 
-	INIT_DELAYED_WORK(&edev->sp_task, qede_sp_task);
-	mutex_init(&edev->qede_lock);
 	edev->rx_copybreak = QEDE_RX_HDR_SIZE;
 
-	DP_INFO(edev, "Ending successfully qede probe\n");
-
+	qede_log_probe(edev);
 	return 0;
 
 err4:
-	qede_roce_dev_remove(edev);
+	qede_rdma_dev_remove(edev);
 err3:
 	free_netdev(edev->ndev);
 err2:
@@ -912,23 +1015,30 @@ static void __qede_remove(struct pci_dev *pdev, enum qede_remove_mode mode)
 
 	DP_INFO(edev, "Starting qede_remove\n");
 
+	unregister_netdev(ndev);
 	cancel_delayed_work_sync(&edev->sp_task);
 
-	unregister_netdev(ndev);
+	qede_ptp_disable(edev);
 
-	qede_roce_dev_remove(edev);
+	qede_rdma_dev_remove(edev);
 
 	edev->ops->common->set_power_state(cdev, PCI_D0);
 
 	pci_set_drvdata(pdev, NULL);
-
-	free_netdev(ndev);
 
 	/* Use global ops since we've freed edev */
 	qed_ops->common->slowpath_stop(cdev);
 	if (system_state == SYSTEM_POWER_OFF)
 		return;
 	qed_ops->common->remove(cdev);
+
+	/* Since this can happen out-of-sync with other flows,
+	 * don't release the netdevice until after slowpath stop
+	 * has been called to guarantee various other contexts
+	 * [e.g., QED register callbacks] won't break anything when
+	 * accessing the netdevice.
+	 */
+	 free_netdev(ndev);
 
 	dev_info(&pdev->dev, "Ending qede_remove successfully\n");
 }
@@ -977,12 +1087,15 @@ static int qede_set_num_queues(struct qede_dev *edev)
 	return rc;
 }
 
-static void qede_free_mem_sb(struct qede_dev *edev,
-			     struct qed_sb_info *sb_info)
+static void qede_free_mem_sb(struct qede_dev *edev, struct qed_sb_info *sb_info,
+			     u16 sb_id)
 {
-	if (sb_info->sb_virt)
+	if (sb_info->sb_virt) {
+		edev->ops->common->sb_release(edev->cdev, sb_info, sb_id);
 		dma_free_coherent(&edev->pdev->dev, sizeof(*sb_info->sb_virt),
 				  (void *)sb_info->sb_virt, sb_info->sb_phys);
+		memset(sb_info, 0, sizeof(*sb_info));
+	}
 }
 
 /* This function allocates fast-path status block memory */
@@ -1122,8 +1235,9 @@ static int qede_alloc_mem_rxq(struct qede_dev *edev, struct qede_rx_queue *rxq)
 
 	rxq->rx_buf_size = NET_IP_ALIGN + ETH_OVERHEAD + edev->ndev->mtu;
 
-	if (rxq->rx_buf_size > PAGE_SIZE)
-		rxq->rx_buf_size = PAGE_SIZE;
+	/* Make sure that the headroom and  payload fit in a single page */
+	if (rxq->rx_buf_size + rxq->rx_headroom > PAGE_SIZE)
+		rxq->rx_buf_size = PAGE_SIZE - rxq->rx_headroom;
 
 	/* Segment size to spilt a page in multiple equal parts */
 	rxq->rx_buf_seg_size = roundup_pow_of_two(rxq->rx_buf_size);
@@ -1144,8 +1258,7 @@ static int qede_alloc_mem_rxq(struct qede_dev *edev, struct qede_rx_queue *rxq)
 					    QED_CHAIN_CNT_TYPE_U16,
 					    RX_RING_SIZE,
 					    sizeof(struct eth_rx_bd),
-					    &rxq->rx_bd_ring);
-
+					    &rxq->rx_bd_ring, NULL);
 	if (rc)
 		goto err;
 
@@ -1156,7 +1269,7 @@ static int qede_alloc_mem_rxq(struct qede_dev *edev, struct qede_rx_queue *rxq)
 					    QED_CHAIN_CNT_TYPE_U16,
 					    RX_RING_SIZE,
 					    sizeof(union eth_rx_cqe),
-					    &rxq->rx_comp_ring);
+					    &rxq->rx_comp_ring, NULL);
 	if (rc)
 		goto err;
 
@@ -1194,7 +1307,7 @@ static int qede_alloc_mem_txq(struct qede_dev *edev, struct qede_tx_queue *txq)
 	txq->num_tx_buffers = edev->q_num_tx_buffers;
 
 	/* Allocate the parallel driver ring for Tx buffers */
-	size = sizeof(*txq->sw_tx_ring) * TX_RING_SIZE;
+	size = sizeof(*txq->sw_tx_ring) * txq->num_tx_buffers;
 	txq->sw_tx_ring = kzalloc(size, GFP_KERNEL);
 	if (!txq->sw_tx_ring) {
 		DP_NOTICE(edev, "Tx buffers ring allocation failed\n");
@@ -1205,8 +1318,9 @@ static int qede_alloc_mem_txq(struct qede_dev *edev, struct qede_tx_queue *txq)
 					    QED_CHAIN_USE_TO_CONSUME_PRODUCE,
 					    QED_CHAIN_MODE_PBL,
 					    QED_CHAIN_CNT_TYPE_U16,
-					    TX_RING_SIZE,
-					    sizeof(*p_virt), &txq->tx_pbl);
+					    txq->num_tx_buffers,
+					    sizeof(*p_virt),
+					    &txq->tx_pbl, NULL);
 	if (rc)
 		goto err;
 
@@ -1220,7 +1334,7 @@ err:
 /* This function frees all memory of a single fp */
 static void qede_free_mem_fp(struct qede_dev *edev, struct qede_fastpath *fp)
 {
-	qede_free_mem_sb(edev, fp->sb_info);
+	qede_free_mem_sb(edev, fp->sb_info, fp->id);
 
 	if (fp->type & QEDE_FASTPATH_RX)
 		qede_free_mem_rxq(edev, fp->rxq);
@@ -1393,6 +1507,18 @@ static int qede_req_msix_irqs(struct qede_dev *edev)
 	}
 
 	for (i = 0; i < QEDE_QUEUE_CNT(edev); i++) {
+#ifdef CONFIG_RFS_ACCEL
+		struct qede_fastpath *fp = &edev->fp_array[i];
+
+		if (edev->ndev->rx_cpu_rmap && (fp->type & QEDE_FASTPATH_RX)) {
+			rc = irq_cpu_rmap_add(edev->ndev->rx_cpu_rmap,
+					      edev->int_info.msix[i].vector);
+			if (rc) {
+				DP_ERR(edev, "Failed to add CPU rmap\n");
+				qede_free_arfs(edev);
+			}
+		}
+#endif
 		rc = request_irq(edev->int_info.msix[i].vector,
 				 qede_msix_fp_int, 0, edev->fp_array[i].name,
 				 &edev->fp_array[i]);
@@ -1564,7 +1690,7 @@ static int qede_start_txq(struct qede_dev *edev,
 	memset(&ret_params, 0, sizeof(ret_params));
 
 	params.queue_id = txq->index;
-	params.sb = fp->sb_info->igu_sb_id;
+	params.p_sb = fp->sb_info;
 	params.sb_idx = sb_idx;
 
 	rc = edev->ops->q_tx_start(edev->cdev, rss_id, &params, phys_table,
@@ -1610,6 +1736,7 @@ static int qede_start_queues(struct qede_dev *edev, bool clear_stats)
 	if (!vport_update_params)
 		return -ENOMEM;
 
+	start.handle_ptp_pkts = !!(edev->ptp);
 	start.gro_enable = !edev->gro_disable;
 	start.mtu = edev->ndev->mtu;
 	start.vport_id = 0;
@@ -1642,7 +1769,7 @@ static int qede_start_queues(struct qede_dev *edev, bool clear_stats)
 			memset(&q_params, 0, sizeof(q_params));
 			q_params.queue_id = rxq->rxq_id;
 			q_params.vport_id = 0;
-			q_params.sb = fp->sb_info->igu_sb_id;
+			q_params.p_sb = fp->sb_info;
 			q_params.sb_idx = RX_PI;
 
 			p_phys_table =
@@ -1716,8 +1843,9 @@ static void qede_unload(struct qede_dev *edev, enum qede_unload_mode mode,
 	if (!is_locked)
 		__qede_lock(edev);
 
-	qede_roce_dev_event_close(edev);
 	edev->state = QEDE_STATE_CLOSED;
+
+	qede_rdma_dev_event_close(edev);
 
 	/* Close OS Tx */
 	netif_tx_disable(edev->ndev);
@@ -1737,6 +1865,11 @@ static void qede_unload(struct qede_dev *edev, enum qede_unload_mode mode,
 
 	qede_vlan_mark_nonconfigured(edev);
 	edev->ops->fastpath_stop(edev->cdev);
+
+	if (!IS_VF(edev) && edev->dev_info.common.num_hwfns == 1) {
+		qede_poll_for_freeing_arfs_filters(edev);
+		qede_free_arfs(edev);
+	}
 
 	/* Release the interrupts */
 	qede_sync_free_irqs(edev);
@@ -1762,7 +1895,6 @@ static int qede_load(struct qede_dev *edev, enum qede_load_mode mode,
 		     bool is_locked)
 {
 	struct qed_link_params link_params;
-	struct qed_link_output link_output;
 	int rc;
 
 	DP_INFO(edev, "Starting qede load\n");
@@ -1790,6 +1922,12 @@ static int qede_load(struct qede_dev *edev, enum qede_load_mode mode,
 	if (rc)
 		goto err2;
 
+	if (!IS_VF(edev) && edev->dev_info.common.num_hwfns == 1) {
+		rc = qede_alloc_arfs(edev);
+		if (rc)
+			DP_NOTICE(edev, "aRFS memory allocation failed\n");
+	}
+
 	qede_napi_add_enable(edev);
 	DP_INFO(edev, "Napi added and enabled\n");
 
@@ -1803,9 +1941,6 @@ static int qede_load(struct qede_dev *edev, enum qede_load_mode mode,
 		goto err4;
 	DP_INFO(edev, "Start VPORT, RXQ and TXQ succeeded\n");
 
-	/* Add primary mac and set Rx filters */
-	ether_addr_copy(edev->primary_mac, edev->ndev->dev_addr);
-
 	/* Program un-configured VLANs */
 	qede_configure_vlan_filters(edev);
 
@@ -1814,16 +1949,11 @@ static int qede_load(struct qede_dev *edev, enum qede_load_mode mode,
 	link_params.link_up = true;
 	edev->ops->common->set_link(edev->cdev, &link_params);
 
-	/* Query whether link is already-up */
-	memset(&link_output, 0, sizeof(link_output));
-	edev->ops->common->get_link(edev->cdev, &link_output);
-	qede_roce_dev_event_open(edev);
-	qede_link_update(edev, &link_output);
+	qede_rdma_dev_event_open(edev);
 
 	edev->state = QEDE_STATE_OPEN;
 
 	DP_INFO(edev, "Ending successfully qede load\n");
-
 
 	goto out;
 err4:
@@ -1889,12 +2019,7 @@ static int qede_open(struct net_device *ndev)
 	if (rc)
 		return rc;
 
-#ifdef CONFIG_QEDE_VXLAN
-	vxlan_get_rx_port(ndev);
-#endif
-#ifdef CONFIG_QEDE_GENEVE
-	geneve_get_rx_port(ndev);
-#endif
+	udp_tunnel_get_rx_info(ndev);
 
 	edev->ops->common->update_drv_state(edev->cdev, true);
 

@@ -309,6 +309,16 @@ bytes respectively. Such letter suffixes can also be entirely omitted.
 	acpi_no_memhotplug [ACPI] Disable memory hotplug.  Useful for kdump
 			   kernels.
 
+	acpi_mask_gpe=  [HW,ACPI]
+			Due to the existence of _Lxx/_Exx, some GPEs triggered
+			by unsupported hardware/firmware features can result in
+			GPE floodings that cannot be automatically disabled by
+			the GPE dispatcher.
+			This facility can be used to prevent such uncontrolled
+			GPE floodings.
+			Format: <int>
+			Support masking of GPEs numbered from 0x00 to 0x7f.
+
 	add_efi_memmap	[EFI; X86] Include EFI memory map in
 			kernel's map of available physical RAM.
 
@@ -366,6 +376,15 @@ bytes respectively. Such letter suffixes can also be entirely omitted.
 			for AMD IOMMU. With this option enabled, AMD IOMMU
 			driver will print ACPI tables for AMD IOMMU during
 			IOMMU initialization.
+
+	amd_iommu_intr=	[HW,X86-64]
+			Specifies one of the following AMD IOMMU interrupt
+			remapping modes:
+			legacy     - Use legacy interrupt remapping mode.
+			vapic      - Use virtual APIC mode, which allows IOMMU
+			             to inject interrupts directly into guest.
+			             This mode requires kvm-amd.avic=1.
+			             (Default when IOMMU HW support is present.)
 
 	amijoy.map=	[HW,JOY] Amiga joystick support
 			Map of devices attached to JOY0DAT and JOY1DAT
@@ -549,7 +568,7 @@ bytes respectively. Such letter suffixes can also be entirely omitted.
 
 	clearcpuid=BITNUM [X86]
 			Disable CPUID feature X for the kernel. See
-			arch/x86/include/asm/cpufeature.h for the valid bit
+			arch/x86/include/asm/cpufeatures.h for the valid bit
 			numbers. Note the Linux specific bits are not necessarily
 			stable over kernel options, but the vendor specific
 			ones should be.
@@ -735,6 +754,15 @@ bytes respectively. Such letter suffixes can also be entirely omitted.
 			bypassed) which are not detectable by
 			CONFIG_DEBUG_PAGEALLOC, hence this option will not help
 			tracking down these problems.
+
+	debug_pagealloc=
+			[KNL] When CONFIG_DEBUG_PAGEALLOC is set, this
+			parameter enables the feature at boot time. In
+			default, it is disabled. We can avoid allocating huge
+			chunk of memory for debug pagealloc if we don't enable
+			it at boot time and the system will work mostly same
+			with the kernel built without CONFIG_DEBUG_PAGEALLOC.
+			on: enable the feature
 
 	debugpat	[X86] Enable PAT debugging
 
@@ -1008,6 +1036,12 @@ bytes respectively. Such letter suffixes can also be entirely omitted.
 			that can be changed at run time by the
 			set_graph_function file in the debugfs tracing directory.
 
+	ftrace_graph_max_depth=<uint>
+			[FTRACE] Used with the function graph tracer. This is
+			the max depth it will trace into a function. This value
+			can be changed at run time by the max_graph_depth file
+			in the tracefs tracing directory. default: 0 (no limit)
+
 	gamecon.map[2|3]=
 			[HW,JOY] Multisystem joystick and NES/SNES/PSX pad
 			support via parallel port (up to 5 devices per port)
@@ -1241,6 +1275,11 @@ bytes respectively. Such letter suffixes can also be entirely omitted.
 
 	initrd=		[BOOT] Specify the location of the initial ramdisk
 
+	init_pkru=	[x86] Specify the default memory protection keys rights
+			register contents for all processes.  0x55555554 by
+			default (disallow access to all but pkey 0).  Can
+			override in debugfs after boot.
+
 	inport.irq=	[HW] Inport (ATI XL and Microsoft) busmouse driver
 			Format: <irq>
 
@@ -1287,6 +1326,12 @@ bytes respectively. Such letter suffixes can also be entirely omitted.
 		       disable
 		         Do not enable intel_pstate as the default
 		         scaling driver for the supported processors
+		       passive
+			 Use intel_pstate as a scaling driver, but configure it
+			 to work with generic cpufreq governors (instead of
+			 enabling its internal governor).  This mode cannot be
+			 used along with the hardware-managed P-states (HWP)
+			 feature.
 		       force
 			 Enable intel_pstate on systems that prohibit it by default
 			 in favor of acpi-cpufreq. Forcing the intel_pstate driver
@@ -1302,6 +1347,11 @@ bytes respectively. Such letter suffixes can also be entirely omitted.
 		hwp_only
 			Only load intel_pstate on systems which support
 			hardware P state control (HWP) if available.
+		support_acpi_ppc
+			Enforce ACPI _PPC performance limits. If the Fixed ACPI
+			Description Table, specifies preferred power management
+			profile as "Enterprise Server" or "Performance Server",
+			then this feature is turned on by default.
 
 	intremap=	[X86-64, Intel-IOMMU]
 			on	enable Interrupt Remapping (default)
@@ -1309,6 +1359,7 @@ bytes respectively. Such letter suffixes can also be entirely omitted.
 			nosid	disable Source ID checking
 			no_x2apic_optout
 				BIOS x2APIC opt-out request will be ignored
+			nopost	disable Interrupt Posting
 
 	iomem=		Disable strict checking of access to MMIO memory
 		strict	regions from userspace.
@@ -1410,6 +1461,13 @@ bytes respectively. Such letter suffixes can also be entirely omitted.
 			example, to map HPET-ID decimal 0 to
 			PCI device 00:14.0 write the parameter as:
 				ivrs_hpet[0]=00:14.0
+
+	ivrs_acpihid	[HW,X86_64]
+			Provide an override to the ACPI-HID:UID<->DEVICE-ID
+			mapping provided in the IVRS ACPI table. For
+			example, to map UART-HID:UID AMD0020:0 to
+			PCI device 00:14.5 write the parameter as:
+				ivrs_acpihid[00:14.5]=AMD0020:0
 
 	js=		[HW,JOY] Analog joystick
 			See Documentation/input/joystick.txt.
@@ -1796,6 +1854,17 @@ bytes respectively. Such letter suffixes can also be entirely omitted.
 			memory contents and reserves bad memory
 			regions that are detected.
 
+	mem_encrypt=	[X86-64] AMD Secure Memory Encryption (SME) control
+			Valid arguments: on, off
+			Default (depends on kernel configuration option):
+			  on  (CONFIG_AMD_MEM_ENCRYPT_ACTIVE_BY_DEFAULT=y)
+			  off (CONFIG_AMD_MEM_ENCRYPT_ACTIVE_BY_DEFAULT=n)
+			mem_encrypt=on:		Activate SME
+			mem_encrypt=off:	Do not activate SME
+
+			Refer to Documentation/x86/amd-memory-encryption.txt
+			for details on when memory encryption can be activated.
+
 	meye.*=		[HW] Set MotionEye Camera parameters
 			See Documentation/video4linux/meye.txt.
 
@@ -2102,7 +2171,7 @@ bytes respectively. Such letter suffixes can also be entirely omitted.
 
 	nodsp		[SH] Disable hardware DSP at boot time.
 
-	noefi		[X86] Disable EFI runtime services support.
+	noefi		Disable EFI runtime services support.
 
 	noexec		[IA-64]
 
@@ -2161,6 +2230,9 @@ bytes respectively. Such letter suffixes can also be entirely omitted.
 	nompx           [X86] Disables Intel Memory Protection Extensions.
 			See Documentation/x86/intel_mpx.txt for more
 			information about the feature.
+
+	nopku		[X86] Disable Memory Protection Keys CPU feature found
+			in some Intel CPUs.
 
 	eagerfpu=	[X86]
 			on	enable eager fpu restore
@@ -2254,8 +2326,6 @@ bytes respectively. Such letter suffixes can also be entirely omitted.
 
 	norandmaps	Don't use address space randomization.  Equivalent to
 			echo 0 > /proc/sys/kernel/randomize_va_space
-
-	noreplace-paravirt	[X86,IA-64,PV_OPS] Don't patch paravirt_ops
 
 	noreplace-smp	[X86-32,SMP] Don't replace SMP instructions
 			with UP alternatives

@@ -19,7 +19,7 @@
 #define	__XFS_BTREE_H__
 
 struct xfs_buf;
-struct xfs_bmap_free;
+struct xfs_defer_ops;
 struct xfs_inode;
 struct xfs_mount;
 struct xfs_trans;
@@ -158,8 +158,6 @@ struct xfs_btree_ops {
 	/* init values of btree structures */
 	void	(*init_key_from_rec)(union xfs_btree_key *key,
 				     union xfs_btree_rec *rec);
-	void	(*init_rec_from_key)(union xfs_btree_key *key,
-				     union xfs_btree_rec *rec);
 	void	(*init_rec_from_cur)(struct xfs_btree_cur *cur,
 				     union xfs_btree_rec *rec);
 	void	(*init_ptr_from_cur)(struct xfs_btree_cur *cur,
@@ -182,6 +180,19 @@ struct xfs_btree_ops {
 				union xfs_btree_rec *r1,
 				union xfs_btree_rec *r2);
 #endif
+
+	/* derive the low & high keys from the records in a leaf block */
+	void	(*get_leaf_keys)(struct xfs_btree_cur *cur,
+				 struct xfs_btree_block *block,
+				 union xfs_btree_key *key);
+
+	/* derive the low & high keys from the keys in a node block */
+	void	(*get_node_keys)(struct xfs_btree_cur *cur,
+				 struct xfs_btree_block *block,
+				 union xfs_btree_key *key);
+
+	/* update the parent keys of given btree level */
+	int	(*update_keys)(struct xfs_btree_cur *cur, int level);
 };
 
 /*
@@ -218,11 +229,12 @@ typedef struct xfs_btree_cur
 	union {
 		struct {			/* needed for BNO, CNT, INO */
 			struct xfs_buf	*agbp;	/* agf/agi buffer pointer */
+			struct xfs_defer_ops *dfops;	/* deferred updates */
 			xfs_agnumber_t	agno;	/* ag number */
 		} a;
 		struct {			/* needed for BMAP */
 			struct xfs_inode *ip;	/* pointer to our inode */
-			struct xfs_bmap_free *flist;	/* list to free after */
+			struct xfs_defer_ops *dfops;	/* deferred updates */
 			xfs_fsblock_t	firstblock;	/* 1st blk allocated */
 			int		allocated;	/* count of alloced */
 			short		forksize;	/* fork's inode space */
@@ -474,5 +486,22 @@ static inline int xfs_btree_get_level(struct xfs_btree_block *block)
 
 bool xfs_btree_sblock_v5hdr_verify(struct xfs_buf *bp);
 bool xfs_btree_sblock_verify(struct xfs_buf *bp, unsigned int max_recs);
+uint xfs_btree_compute_maxlevels(struct xfs_mount *mp, uint *limits,
+				 unsigned long len);
+xfs_extlen_t xfs_btree_calc_size(struct xfs_mount *mp, uint *limits,
+		unsigned long long len);
+
+void xfs_btree_get_leaf_keys(struct xfs_btree_cur *cur,
+		struct xfs_btree_block *block, union xfs_btree_key *key);
+void xfs_btree_get_node_keys(struct xfs_btree_cur *cur,
+		struct xfs_btree_block *block, union xfs_btree_key *key);
+int xfs_btree_update_keys(struct xfs_btree_cur *cur, int level);
+
+typedef int (*xfs_btree_visit_blocks_fn)(struct xfs_btree_cur *cur, int level,
+		void *data);
+int xfs_btree_visit_blocks(struct xfs_btree_cur *cur,
+		xfs_btree_visit_blocks_fn fn, void *data);
+
+int xfs_btree_count_blocks(struct xfs_btree_cur *cur, xfs_extlen_t *blocks);
 
 #endif	/* __XFS_BTREE_H__ */

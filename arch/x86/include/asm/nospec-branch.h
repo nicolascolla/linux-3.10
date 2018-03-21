@@ -5,7 +5,7 @@
 
 #include <asm/alternative.h>
 #include <asm/alternative-asm.h>
-#include <asm/cpufeature.h>
+#include <asm/cpufeatures.h>
 #include <asm/bitsperlong.h>
 #include <asm/percpu.h>
 #include <asm/nops.h>

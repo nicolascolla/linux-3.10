@@ -38,6 +38,8 @@ EXPORT_SYMBOL(__copy_user_nocache);
 EXPORT_SYMBOL(_copy_from_user);
 EXPORT_SYMBOL(_copy_to_user);
 
+EXPORT_SYMBOL_GPL(memcpy_mcsafe_unrolled);
+
 EXPORT_SYMBOL(copy_page);
 EXPORT_SYMBOL(clear_page);
 
@@ -73,6 +75,7 @@ EXPORT_SYMBOL(native_load_gs_index);
 	extern void __x86_indirect_thunk_ ## reg(void);			\
 	EXPORT_SYMBOL(__x86_indirect_thunk_ ## reg)
 
+#ifdef CONFIG_RETPOLINE
 EXPORT_THUNK(rax);
 EXPORT_THUNK(rbx);
 EXPORT_THUNK(rcx);
@@ -88,3 +91,4 @@ EXPORT_THUNK(r12);
 EXPORT_THUNK(r13);
 EXPORT_THUNK(r14);
 EXPORT_THUNK(r15);
+#endif

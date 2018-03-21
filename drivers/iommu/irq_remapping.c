@@ -21,7 +21,7 @@ int irq_remap_broken;
 int disable_sourceid_checking;
 int no_x2apic_optout;
 
-int disable_irq_post = 1;
+int disable_irq_post = 0;
 
 static int disable_irq_remap;
 static struct irq_remap_ops *remap_ops;
@@ -59,7 +59,7 @@ static int do_setup_msi_irqs(struct pci_dev *dev, int nvec)
 
 	msidesc = list_entry(dev->msi_list.next, struct msi_desc, list);
 
-	irq = irq_alloc_hwirqs(nvec, dev_to_node(&dev->dev));
+	irq = irq_alloc_hwirqs_affinity(nvec, dev_to_node(&dev->dev), msidesc->affinity);
 	if (irq == 0)
 		return -ENOSPC;
 
@@ -106,7 +106,7 @@ static int do_setup_msix_irqs(struct pci_dev *dev, int nvec)
 
 	list_for_each_entry(msidesc, &dev->msi_list, list) {
 
-		irq = irq_alloc_hwirq(node);
+		irq = irq_alloc_hwirq_affinity(node, msidesc->affinity);
 		if (irq == 0)
 			return -1;
 
@@ -177,14 +177,18 @@ static __init int setup_irqremap(char *str)
 		return -EINVAL;
 
 	while (*str) {
-		if (!strncmp(str, "on", 2))
+		if (!strncmp(str, "on", 2)) {
 			disable_irq_remap = 0;
-		else if (!strncmp(str, "off", 3))
+			disable_irq_post = 0;
+		} else if (!strncmp(str, "off", 3)) {
 			disable_irq_remap = 1;
-		else if (!strncmp(str, "nosid", 5))
+			disable_irq_post = 1;
+		} else if (!strncmp(str, "nosid", 5))
 			disable_sourceid_checking = 1;
 		else if (!strncmp(str, "no_x2apic_optout", 16))
 			no_x2apic_optout = 1;
+		else if (!strncmp(str, "nopost", 6))
+			disable_irq_post = 1;
 
 		str += strcspn(str, ",");
 		while (*str == ',')
@@ -203,7 +207,7 @@ void set_irq_remapping_broken(void)
 bool irq_remapping_cap(enum irq_remap_cap cap)
 {
 	if (!remap_ops || disable_irq_post)
-		return 0;
+		return false;
 
 	return (remap_ops->capability & (1 << cap));
 }

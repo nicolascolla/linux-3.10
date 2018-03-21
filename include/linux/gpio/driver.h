@@ -7,6 +7,8 @@
 #include <linux/irq.h>
 #include <linux/irqchip/chained_irq.h>
 #include <linux/irqdomain.h>
+#include <linux/pinctrl/pinctrl.h>
+#include <linux/pinctrl/pinconf-generic.h>
 
 struct gpio_desc;
 struct of_phandle_args;
@@ -31,8 +33,8 @@ struct gpio_device;
  * @get: returns value for signal "offset"; for output signals this
  *	returns either the value actually sensed, or zero
  * @set: assigns output value for signal "offset"
- * @set_debounce: optional hook for setting debounce time for specified gpio in
- *      interrupt triggered gpio chips
+ * @set_config: optional hook for all kinds of settings. Uses the same
+ *	packed config format as generic pinconf.
  * @to_irq: optional hook supporting non-static gpio_to_irq() mappings;
  *	implementation may not sleep
  * @dbg_show: optional routine to show contents in debugfs; default code
@@ -50,7 +52,10 @@ struct gpio_device;
  *      format specifier for an unsigned int.  It is substituted by the actual
  *      number of the gpio.
  * @can_sleep: flag must be set iff get()/set() methods sleep, as they
- *	must while accessing GPIO expander chips over I2C or SPI
+ *	must while accessing GPIO expander chips over I2C or SPI. This
+ *	implies that if the chip supports IRQs, these IRQs need to be threaded
+ *	as the chip access may sleep when e.g. reading out the IRQ status
+ *	registers.
  * @exported: flags if the gpiochip is exported for use from sysfs. Private.
  *
  * A gpio_chip can help platforms abstract various sources of GPIOs so
@@ -68,6 +73,7 @@ struct gpio_chip {
 	struct gpio_device	*gpiodev;
 	struct device		*dev;
 	struct module		*owner;
+	void			*data;
 
 	int			(*request)(struct gpio_chip *chip,
 						unsigned offset);
@@ -83,10 +89,9 @@ struct gpio_chip {
 						unsigned offset);
 	void			(*set)(struct gpio_chip *chip,
 						unsigned offset, int value);
-	int			(*set_debounce)(struct gpio_chip *chip,
-						unsigned offset,
-						unsigned debounce);
-
+	int			(*set_config)(struct gpio_chip *chip,
+					      unsigned offset,
+					      unsigned long config);
 	int			(*to_irq)(struct gpio_chip *chip,
 						unsigned offset);
 
@@ -106,6 +111,7 @@ struct gpio_chip {
 	 */
 	struct irq_chip		*irqchip;
 	struct irq_domain	*irqdomain;
+	unsigned int		irq_base;
 	irq_flow_handler_t	irq_handler;
 	unsigned int		irq_default_type;
 #endif
@@ -135,7 +141,11 @@ extern const char *gpiochip_is_requested(struct gpio_chip *chip,
 			unsigned offset);
 
 /* add/remove chips */
-extern int gpiochip_add(struct gpio_chip *chip);
+extern int gpiochip_add_data(struct gpio_chip *chip, void *data);
+static inline int gpiochip_add(struct gpio_chip *chip)
+{
+	return gpiochip_add_data(chip, NULL);
+}
 extern int gpiochip_remove(struct gpio_chip *chip);
 extern struct gpio_chip *gpiochip_find(void *data,
 			      int (*match)(struct gpio_chip *chip, void *data));
@@ -143,6 +153,13 @@ extern struct gpio_chip *gpiochip_find(void *data,
 /* lock/unlock as IRQ */
 int gpiod_lock_as_irq(struct gpio_desc *desc);
 void gpiod_unlock_as_irq(struct gpio_desc *desc);
+bool gpiochip_line_is_irq(struct gpio_chip *chip, unsigned int offset);
+
+/* get driver data */
+static inline void *gpiochip_get_data(struct gpio_chip *chip)
+{
+	return chip->data;
+}
 
 enum gpio_lookup_flags {
 	GPIO_ACTIVE_HIGH = (0 << 0),
@@ -212,5 +229,8 @@ int gpiochip_irqchip_add(struct gpio_chip *gpiochip,
 		unsigned int type);
 
 #endif /* CONFIG_GPIO_IRQCHIP */
+
+int gpiochip_generic_config(struct gpio_chip *chip, unsigned offset,
+			    unsigned long config);
 
 #endif

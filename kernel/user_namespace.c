@@ -150,7 +150,6 @@ int create_user_ns(struct cred *new)
 
 	set_cred_user_ns(new, ns);
 
-	update_mnt_policy(ns);
 	return 0;
 fail_keyring:
 #ifdef CONFIG_PERSISTENT_KEYRINGS
@@ -996,6 +995,20 @@ bool userns_may_setgroups(const struct user_namespace *ns)
 	mutex_unlock(&userns_state_mutex);
 
 	return allowed;
+}
+
+/*
+ * Returns true if @ns is the same namespace as or a descendant of
+ * @target_ns.
+ */
+bool current_in_userns(const struct user_namespace *target_ns)
+{
+	struct user_namespace *ns;
+	for (ns = current_user_ns(); ns; ns = ns->parent) {
+		if (ns == target_ns)
+			return true;
+	}
+	return false;
 }
 
 static void *userns_get(struct task_struct *task)

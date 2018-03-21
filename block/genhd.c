@@ -572,15 +572,16 @@ exit:
 }
 
 /**
- * add_disk - add partitioning information to kernel list
+ * __add_disk - add partitioning information to kernel list
  * @disk: per-device partitioning information
+ * @register_queue: register the queue if set to true
  *
  * This function registers the partitioning information in @disk
  * with the kernel.
  *
  * FIXME: error handling
  */
-void add_disk(struct gendisk *disk)
+static void __add_disk(struct gendisk *disk, bool register_queue)
 {
 	struct backing_dev_info *bdi;
 	dev_t devt;
@@ -617,7 +618,8 @@ void add_disk(struct gendisk *disk)
 	blk_register_region(disk_devt(disk), disk->minors, NULL,
 			    exact_match, exact_lock, disk);
 	register_disk(disk);
-	blk_register_queue(disk);
+	if (register_queue)
+		blk_register_queue(disk);
 
 	/*
 	 * Take an extra ref on queue which will be put on disk_release()
@@ -631,7 +633,18 @@ void add_disk(struct gendisk *disk)
 
 	disk_add_events(disk);
 }
+
+void add_disk(struct gendisk *disk)
+{
+	__add_disk(disk, true);
+}
 EXPORT_SYMBOL(add_disk);
+
+void add_disk_no_queue_reg(struct gendisk *disk)
+{
+	__add_disk(disk, false);
+}
+EXPORT_SYMBOL(add_disk_no_queue_reg);
 
 void del_gendisk(struct gendisk *disk)
 {
@@ -1047,8 +1060,19 @@ static struct attribute *disk_attrs[] = {
 	NULL
 };
 
+static umode_t disk_visible(struct kobject *kobj, struct attribute *a, int n)
+{
+	struct device *dev = container_of(kobj, typeof(*dev), kobj);
+	struct gendisk *disk = dev_to_disk(dev);
+
+	if (a == &dev_attr_badblocks.attr && !disk->bb)
+		return 0;
+	return a->mode;
+}
+
 static struct attribute_group disk_attr_group = {
 	.attrs = disk_attrs,
+	.is_visible = disk_visible,
 };
 
 static const struct attribute_group *disk_attr_groups[] = {

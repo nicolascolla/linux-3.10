@@ -88,6 +88,8 @@ struct netfront_cb {
 /* IRQ name is queue name with "-tx" or "-rx" appended */
 #define IRQ_NAME_SIZE (QUEUE_NAME_SIZE + 3)
 
+static DECLARE_WAIT_QUEUE_HEAD(module_unload_q);
+
 struct netfront_stats {
 	u64			packets;
 	u64			bytes;
@@ -608,7 +610,9 @@ static int xennet_start_xmit(struct sk_buff *skb, struct net_device *dev)
 		tx->flags |= XEN_NETTXF_extra_info;
 
 		gso->u.gso.size = skb_shinfo(skb)->gso_size;
-		gso->u.gso.type = XEN_NETIF_GSO_TYPE_TCPV4;
+		gso->u.gso.type = (skb_shinfo(skb)->gso_type & SKB_GSO_TCPV6) ?
+			XEN_NETIF_GSO_TYPE_TCPV6 :
+			XEN_NETIF_GSO_TYPE_TCPV4;
 		gso->u.gso.pad = 0;
 		gso->u.gso.features = 0;
 
@@ -815,15 +819,18 @@ static int xennet_set_skb_gso(struct sk_buff *skb,
 		return -EINVAL;
 	}
 
-	/* Currently only TCPv4 S.O. is supported. */
-	if (gso->u.gso.type != XEN_NETIF_GSO_TYPE_TCPV4) {
+	if (gso->u.gso.type != XEN_NETIF_GSO_TYPE_TCPV4 &&
+	    gso->u.gso.type != XEN_NETIF_GSO_TYPE_TCPV6) {
 		if (net_ratelimit())
 			pr_warn("Bad GSO type %d\n", gso->u.gso.type);
 		return -EINVAL;
 	}
 
 	skb_shinfo(skb)->gso_size = gso->u.gso.size;
-	skb_shinfo(skb)->gso_type = SKB_GSO_TCPV4;
+	skb_shinfo(skb)->gso_type =
+		(gso->u.gso.type == XEN_NETIF_GSO_TYPE_TCPV4) ?
+		SKB_GSO_TCPV4 :
+		SKB_GSO_TCPV6;
 
 	/* Header must be checked, and gso_segs computed. */
 	skb_shinfo(skb)->gso_type |= SKB_GSO_DODGY;
@@ -865,9 +872,7 @@ static RING_IDX xennet_fill_frags(struct netfront_queue *queue,
 
 static int checksum_setup(struct net_device *dev, struct sk_buff *skb)
 {
-	struct iphdr *iph;
-	int err = -EPROTO;
-	int recalculate_partial_csum = 0;
+	bool recalculate_partial_csum = false;
 
 	/*
 	 * A GSO SKB must be CHECKSUM_PARTIAL. However some buggy
@@ -879,54 +884,14 @@ static int checksum_setup(struct net_device *dev, struct sk_buff *skb)
 		struct netfront_info *np = netdev_priv(dev);
 		atomic_inc(&np->rx_gso_checksum_fixup);
 		skb->ip_summed = CHECKSUM_PARTIAL;
-		recalculate_partial_csum = 1;
+		recalculate_partial_csum = true;
 	}
 
 	/* A non-CHECKSUM_PARTIAL SKB does not require setup. */
 	if (skb->ip_summed != CHECKSUM_PARTIAL)
 		return 0;
 
-	if (skb->protocol != htons(ETH_P_IP))
-		goto out;
-
-	iph = (void *)skb->data;
-
-	switch (iph->protocol) {
-	case IPPROTO_TCP:
-		if (!skb_partial_csum_set(skb, 4 * iph->ihl,
-					  offsetof(struct tcphdr, check)))
-			goto out;
-
-		if (recalculate_partial_csum) {
-			struct tcphdr *tcph = tcp_hdr(skb);
-			tcph->check = ~csum_tcpudp_magic(iph->saddr, iph->daddr,
-							 skb->len - iph->ihl*4,
-							 IPPROTO_TCP, 0);
-		}
-		break;
-	case IPPROTO_UDP:
-		if (!skb_partial_csum_set(skb, 4 * iph->ihl,
-					  offsetof(struct udphdr, check)))
-			goto out;
-
-		if (recalculate_partial_csum) {
-			struct udphdr *udph = udp_hdr(skb);
-			udph->check = ~csum_tcpudp_magic(iph->saddr, iph->daddr,
-							 skb->len - iph->ihl*4,
-							 IPPROTO_UDP, 0);
-		}
-		break;
-	default:
-		if (net_ratelimit())
-			pr_err("Attempting to checksum a non-TCP/UDP packet, dropping a protocol %d packet\n",
-			       iph->protocol);
-		goto out;
-	}
-
-	err = 0;
-
-out:
-	return err;
+	return skb_checksum_setup(skb, recalculate_partial_csum);
 }
 
 static int handle_incoming_queue(struct netfront_queue *queue,
@@ -944,6 +909,7 @@ static int handle_incoming_queue(struct netfront_queue *queue,
 
 		/* Ethernet work: Delayed to here as it peeks the header. */
 		skb->protocol = eth_type_trans(skb, queue->info->netdev);
+		skb_reset_network_header(skb);
 
 		if (checksum_setup(queue->info->netdev, skb)) {
 			kfree_skb(skb);
@@ -1072,8 +1038,8 @@ static int xennet_change_mtu(struct net_device *dev, int mtu)
 	return 0;
 }
 
-static struct rtnl_link_stats64 *xennet_get_stats64(struct net_device *dev,
-						    struct rtnl_link_stats64 *tot)
+static void xennet_get_stats64(struct net_device *dev,
+			       struct rtnl_link_stats64 *tot)
 {
 	struct netfront_info *np = netdev_priv(dev);
 	int cpu;
@@ -1104,8 +1070,6 @@ static struct rtnl_link_stats64 *xennet_get_stats64(struct net_device *dev,
 
 	tot->rx_errors  = dev->stats.rx_errors;
 	tot->tx_dropped = dev->stats.tx_dropped;
-
-	return tot;
 }
 
 static void xennet_release_tx_bufs(struct netfront_queue *queue)
@@ -1179,6 +1143,15 @@ static netdev_features_t xennet_fix_features(struct net_device *dev,
 			features &= ~NETIF_F_SG;
 	}
 
+	if (features & NETIF_F_IPV6_CSUM) {
+		if (xenbus_scanf(XBT_NIL, np->xbdev->otherend,
+				 "feature-ipv6-csum-offload", "%d", &val) < 0)
+			val = 0;
+
+		if (!val)
+			features &= ~NETIF_F_IPV6_CSUM;
+	}
+
 	if (features & NETIF_F_TSO) {
 		if (xenbus_scanf(XBT_NIL, np->xbdev->otherend,
 				 "feature-gso-tcpv4", "%d", &val) < 0)
@@ -1186,6 +1159,15 @@ static netdev_features_t xennet_fix_features(struct net_device *dev,
 
 		if (!val)
 			features &= ~NETIF_F_TSO;
+	}
+
+	if (features & NETIF_F_TSO6) {
+		if (xenbus_scanf(XBT_NIL, np->xbdev->otherend,
+				 "feature-gso-tcpv6", "%d", &val) < 0)
+			val = 0;
+
+		if (!val)
+			features &= ~NETIF_F_TSO6;
 	}
 
 	return features;
@@ -1246,10 +1228,11 @@ static void xennet_poll_controller(struct net_device *dev)
 #endif
 
 static const struct net_device_ops xennet_netdev_ops = {
+	.ndo_size	     = sizeof(struct net_device_ops),
 	.ndo_open            = xennet_open,
 	.ndo_stop            = xennet_close,
 	.ndo_start_xmit      = xennet_start_xmit,
-	.ndo_change_mtu	     = xennet_change_mtu,
+	.extended.ndo_change_mtu = xennet_change_mtu,
 	.ndo_get_stats64     = xennet_get_stats64,
 	.ndo_set_mac_address = eth_mac_addr,
 	.ndo_validate_addr   = eth_validate_addr,
@@ -1297,7 +1280,9 @@ static struct net_device *xennet_create_dev(struct xenbus_device *dev)
 
 	netdev->features        = NETIF_F_IP_CSUM | NETIF_F_RXCSUM |
 				  NETIF_F_GSO_ROBUST;
-	netdev->hw_features	= NETIF_F_IP_CSUM | NETIF_F_SG | NETIF_F_TSO;
+	netdev->hw_features	= NETIF_F_SG |
+				  NETIF_F_IPV6_CSUM |
+				  NETIF_F_TSO | NETIF_F_TSO6;
 
 	/*
          * Assume that all hw features are available for now. This set
@@ -1308,6 +1293,8 @@ static struct net_device *xennet_create_dev(struct xenbus_device *dev)
 	netdev->features |= netdev->hw_features;
 
 	SET_ETHTOOL_OPS(netdev, &xennet_ethtool_ops);
+	netdev->extended->min_mtu = ETH_MIN_MTU;
+	netdev->extended->max_mtu = XEN_NETIF_MAX_TX_SIZE;
 	SET_NETDEV_DEV(netdev, &dev->dev);
 
 	netif_set_gso_max_size(netdev, XEN_NETIF_MAX_TX_SIZE - MAX_TCP_HEADER);
@@ -1316,6 +1303,7 @@ static struct net_device *xennet_create_dev(struct xenbus_device *dev)
 
 	netif_carrier_off(netdev);
 
+	xenbus_switch_state(dev, XenbusStateInitialising);
 	return netdev;
 
  exit:
@@ -1904,6 +1892,19 @@ again:
 		goto abort_transaction;
 	}
 
+	err = xenbus_write(xbt, dev->nodename, "feature-gso-tcpv6", "1");
+	if (err) {
+		message = "writing feature-gso-tcpv6";
+		goto abort_transaction;
+	}
+
+	err = xenbus_write(xbt, dev->nodename, "feature-ipv6-csum-offload",
+			   "1");
+	if (err) {
+		message = "writing feature-ipv6-csum-offload";
+		goto abort_transaction;
+	}
+
 	err = xenbus_transaction_end(xbt, 0);
 	if (err) {
 		if (err == -EAGAIN)
@@ -2015,10 +2016,12 @@ static void netback_changed(struct xenbus_device *dev,
 		break;
 
 	case XenbusStateClosed:
+		wake_up_all(&module_unload_q);
 		if (dev->state == XenbusStateClosed)
 			break;
 		/* Missed the backend's CLOSING state -- fallthrough */
 	case XenbusStateClosing:
+		wake_up_all(&module_unload_q);
 		xenbus_frontend_closed(dev);
 		break;
 	}
@@ -2148,6 +2151,20 @@ static int xennet_remove(struct xenbus_device *dev)
 	struct netfront_info *info = dev_get_drvdata(&dev->dev);
 
 	dev_dbg(&dev->dev, "%s\n", dev->nodename);
+
+	if (xenbus_read_driver_state(dev->otherend) != XenbusStateClosed) {
+		xenbus_switch_state(dev, XenbusStateClosing);
+		wait_event(module_unload_q,
+			   xenbus_read_driver_state(dev->otherend) ==
+			   XenbusStateClosing);
+
+		xenbus_switch_state(dev, XenbusStateClosed);
+		wait_event(module_unload_q,
+			   xenbus_read_driver_state(dev->otherend) ==
+			   XenbusStateClosed ||
+			   xenbus_read_driver_state(dev->otherend) ==
+			   XenbusStateUnknown);
+	}
 
 	xennet_disconnect_backend(info);
 
