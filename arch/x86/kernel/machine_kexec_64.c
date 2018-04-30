@@ -234,6 +234,14 @@ int machine_kexec_prepare(struct kimage *image)
 	if (result)
 		return result;
 
+#ifdef CONFIG_KAISER
+	/*
+	 * The second page of control_code_page may be corrupted by the
+	 * PTI code, so just clear the page for safety.
+	 */
+	clear_page(image->control_code_page + PAGE_SIZE);
+#endif
+
 	/* update purgatory as needed */
 	result = arch_update_purgatory(image);
 	if (result)
@@ -273,11 +281,11 @@ void machine_kexec(struct kimage *image)
 		/*
 		 * We need to put APICs in legacy mode so that we can
 		 * get timer interrupts in second kernel. kexec/kdump
-		 * paths already have calls to disable_IO_APIC() in
-		 * one form or other. kexec jump path also need
-		 * one.
+		 * paths already have calls to restore_boot_irq_mode()
+		 * in one form or other. kexec jump path also need one.
 		 */
-		disable_IO_APIC();
+		clear_IO_APIC();
+		restore_boot_irq_mode();
 #endif
 	}
 
