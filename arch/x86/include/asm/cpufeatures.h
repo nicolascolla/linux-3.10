@@ -207,6 +207,8 @@
 
 #define X86_FEATURE_MBA		( 7*32+18) /* Memory Bandwidth Allocation */
 #define X86_FEATURE_IBP_DISABLE ( 7*32+21) /* Old AMD Indirect Branch Predictor Disable */
+#define X86_FEATURE_SPEC_STORE_BYPASS_DISABLE	(7*32+23) /* "" Disable Speculative Store Bypass. */
+#define X86_FEATURE_AMD_SSBD			(7*32+24) /* "" AMD SSBD implementation */
 
 /* Virtualization flags: Linux defined, word 8 */
 #define X86_FEATURE_TPR_SHADOW  (8*32+ 0) /* Intel TPR Shadow */
@@ -311,16 +313,18 @@
 #define X86_FEATURE_SPEC_CTRL		(18*32+26) /* Speculation Control (IBRS + IBPB) */
 #define X86_FEATURE_INTEL_STIBP		(18*32+27) /* Single Thread Indirect Branch Predictors */
 #define X86_FEATURE_ARCH_CAPABILITIES	(18*32+29) /* IA32_ARCH_CAPABILITIES MSR (Intel) */
+#define X86_FEATURE_SSBD		(18*32+31) /* Speculative Store Bypass Disable */
 
 /*
  * BUG word(s)
  */
-#define X86_BUG(x)		(NCAPINTS*32 + (x))
+#define X86_BUG(x)			(NCAPINTS*32 + (x))
 
-#define X86_BUG_F00F		X86_BUG(0) /* Intel F00F */
-#define X86_BUG_FDIV		X86_BUG(1) /* FPU FDIV */
-#define X86_BUG_COMA		X86_BUG(2) /* Cyrix 6x86 coma */
-#define X86_BUG_AMD_TLB_MMATCH	X86_BUG(3) /* AMD Erratum 383 */
-#define X86_BUG_AMD_APIC_C1E	X86_BUG(4) /* AMD Erratum 400 */
+#define X86_BUG_F00F			X86_BUG(0) /* Intel F00F */
+#define X86_BUG_FDIV			X86_BUG(1) /* FPU FDIV */
+#define X86_BUG_COMA			X86_BUG(2) /* Cyrix 6x86 coma */
+#define X86_BUG_AMD_TLB_MMATCH		X86_BUG(3) /* AMD Erratum 383 */
+#define X86_BUG_AMD_APIC_C1E		X86_BUG(4) /* AMD Erratum 400 */
+#define X86_BUG_SPEC_STORE_BYPASS	X86_BUG(17) /* CPU is affected by speculative store bypass attack */
 
 #endif /* _ASM_X86_CPUFEATURES_H */
