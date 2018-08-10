@@ -43,6 +43,7 @@
 #include <linux/kthread.h>
 #include <linux/semaphore.h>
 #include <linux/uaccess.h>
+#include <linux/nospec.h>
 #include <scsi/scsi_host.h>
 
 #include "aacraid.h"
@@ -582,8 +583,10 @@ static int aac_send_raw_srb(struct aac_dev* dev, void __user * arg)
 
 	chn = user_srbcmd->channel;
 	if (chn < AAC_MAX_BUSES && user_srbcmd->id < AAC_MAX_TARGETS &&
-		dev->hba_map[chn][user_srbcmd->id].devtype ==
+		dev->hba_map[array_index_nospec(chn, AAC_MAX_BUSES)][array_index_nospec(user_srbcmd->id, AAC_MAX_TARGETS)].devtype ==
 		AAC_DEVTYPE_NATIVE_RAW) {
+		u32 id = array_index_nospec(user_srbcmd->id, AAC_MAX_TARGETS);
+		chn = array_index_nospec(chn, AAC_MAX_BUSES);
 		is_native_device = 1;
 		hbacmd = (struct aac_hba_cmd_req *)srbfib->hw_fib_va;
 		memset(hbacmd, 0, 96);	/* sizeof(*hbacmd) is not necessary */
@@ -602,7 +605,7 @@ static int aac_send_raw_srb(struct aac_dev* dev, void __user * arg)
 			break;
 		}
 		hbacmd->lun[1] = cpu_to_le32(user_srbcmd->lun);
-		hbacmd->it_nexus = dev->hba_map[chn][user_srbcmd->id].rmw_nexus;
+		hbacmd->it_nexus = dev->hba_map[chn][id].rmw_nexus;
 
 		/*
 		 * we fill in reply_qid later in aac_src_deliver_message
@@ -700,9 +703,11 @@ static int aac_send_raw_srb(struct aac_dev* dev, void __user * arg)
 			byte_count += sg_count[i];
 		}
 
-		if (usg32->count > 0)	/* embedded sglist */
-			hbacmd->sge[usg32->count-1].flags =
-				cpu_to_le32(0x40000000);
+		if (usg32->count > 0) {	/* embedded sglist */
+			u32 idx = array_index_nospec(usg32->count - 1,
+						     HBA_MAX_SG_SEPARATE + 2);
+			hbacmd->sge[idx].flags = cpu_to_le32(0x40000000);
+		}
 		hbacmd->data_length = cpu_to_le32(byte_count);
 
 		status = aac_hba_send(HBA_IU_TYPE_SCSI_CMD_REQ, srbfib,

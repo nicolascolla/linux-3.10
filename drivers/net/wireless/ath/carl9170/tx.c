@@ -40,6 +40,7 @@
 #include <linux/slab.h>
 #include <linux/module.h>
 #include <linux/etherdevice.h>
+#include <linux/nospec.h>
 #include <net/mac80211.h>
 #include "carl9170.h"
 #include "hw.h"
@@ -117,6 +118,7 @@ static struct ieee80211_sta *__carl9170_get_tx_sta(struct ar9170 *ar,
 
 	if (WARN_ON_ONCE(vif_id >= AR9170_MAX_VIRTUAL_MAC))
 		return NULL;
+	vif_id = array_index_nospec(vif_id, AR9170_MAX_VIRTUAL_MAC);
 
 	vif = rcu_dereference(ar->vif_priv[vif_id].vif);
 	if (unlikely(!vif))

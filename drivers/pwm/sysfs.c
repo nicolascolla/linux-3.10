@@ -22,6 +22,7 @@
 #include <linux/slab.h>
 #include <linux/kdev_t.h>
 #include <linux/pwm.h>
+#include <linux/nospec.h>
 
 struct pwm_export {
 	struct device child;
@@ -283,6 +284,7 @@ static ssize_t pwm_unexport_store(struct device *parent,
 
 	if (hwpwm >= chip->npwm)
 		return -ENODEV;
+	hwpwm = array_index_nospec(hwpwm, chip->npwm);
 
 	ret = pwm_unexport_child(parent, &chip->pwms[hwpwm]);
 

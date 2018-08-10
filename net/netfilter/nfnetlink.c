@@ -22,6 +22,7 @@
 #include <linux/sockios.h>
 #include <linux/net.h>
 #include <linux/skbuff.h>
+#include <linux/nospec.h>
 #include <asm/uaccess.h>
 #include <net/sock.h>
 #include <linux/init.h>
@@ -100,6 +101,7 @@ static inline const struct nfnetlink_subsystem *nfnetlink_get_subsys(u_int16_t t
 
 	if (subsys_id >= NFNL_SUBSYS_COUNT)
 		return NULL;
+	subsys_id = array_index_nospec(subsys_id, NFNL_SUBSYS_COUNT);
 
 	return rcu_dereference(table[subsys_id].subsys);
 }
@@ -111,6 +113,7 @@ nfnetlink_find_client(u_int16_t type, const struct nfnetlink_subsystem *ss)
 
 	if (cb_id >= ss->cb_count)
 		return NULL;
+	cb_id = array_index_nospec(cb_id, ss->cb_count);
 
 	return &ss->cb[cb_id];
 }
@@ -179,11 +182,13 @@ replay:
 
 	{
 		int min_len = nlmsg_total_size(sizeof(struct nfgenmsg));
-		u_int8_t cb_id = NFNL_MSG_TYPE(nlh->nlmsg_type);
+		u_int8_t cb_id = array_index_nospec(NFNL_MSG_TYPE(nlh->nlmsg_type),
+						    ss->cb_count);
 		struct nlattr *cda[ss->cb[cb_id].attr_count + 1];
 		struct nlattr *attr = (void *)nlh + min_len;
 		int attrlen = nlh->nlmsg_len - min_len;
-		__u8 subsys_id = NFNL_SUBSYS_ID(type);
+		__u8 subsys_id = array_index_nospec(NFNL_SUBSYS_ID(type),
+						    ARRAY_SIZE(table));
 
 		err = nla_parse(cda, ss->cb[cb_id].attr_count,
 				attr, attrlen, ss->cb[cb_id].policy);
@@ -280,6 +285,8 @@ static void nfnetlink_rcv_batch(struct sk_buff *skb, struct nlmsghdr *nlh,
 
 	if (subsys_id >= NFNL_SUBSYS_COUNT)
 		return netlink_ack(skb, nlh, -EINVAL);
+	subsys_id = array_index_nospec(subsys_id, NFNL_SUBSYS_COUNT);
+
 replay:
 	status = 0;
 
@@ -475,7 +482,7 @@ static void nfnetlink_rcv(struct sk_buff *skb)
 static int nfnetlink_bind(int group)
 {
 	const struct nfnetlink_subsystem *ss;
-	int type = nfnl_group2type[group];
+	int type = nfnl_group2type[array_index_nospec(group, NFNLGRP_MAX+1)];
 
 	rcu_read_lock();
 	ss = nfnetlink_get_subsys(type);

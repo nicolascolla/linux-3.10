@@ -28,6 +28,7 @@
 #include <linux/pci.h>
 #include <linux/module.h>
 #include <linux/mutex.h>
+#include <linux/nospec.h>
 #include <sound/core.h>
 #include <sound/pcm.h>
 #include <sound/tlv.h>
@@ -2867,6 +2868,8 @@ static int apply_quirk(struct snd_ac97 *ac97, int type)
 		return 0;
 	else if (type >= ARRAY_SIZE(applicable_quirks))
 		return -EINVAL;
+	type = array_index_nospec(type, ARRAY_SIZE(applicable_quirks));
+
 	if (applicable_quirks[type].func)
 		return applicable_quirks[type].func(ac97);
 	return 0;

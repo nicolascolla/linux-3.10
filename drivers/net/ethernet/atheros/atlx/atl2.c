@@ -46,6 +46,7 @@
 #include <linux/timer.h>
 #include <linux/types.h>
 #include <linux/workqueue.h>
+#include <linux/nospec.h>
 
 #include "atl2.h"
 
@@ -2001,8 +2002,9 @@ static int atl2_set_eeprom(struct net_device *netdev,
 		 * need read/modify/write of last changed EEPROM word
 		 * only the first byte of the word is being modified
 		 */
-		if (!atl2_read_eeprom(hw, last_dword * 4,
-					&(eeprom_buff[last_dword - first_dword]))) {
+		int idx = array_index_nospec(last_dword - first_dword, max_len);
+
+		if (!atl2_read_eeprom(hw, last_dword * 4, &(eeprom_buff[idx]))) {
 			ret_val = -EIO;
 			goto out;
 		}

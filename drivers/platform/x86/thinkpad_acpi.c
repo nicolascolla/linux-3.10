@@ -61,6 +61,7 @@
 #include <linux/freezer.h>
 #include <linux/delay.h>
 #include <linux/slab.h>
+#include <linux/nospec.h>
 
 #include <linux/nvram.h>
 #include <linux/proc_fs.h>
@@ -5455,7 +5456,7 @@ static int led_get_status(const unsigned int led)
 	/* not reached */
 }
 
-static int led_set_status(const unsigned int led,
+static int led_set_status(unsigned int led,
 			  const enum led_status_t ledstatus)
 {
 	/* off, on, blink. Index is led_status_t */
@@ -5503,8 +5504,10 @@ static int led_set_status(const unsigned int led,
 		rc = -ENXIO;
 	}
 
-	if (!rc)
+	if (!rc) {
+		led = array_index_nospec(led, TPACPI_LED_NUMLEDS);
 		tpacpi_led_state_cache[led] = ledstatus;
+	}
 
 	return rc;
 }

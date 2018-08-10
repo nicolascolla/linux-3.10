@@ -7,6 +7,7 @@
 
 #include <linux/slab.h>
 #include <linux/module.h>
+#include <linux/nospec.h>
 
 #include "md.h"
 #include "raid1.h"
@@ -1351,6 +1352,7 @@ static int parse_raid_params(struct raid_set *rs, struct dm_arg_set *as,
 				rs->ti->error = "Invalid write_mostly index given";
 				return -EINVAL;
 			}
+			value = array_index_nospec(value, rs->md.raid_disks);
 
 			write_mostly++;
 			set_bit(WriteMostly, &rs->dev[value].rdev.flags);
@@ -3061,6 +3063,8 @@ static int raid_ctr(struct dm_target *ti, unsigned int argc, char **argv)
 		ti->error = "Invalid number of supplied raid devices";
 		return -EINVAL;
 	}
+	num_raid_devs = array_index_nospec(num_raid_devs - 1,
+					   MAX_RAID_DEVICES) + 1;
 
 	rs = raid_set_alloc(ti, rt, num_raid_devs);
 	if (IS_ERR(rs))

@@ -67,6 +67,7 @@
 #include <linux/ieee80211.h>
 #include <linux/etherdevice.h>
 #include <linux/tcp.h>
+#include <linux/nospec.h>
 #include <net/ip.h>
 #include <net/ipv6.h>
 
@@ -253,9 +254,11 @@ void iwl_mvm_set_tx_cmd(struct iwl_mvm *mvm, struct sk_buff *skb,
 	}
 
 	/* Default to 0 (BE) when tid_spec is set to IWL_TID_NON_QOS */
-	if (tx_cmd->tid_tspec < IWL_MAX_TID_COUNT)
-		ac = tid_to_mac80211_ac[tx_cmd->tid_tspec];
-	else
+	if (tx_cmd->tid_tspec < IWL_MAX_TID_COUNT) {
+		u8 tid_tspec = array_index_nospec(tx_cmd->tid_tspec,
+						  IWL_MAX_TID_COUNT);
+		ac = tid_to_mac80211_ac[tid_tspec];
+	} else
 		ac = tid_to_mac80211_ac[0];
 
 	tx_flags |= iwl_mvm_bt_coex_tx_prio(mvm, hdr, info, ac) <<
@@ -715,6 +718,7 @@ static int iwl_mvm_tx_tso(struct iwl_mvm *mvm, struct sk_buff *skb,
 	tid = *qc & IEEE80211_QOS_CTL_TID_MASK;
 	if (WARN_ON_ONCE(tid >= IWL_MAX_TID_COUNT))
 		return -EINVAL;
+	tid = array_index_nospec(tid, IWL_MAX_TID_COUNT);
 
 	/*
 	 * Do not build AMSDU for IPv6 with extension headers.

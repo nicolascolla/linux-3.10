@@ -34,6 +34,7 @@
 #define pr_fmt(fmt) "%s:%s: " fmt, KBUILD_MODNAME, __func__
 
 #include <linux/export.h>
+#include <linux/nospec.h>
 #include <net/netlink.h>
 #include <net/net_namespace.h>
 #include <net/sock.h>
@@ -55,7 +56,7 @@ int rdma_nl_chk_listeners(unsigned int group)
 }
 EXPORT_SYMBOL(rdma_nl_chk_listeners);
 
-static bool is_nl_msg_valid(unsigned int type, unsigned int op)
+static bool is_nl_msg_valid_nospec(unsigned int *type, unsigned int *op)
 {
 	static const unsigned int max_num_ops[RDMA_NL_NUM_CLIENTS] = {
 		[RDMA_NL_RDMA_CM] = RDMA_NL_RDMA_CM_NUM_OPS,
@@ -70,30 +71,35 @@ static bool is_nl_msg_valid(unsigned int type, unsigned int op)
 	 */
 	BUILD_BUG_ON(RDMA_NL_NUM_CLIENTS != 6);
 
-	if (type >= RDMA_NL_NUM_CLIENTS)
+	if (*type >= RDMA_NL_NUM_CLIENTS)
 		return false;
+	*type = array_index_nospec(*type, RDMA_NL_NUM_CLIENTS);
 
-	return (op < max_num_ops[type]) ? true : false;
+	if (*op >= max_num_ops[*type])
+		return false;
+	*op = array_index_nospec(*op, max_num_ops[*type]);
+
+	return true;
 }
 
-static bool is_nl_valid(unsigned int type, unsigned int op)
+static bool is_nl_valid_nospec(unsigned int *type, unsigned int *op)
 {
 	const struct rdma_nl_cbs *cb_table;
 
-	if (!is_nl_msg_valid(type, op))
+	if (!is_nl_msg_valid_nospec(type, op))
 		return false;
 
-	cb_table = rdma_nl_types[type].cb_table;
+	cb_table = rdma_nl_types[*type].cb_table;
 #ifdef CONFIG_MODULES
 	if (!cb_table) {
 		mutex_unlock(&rdma_nl_mutex);
-		request_module("rdma-netlink-subsys-%d", type);
+		request_module("rdma-netlink-subsys-%d", *type);
 		mutex_lock(&rdma_nl_mutex);
-		cb_table = rdma_nl_types[type].cb_table;
+		cb_table = rdma_nl_types[*type].cb_table;
 	}
 #endif
 
-	if (!cb_table || (!cb_table[op].dump && !cb_table[op].doit))
+	if (!cb_table || (!cb_table[*op].dump && !cb_table[*op].doit))
 		return false;
 	return true;
 }
@@ -101,8 +107,10 @@ static bool is_nl_valid(unsigned int type, unsigned int op)
 void rdma_nl_register(unsigned int index,
 		      const struct rdma_nl_cbs cb_table[])
 {
+	unsigned int op = 0;
+
 	mutex_lock(&rdma_nl_mutex);
-	if (!is_nl_msg_valid(index, 0)) {
+	if (!is_nl_msg_valid_nospec(&index, &op)) {
 		/*
 		 * All clients are not interesting in success/failure of
 		 * this call. They want to see the print to error log and
@@ -165,7 +173,7 @@ static int rdma_nl_rcv_msg(struct sk_buff *skb, struct nlmsghdr *nlh)
 	unsigned int op = RDMA_NL_GET_OP(type);
 	const struct rdma_nl_cbs *cb_table;
 
-	if (!is_nl_valid(index, op))
+	if (!is_nl_valid_nospec(&index, &op))
 		return -EINVAL;
 
 	cb_table = rdma_nl_types[index].cb_table;

@@ -20,6 +20,7 @@
 #include <linux/log2.h>
 #include <linux/pm_runtime.h>
 #include <linux/badblocks.h>
+#include <linux/nospec.h>
 
 #include "blk.h"
 
@@ -70,6 +71,7 @@ struct hd_struct *disk_get_part(struct gendisk *disk, int partno)
 
 	ptbl = rcu_dereference(disk->part_tbl);
 	if (likely(partno < ptbl->len)) {
+		partno = array_index_nospec(partno, ptbl->len);
 		part = rcu_dereference(ptbl->part[partno]);
 		if (part)
 			get_device(part_to_dev(part));

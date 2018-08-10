@@ -13,6 +13,7 @@
 #include <linux/netdevice.h>
 #include <linux/skbuff.h>
 #include <linux/printk.h>
+#include <linux/nospec.h>
 
 #include <net/protocol.h>
 #include <net/ipv6.h>
@@ -198,6 +199,7 @@ static struct sk_buff **ipv6_gro_receive(struct sk_buff **head,
 		skb_reset_transport_header(skb);
 		__skb_push(skb, skb_gro_offset(skb));
 
+		proto = array_index_nospec(proto, MAX_INET_PROTOS);
 		ops = rcu_dereference(inet6_offloads[proto]);
 		if (!ops || !ops->callbacks.gro_receive)
 			goto out_unlock;

@@ -40,6 +40,7 @@
 #include <linux/crc16.h>
 #include <linux/dax.h>
 #include <linux/cleancache.h>
+#include <linux/nospec.h>
 #include <asm/uaccess.h>
 
 #include <linux/kthread.h>
@@ -5361,6 +5362,7 @@ static int ext4_quota_on(struct super_block *sb, int type, int format_id,
 	if (path->dentry->d_sb != sb)
 		return -EXDEV;
 	/* Journaling quota? */
+	type = array_index_nospec(type, MAXQUOTAS);
 	if (EXT4_SB(sb)->s_qf_names[type]) {
 		/* Quotafile not in fs root? */
 		if (path->dentry->d_parent != sb->s_root)
@@ -5405,6 +5407,7 @@ static int ext4_quota_enable(struct super_block *sb, int type, int format_id,
 
 	BUG_ON(!EXT4_HAS_RO_COMPAT_FEATURE(sb, EXT4_FEATURE_RO_COMPAT_QUOTA));
 
+	type = array_index_nospec(type, MAXQUOTAS);
 	if (!qf_inums[type])
 		return -EPERM;
 
@@ -5468,9 +5471,11 @@ static int ext4_quota_on_sysfile(struct super_block *sb, int type,
 
 static int ext4_quota_off(struct super_block *sb, int type)
 {
-	struct inode *inode = sb_dqopt(sb)->files[type];
+	struct inode *inode;
 	handle_t *handle;
 
+	type = array_index_nospec(type, MAXQUOTAS);
+	inode = sb_dqopt(sb)->files[type];
 	/* Force all delayed allocation blocks to be allocated.
 	 * Caller already holds s_umount sem */
 	if (test_opt(sb, DELALLOC))
@@ -5511,14 +5516,18 @@ static int ext4_quota_off_sysfile(struct super_block *sb, int type)
 static ssize_t ext4_quota_read(struct super_block *sb, int type, char *data,
 			       size_t len, loff_t off)
 {
-	struct inode *inode = sb_dqopt(sb)->files[type];
+	struct inode *inode;
 	ext4_lblk_t blk = off >> EXT4_BLOCK_SIZE_BITS(sb);
 	int err = 0;
 	int offset = off & (sb->s_blocksize - 1);
 	int tocopy;
 	size_t toread;
 	struct buffer_head *bh;
-	loff_t i_size = i_size_read(inode);
+	loff_t i_size;
+
+	type = array_index_nospec(type, MAXQUOTAS);
+	inode = sb_dqopt(sb)->files[type];
+	i_size = i_size_read(inode);
 
 	if (off > i_size)
 		return 0;
@@ -5549,12 +5558,15 @@ static ssize_t ext4_quota_read(struct super_block *sb, int type, char *data,
 static ssize_t ext4_quota_write(struct super_block *sb, int type,
 				const char *data, size_t len, loff_t off)
 {
-	struct inode *inode = sb_dqopt(sb)->files[type];
+	struct inode *inode;
 	ext4_lblk_t blk = off >> EXT4_BLOCK_SIZE_BITS(sb);
 	int err = 0;
 	int offset = off & (sb->s_blocksize - 1);
 	struct buffer_head *bh;
 	handle_t *handle = journal_current_handle();
+
+	type = array_index_nospec(type, MAXQUOTAS);
+	inode = sb_dqopt(sb)->files[type];
 
 	if (EXT4_SB(sb)->s_journal && !handle) {
 		ext4_msg(sb, KERN_WARNING, "Quota write (off=%llu, len=%llu)"

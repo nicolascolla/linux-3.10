@@ -24,6 +24,7 @@
 
 /* Bluetooth HCI event handling. */
 
+#include <linux/nospec.h>
 #include <asm/unaligned.h>
 
 #include <net/bluetooth/bluetooth.h>
@@ -641,8 +642,10 @@ static void hci_cc_read_local_ext_features(struct hci_dev *hdev,
 	if (hdev->max_page < rp->max_page)
 		hdev->max_page = rp->max_page;
 
-	if (rp->page < HCI_MAX_PAGES)
-		memcpy(hdev->features[rp->page], rp->features, 8);
+	if (rp->page < HCI_MAX_PAGES) {
+		u8 page = array_index_nospec(rp->page, HCI_MAX_PAGES);
+		memcpy(hdev->features[page], rp->features, 8);
+	}
 }
 
 static void hci_cc_read_flow_control_mode(struct hci_dev *hdev,
@@ -3681,8 +3684,10 @@ static void hci_remote_ext_features_evt(struct hci_dev *hdev,
 	if (!conn)
 		goto unlock;
 
-	if (ev->page < HCI_MAX_PAGES)
-		memcpy(conn->features[ev->page], ev->features, 8);
+	if (ev->page < HCI_MAX_PAGES) {
+		u8 page = array_index_nospec(ev->page, HCI_MAX_PAGES);
+		memcpy(conn->features[page], ev->features, 8);
+	}
 
 	if (!ev->status && ev->page == 0x01) {
 		struct inquiry_entry *ie;

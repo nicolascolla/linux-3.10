@@ -72,6 +72,7 @@
 #include <linux/ip.h>
 #include <linux/if_arp.h>
 #include <linux/time.h>
+#include <linux/nospec.h>
 #include <net/mac80211.h>
 #include <net/ieee80211_radiotap.h>
 #include <net/tcp.h>
@@ -875,6 +876,7 @@ iwl_mvm_ampdu_check_trigger(struct iwl_mvm *mvm, struct ieee80211_vif *vif,
 					   ieee80211_vif_to_wdev(vif), trig))
 		return;
 
+	tid = array_index_nospec(tid, IWL_MAX_TID_COUNT + 1);
 	switch (action) {
 	case IEEE80211_AMPDU_TX_OPERATIONAL: {
 		struct iwl_mvm_sta *mvmsta = iwl_mvm_sta_from_mac80211(sta);

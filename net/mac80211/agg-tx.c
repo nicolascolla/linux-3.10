@@ -17,6 +17,7 @@
 #include <linux/ieee80211.h>
 #include <linux/slab.h>
 #include <linux/export.h>
+#include <linux/nospec.h>
 #include <net/mac80211.h>
 #include "ieee80211_i.h"
 #include "driver-ops.h"
@@ -588,6 +589,7 @@ int ieee80211_start_tx_ba_session(struct ieee80211_sta *pubsta, u16 tid,
 
 	if (WARN_ON(tid >= IEEE80211_FIRST_TSPEC_TSID))
 		return -EINVAL;
+	tid = array_index_nospec(tid, IEEE80211_FIRST_TSPEC_TSID);
 
 	ht_dbg(sdata, "Open BA session requested for %pM tid %u\n",
 	       pubsta->addr, tid);
@@ -767,6 +769,7 @@ ieee80211_lookup_tid_tx(struct ieee80211_sub_if_data *sdata,
 		       tid, IEEE80211_NUM_TIDS);
 		return NULL;
 	}
+	tid = array_index_nospec(tid, IEEE80211_NUM_TIDS);
 
 	*sta = sta_info_get_bss(sdata, ra);
 	if (!*sta) {
@@ -833,6 +836,7 @@ int ieee80211_stop_tx_ba_session(struct ieee80211_sta *pubsta, u16 tid)
 
 	if (tid >= IEEE80211_NUM_TIDS)
 		return -EINVAL;
+	tid = array_index_nospec(tid, IEEE80211_NUM_TIDS);
 
 	spin_lock_bh(&sta->lock);
 	tid_tx = rcu_dereference_protected_tid_tx(sta, tid);

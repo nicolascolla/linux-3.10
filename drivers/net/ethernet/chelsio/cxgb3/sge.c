@@ -38,6 +38,7 @@
 #include <linux/dma-mapping.h>
 #include <linux/slab.h>
 #include <linux/prefetch.h>
+#include <linux/nospec.h>
 #include <net/arp.h>
 #include "common.h"
 #include "regs.h"
@@ -2082,9 +2083,10 @@ static void rx_eth(struct adapter *adap, struct sge_rspq *rq,
 	struct cpl_rx_pkt *p = (struct cpl_rx_pkt *)(skb->data + pad);
 	struct sge_qset *qs = rspq_to_qset(rq);
 	struct port_info *pi;
+	unsigned char iff = array_index_nospec((unsigned char)p->iff, MAX_NPORTS);
 
 	skb_pull(skb, sizeof(*p) + pad);
-	skb->protocol = eth_type_trans(skb, adap->port[p->iff]);
+	skb->protocol = eth_type_trans(skb, adap->port[iff]);
 	pi = netdev_priv(skb->dev);
 	if ((skb->dev->features & NETIF_F_RXCSUM) && p->csum_valid &&
 	    p->csum == htons(0xffff) && !p->fragment) {

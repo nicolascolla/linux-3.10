@@ -73,6 +73,7 @@
 #include <linux/slab.h>
 #include <linux/export.h>
 #include <linux/notifier.h>
+#include <linux/nospec.h>
 #include <net/net_namespace.h>
 #include <net/ip.h>
 #include <net/protocol.h>
@@ -1329,6 +1330,7 @@ int fib_table_lookup(struct fib_table *tb, const struct flowi4 *flp,
 		 */
 		if (index >= (1ul << n->bits))
 			break;
+		index = array_index_nospec(index, 1ul << n->bits);
 
 		/* we have found a leaf. Prefixes have already been compared */
 		if (IS_LEAF(n))

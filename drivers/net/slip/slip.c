@@ -84,6 +84,7 @@
 #include <linux/init.h>
 #include <linux/slab.h>
 #include <linux/workqueue.h>
+#include <linux/nospec.h>
 #include "slip.h"
 #ifdef CONFIG_INET
 #include <linux/ip.h>
@@ -633,7 +634,7 @@ static void sl_uninit(struct net_device *dev)
 /* Hook the destructor so we can free slip devices at the right point in time */
 static void sl_free_netdev(struct net_device *dev)
 {
-	int i = dev->base_addr;
+	int i = array_index_nospec(dev->base_addr, slip_maxdev);
 
 	slip_devs[i] = NULL;
 }

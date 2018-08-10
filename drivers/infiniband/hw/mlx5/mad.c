@@ -32,6 +32,7 @@
 
 #include <linux/mlx5/cmd.h>
 #include <linux/mlx5/vport.h>
+#include <linux/nospec.h>
 #include <rdma/ib_mad.h>
 #include <rdma/ib_smi.h>
 #include <rdma/ib_pma.h>
@@ -45,10 +46,14 @@ enum {
 static bool can_do_mad_ifc(struct mlx5_ib_dev *dev, u8 port_num,
 			   struct ib_mad *in_mad)
 {
+	u8 idx;
+
 	if (in_mad->mad_hdr.mgmt_class != IB_MGMT_CLASS_SUBN_LID_ROUTED &&
 	    in_mad->mad_hdr.mgmt_class != IB_MGMT_CLASS_SUBN_DIRECTED_ROUTE)
 		return true;
-	return dev->mdev->port_caps[port_num - 1].has_smi;
+
+	idx = array_index_nospec(port_num - 1, MLX5_MAX_PORTS);
+	return dev->mdev->port_caps[idx].has_smi;
 }
 
 int mlx5_MAD_IFC(struct mlx5_ib_dev *dev, int ignore_mkey, int ignore_bkey,

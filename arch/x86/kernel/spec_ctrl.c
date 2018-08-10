@@ -781,10 +781,12 @@ static ssize_t retp_enabled_write(struct file *file,
 		if (ibp_disabled) {
 			sync_all_cpus_ibp(true);
 			ibp_disabled = false;
-		} else if (ibrs_mode == IBRS_ENABLED)
+		} else if (ibrs_mode == IBRS_ENABLED) {
 			clear_spec_ctrl_pcp();
-		else if (ibrs_mode == IBRS_ENABLED_ALWAYS)
+			sync_all_cpus_spec_ctrl();
+		} else if (ibrs_mode == IBRS_ENABLED_ALWAYS) {
 			set_spec_ctrl_pcp_ibrs_user();
+		}
 	}
 
 out_unlock:

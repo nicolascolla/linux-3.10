@@ -23,6 +23,7 @@
 #include <linux/debugfs.h>
 #include <linux/crypto.h>
 #include <linux/scatterlist.h>
+#include <linux/nospec.h>
 #include <crypto/b128ops.h>
 
 #include <net/bluetooth/bluetooth.h>
@@ -850,6 +851,8 @@ static u8 get_auth_method(struct smp_chan *smp, u8 local_io, u8 remote_io)
 	if (local_io > SMP_IO_KEYBOARD_DISPLAY ||
 	    remote_io > SMP_IO_KEYBOARD_DISPLAY)
 		return JUST_CFM;
+	local_io = array_index_nospec(local_io, SMP_IO_KEYBOARD_DISPLAY + 1);
+	remote_io = array_index_nospec(remote_io, SMP_IO_KEYBOARD_DISPLAY + 1);
 
 	if (test_bit(SMP_FLAG_SC, &smp->flags))
 		return sc_method[remote_io][local_io];

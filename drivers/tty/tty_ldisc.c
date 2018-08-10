@@ -19,6 +19,7 @@
 #include <linux/seq_file.h>
 #include <linux/uaccess.h>
 #include <linux/ratelimit.h>
+#include <linux/nospec.h>
 
 #undef LDISC_DEBUG_HANGUP
 
@@ -159,6 +160,7 @@ static struct tty_ldisc *tty_ldisc_get(struct tty_struct *tty, int disc)
 
 	if (disc < N_TTY || disc >= NR_LDISCS)
 		return ERR_PTR(-EINVAL);
+	disc = array_index_nospec(disc, NR_LDISCS);
 
 	/*
 	 * Get the ldisc ops - we may need to request them to be loaded

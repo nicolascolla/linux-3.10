@@ -28,6 +28,7 @@
 #include <linux/slab.h>
 #include <linux/srcu.h>
 #include <linux/export.h>
+#include <linux/nospec.h>
 #include <trace/events/kvm.h>
 #include "irq.h"
 
@@ -41,6 +42,8 @@ int kvm_irq_map_gsi(struct kvm *kvm,
 	irq_rt = srcu_dereference_check(kvm->irq_routing, &kvm->irq_srcu,
 					lockdep_is_held(&kvm->irq_lock));
 	if (irq_rt && gsi < irq_rt->nr_rt_entries) {
+		gsi = array_index_nospec(gsi, irq_rt->nr_rt_entries);
+
 		hlist_for_each_entry(e, &irq_rt->map[gsi], link) {
 			entries[n] = *e;
 			++n;
@@ -142,12 +145,13 @@ static int setup_routing_entry(struct kvm *kvm,
 {
 	int r = -EINVAL;
 	struct kvm_kernel_irq_routing_entry *ei;
+	u32 gsi = array_index_nospec(ue->gsi, KVM_MAX_IRQ_ROUTES);
 
 	/*
 	 * Do not allow GSI to be mapped to the same irqchip more than once.
 	 * Allow only one to one mapping between GSI and non-irqchip routing.
 	 */
-	hlist_for_each_entry(ei, &rt->map[ue->gsi], link)
+	hlist_for_each_entry(ei, &rt->map[gsi], link)
 		if (ei->type != KVM_IRQ_ROUTING_IRQCHIP ||
 		    ue->type != KVM_IRQ_ROUTING_IRQCHIP ||
 		    ue->u.irqchip.irqchip == ei->irqchip.irqchip)
@@ -158,10 +162,15 @@ static int setup_routing_entry(struct kvm *kvm,
 	r = kvm_set_routing_entry(kvm, e, ue);
 	if (r)
 		goto out;
-	if (e->type == KVM_IRQ_ROUTING_IRQCHIP)
-		rt->chip[e->irqchip.irqchip][e->irqchip.pin] = e->gsi;
+	if (e->type == KVM_IRQ_ROUTING_IRQCHIP) {
+		unsigned irqchip = array_index_nospec(e->irqchip.irqchip,
+						      KVM_NR_IRQCHIPS);
+		unsigned pin = array_index_nospec(e->irqchip.pin,
+						  KVM_IRQCHIP_NUM_PINS);
+		rt->chip[irqchip][pin] = e->gsi;
+	}
 
-	hlist_add_head(&e->link, &rt->map[e->gsi]);
+	hlist_add_head(&e->link, &rt->map[gsi]);
 	r = 0;
 out:
 	return r;

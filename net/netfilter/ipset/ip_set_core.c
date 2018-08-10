@@ -16,6 +16,7 @@
 #include <linux/skbuff.h>
 #include <linux/spinlock.h>
 #include <linux/rculist.h>
+#include <linux/nospec.h>
 #include <net/netlink.h>
 #include <net/net_namespace.h>
 #include <net/netns/generic.h>
@@ -1856,14 +1857,17 @@ ip_set_sockfn_get(struct sock *sk, int optval, void __user *user, int *len)
 	case IP_SET_OP_GET_BYINDEX: {
 		struct ip_set_req_get_set *req_get = data;
 		struct ip_set *set;
+		ip_set_id_t index;
 
 		if (*len != sizeof(struct ip_set_req_get_set) ||
 		    req_get->set.index >= inst->ip_set_max) {
 			ret = -EINVAL;
 			goto done;
 		}
+		index = array_index_nospec(req_get->set.index, inst->ip_set_max);
+
 		nfnl_lock(NFNL_SUBSYS_IPSET);
-		set = ip_set(inst, req_get->set.index);
+		set = ip_set(inst, index);
 		strncpy(req_get->set.name, set ? set->name : "",
 			IPSET_MAXNAMELEN);
 		nfnl_unlock(NFNL_SUBSYS_IPSET);

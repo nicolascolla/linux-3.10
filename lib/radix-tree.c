@@ -35,6 +35,7 @@
 #include <linux/bitops.h>
 #include <linux/rcupdate.h>
 #include <linux/preempt_mask.h>		/* in_interrupt() */
+#include <linux/nospec.h>
 
 
 /* Number of nodes in fully populated tree of given height */
@@ -93,7 +94,7 @@ static inline bool is_sibling_entry(struct radix_tree_node *parent, void *node)
 static inline unsigned long get_slot_offset(struct radix_tree_node *parent,
 						 void **slot)
 {
-	return slot - parent->slots;
+	return array_index_nospec(slot - parent->slots, RADIX_TREE_MAP_SIZE);
 }
 
 static unsigned int radix_tree_descend(struct radix_tree_node *parent,
@@ -944,7 +945,11 @@ void **radix_tree_next_chunk(struct radix_tree_root *root,
 						offset + 1);
 			else
 				while (++offset	< RADIX_TREE_MAP_SIZE) {
-					void *slot = node->slots[offset];
+					void *slot;
+
+					offset = array_index_nospec(offset,
+							RADIX_TREE_MAP_SIZE);
+					slot = node->slots[offset];
 					if (is_sibling_entry(node, slot))
 						continue;
 					if (slot)
@@ -957,6 +962,8 @@ void **radix_tree_next_chunk(struct radix_tree_root *root,
 				return NULL;
 			if (offset == RADIX_TREE_MAP_SIZE)
 				goto restart;
+			offset = array_index_nospec(offset,
+						    RADIX_TREE_MAP_SIZE);
 			child = rcu_dereference_raw(node->slots[offset]);
 		}
 

@@ -14,6 +14,7 @@
 #include <linux/wireless.h>
 #include <linux/uaccess.h>
 #include <linux/export.h>
+#include <linux/nospec.h>
 #include <net/cfg80211.h>
 #include <net/iw_handler.h>
 #include <net/netlink.h>
@@ -739,6 +740,8 @@ static int ioctl_standard_iw_point(struct iw_point *iwp, unsigned int cmd,
 		else if (IW_IS_SET(cmd) && (iwp->length != 0)) {
 			char essid[IW_ESSID_MAX_SIZE + 1];
 			unsigned int len;
+			u16 idx;
+
 			len = iwp->length * descr->token_size;
 
 			if (len > IW_ESSID_MAX_SIZE)
@@ -748,7 +751,9 @@ static int ioctl_standard_iw_point(struct iw_point *iwp, unsigned int cmd,
 			if (err)
 				return -EFAULT;
 
-			if (essid[iwp->length - 1] == '\0')
+			idx = array_index_nospec(iwp->length - 1,
+						 IW_ESSID_MAX_SIZE);
+			if (essid[idx] == '\0')
 				essid_compat = 1;
 		}
 		break;

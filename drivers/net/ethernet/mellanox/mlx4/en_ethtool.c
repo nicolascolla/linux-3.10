@@ -39,6 +39,7 @@
 #include <linux/in.h>
 #include <net/ip.h>
 #include <linux/bitmap.h>
+#include <linux/nospec.h>
 
 #include "mlx4_en.h"
 #include "en_port.h"
@@ -1523,6 +1524,8 @@ static int mlx4_en_flow_replace(struct net_device *dev,
 	struct mlx4_spec_list *spec, *tmp_spec;
 	u32 qpn;
 	u64 reg_id;
+	u32 location;
+	u64 ring_cookie;
 
 	struct mlx4_net_trans_rule rule = {
 		.queue_mode = MLX4_NET_TRANS_Q_FIFO,
@@ -1546,7 +1549,10 @@ static int mlx4_en_flow_replace(struct net_device *dev,
 				cmd->fs.ring_cookie);
 			return -EINVAL;
 		}
-		qpn = priv->rss_map.qps[cmd->fs.ring_cookie].qpn;
+		ring_cookie = array_index_nospec(cmd->fs.ring_cookie,
+						 priv->rx_ring_num);
+
+		qpn = priv->rss_map.qps[ring_cookie].qpn;
 		if (!qpn) {
 			en_warn(priv, "rxnfc: RX ring (%llu) is inactive\n",
 				cmd->fs.ring_cookie);
@@ -1558,7 +1564,8 @@ static int mlx4_en_flow_replace(struct net_device *dev,
 	if (err)
 		goto out_free_list;
 
-	loc_rule = &priv->ethtool_rules[cmd->fs.location];
+	location = array_index_nospec(cmd->fs.location, MAX_NUM_OF_FS_RULES);
+	loc_rule = &priv->ethtool_rules[location];
 	if (loc_rule->id) {
 		err = mlx4_flow_detach(priv->mdev->dev, loc_rule->id);
 		if (err) {
@@ -1596,11 +1603,13 @@ static int mlx4_en_flow_detach(struct net_device *dev,
 	int err = 0;
 	struct ethtool_flow_id *rule;
 	struct mlx4_en_priv *priv = netdev_priv(dev);
+	u32 location;
 
 	if (cmd->fs.location >= MAX_NUM_OF_FS_RULES)
 		return -EINVAL;
+	location = array_index_nospec(cmd->fs.location, MAX_NUM_OF_FS_RULES);
 
-	rule = &priv->ethtool_rules[cmd->fs.location];
+	rule = &priv->ethtool_rules[location];
 	if (!rule->id) {
 		err =  -ENOENT;
 		goto out;
@@ -1629,6 +1638,7 @@ static int mlx4_en_get_flow(struct net_device *dev, struct ethtool_rxnfc *cmd,
 
 	if (loc < 0 || loc >= MAX_NUM_OF_FS_RULES)
 		return -EINVAL;
+	loc = array_index_nospec(loc, MAX_NUM_OF_FS_RULES);
 
 	rule = &priv->ethtool_rules[loc];
 	if (rule->id)
@@ -1719,13 +1729,18 @@ static int mlx4_en_set_rxnfc(struct net_device *dev, struct ethtool_rxnfc *cmd)
 	return err;
 }
 
+static int mlx4_en_get_max_num_rx_rings(struct net_device *dev)
+{
+	return min_t(int, num_online_cpus(), MAX_RX_RINGS);
+}
+
 static void mlx4_en_get_channels(struct net_device *dev,
 				 struct ethtool_channels *channel)
 {
 	struct mlx4_en_priv *priv = netdev_priv(dev);
 
-	channel->max_rx = MAX_RX_RINGS;
-	channel->max_tx = MLX4_EN_MAX_TX_RING_P_UP;
+	channel->max_rx = mlx4_en_get_max_num_rx_rings(dev);
+	channel->max_tx = priv->mdev->profile.max_num_tx_rings_p_up;
 
 	channel->rx_count = priv->rx_ring_num;
 	channel->tx_count = priv->tx_ring_num[TX] /
@@ -1754,7 +1769,7 @@ static int mlx4_en_set_channels(struct net_device *dev,
 	mutex_lock(&mdev->state_lock);
 	xdp_count = priv->tx_ring_num[TX_XDP] ? channel->rx_count : 0;
 	if (channel->tx_count * priv->prof->num_up + xdp_count >
-	    MAX_TX_RINGS) {
+	    priv->mdev->profile.max_num_tx_rings_p_up * priv->prof->num_up) {
 		err = -EINVAL;
 		en_err(priv,
 		       "Total number of TX and XDP rings (%d) exceeds the maximum supported (%d)\n",

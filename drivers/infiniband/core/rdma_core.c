@@ -32,6 +32,7 @@
 
 #include <linux/file.h>
 #include <linux/anon_inodes.h>
+#include <linux/nospec.h>
 #include <rdma/ib_verbs.h>
 #include <rdma/uverbs_types.h>
 #include <linux/rcupdate.h>
@@ -47,6 +48,7 @@ int uverbs_ns_idx(u16 *id, unsigned int ns_count)
 
 	if (ret >= ns_count)
 		return -EINVAL;
+	ret = array_index_nospec(ret, ns_count);
 
 	*id &= ~UVERBS_ID_NS_MASK;
 	return ret;
@@ -66,6 +68,7 @@ const struct uverbs_object_spec *uverbs_get_object(const struct ib_device *ibdev
 
 	if (object >= objects->num_objects)
 		return NULL;
+	object = array_index_nospec(object, objects->num_objects);
 
 	return objects->objects[object];
 }
@@ -82,6 +85,7 @@ const struct uverbs_method_spec *uverbs_get_method(const struct uverbs_object_sp
 	methods = object->method_buckets[ret];
 	if (method >= methods->num_methods)
 		return NULL;
+	method = array_index_nospec(method, methods->num_methods);
 
 	return methods->methods[method];
 }

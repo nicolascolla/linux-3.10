@@ -504,6 +504,7 @@ static int ping_sendmsg(struct kiocb *iocb, struct sock *sk, struct msghdr *msg,
 		return -EFAULT;
 	if (!ping_supported(user_icmph.type, user_icmph.code))
 		return -EINVAL;
+	user_icmph.type = ICMP_ECHO; /* nospec */
 
 	/*
 	 *	Get and verify the address.

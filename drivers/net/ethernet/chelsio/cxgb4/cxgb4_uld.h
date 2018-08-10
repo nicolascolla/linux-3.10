@@ -40,6 +40,7 @@
 #include <linux/skbuff.h>
 #include <linux/inetdevice.h>
 #include <linux/atomic.h>
+#include <linux/nospec.h>
 #include "cxgb4.h"
 
 #define MAX_ULD_QSETS 16
@@ -142,7 +143,11 @@ static inline void *lookup_tid(const struct tid_info *t, unsigned int tid)
 
 static inline void *lookup_atid(const struct tid_info *t, unsigned int atid)
 {
-	return atid < t->natids ? t->atid_tab[atid].data : NULL;
+	if (atid >= t->natids)
+		return NULL;
+	atid = array_index_nospec(atid, t->natids);
+
+	return t->atid_tab[atid].data;
 }
 
 static inline void *lookup_stid(const struct tid_info *t, unsigned int stid)

@@ -271,7 +271,7 @@ struct cma_device *cma_enum_devices_by_ibdev(cma_device_filter	filter,
 int cma_get_default_gid_type(struct cma_device *cma_dev,
 			     unsigned int port)
 {
-	if (!rdma_is_port_valid(cma_dev->device, port))
+	if (!rdma_is_port_valid_nospec_uint(cma_dev->device, &port))
 		return -EINVAL;
 
 	return cma_dev->default_gid_type[port - rdma_start_port(cma_dev->device)];
@@ -283,7 +283,7 @@ int cma_set_default_gid_type(struct cma_device *cma_dev,
 {
 	unsigned long supported_gids;
 
-	if (!rdma_is_port_valid(cma_dev->device, port))
+	if (!rdma_is_port_valid_nospec_uint(cma_dev->device, &port))
 		return -EINVAL;
 
 	supported_gids = roce_gid_type_mask_support(cma_dev->device, port);
@@ -299,7 +299,7 @@ int cma_set_default_gid_type(struct cma_device *cma_dev,
 
 int cma_get_default_roce_tos(struct cma_device *cma_dev, unsigned int port)
 {
-	if (!rdma_is_port_valid(cma_dev->device, port))
+	if (!rdma_is_port_valid_nospec_uint(cma_dev->device, &port))
 		return -EINVAL;
 
 	return cma_dev->default_roce_tos[port - rdma_start_port(cma_dev->device)];
@@ -308,7 +308,7 @@ int cma_get_default_roce_tos(struct cma_device *cma_dev, unsigned int port)
 int cma_set_default_roce_tos(struct cma_device *cma_dev, unsigned int port,
 			     u8 default_roce_tos)
 {
-	if (!rdma_is_port_valid(cma_dev->device, port))
+	if (!rdma_is_port_valid_nospec_uint(cma_dev->device, &port))
 		return -EINVAL;
 
 	cma_dev->default_roce_tos[port - rdma_start_port(cma_dev->device)] =

@@ -29,6 +29,7 @@
 #include <linux/mutex.h>
 #include <linux/module.h>
 #include <linux/delay.h>
+#include <linux/nospec.h>
 #include <sound/rawmidi.h>
 #include <sound/info.h>
 #include <sound/control.h>
@@ -584,6 +585,7 @@ int snd_rawmidi_info_select(struct snd_card *card, struct snd_rawmidi_info *info
 	struct snd_rawmidi *rmidi;
 	struct snd_rawmidi_str *pstr;
 	struct snd_rawmidi_substream *substream;
+	int stream;
 
 	mutex_lock(&register_mutex);
 	rmidi = snd_rawmidi_search(card, info->device);
@@ -592,7 +594,9 @@ int snd_rawmidi_info_select(struct snd_card *card, struct snd_rawmidi_info *info
 		return -ENXIO;
 	if (info->stream < 0 || info->stream > 1)
 		return -EINVAL;
-	pstr = &rmidi->streams[info->stream];
+	stream = array_index_nospec(info->stream, 2);
+
+	pstr = &rmidi->streams[stream];
 	if (pstr->substream_count == 0)
 		return -ENOENT;
 	if (info->subdevice >= pstr->substream_count)

@@ -45,6 +45,7 @@
 #include <linux/tcp.h>
 #include <linux/init.h>
 #include <linux/io.h>
+#include <linux/nospec.h>
 #include <asm/irq.h>
 #include <asm/byteorder.h>
 #include <net/netevent.h>
@@ -623,6 +624,7 @@ struct ib_qp *i40iw_get_qp(struct ib_device *device, int qpn)
 
 	if ((qpn < IW_FIRST_QPN) || (qpn >= iwdev->max_qp))
 		return NULL;
+	qpn = array_index_nospec(qpn, iwdev->max_qp);
 
 	return &iwdev->qp_table[qpn]->ibqp;
 }

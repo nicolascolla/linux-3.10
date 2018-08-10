@@ -17,6 +17,7 @@
  * this warranty disclaimer.
  */
 
+#include <linux/nospec.h>
 #include "decl.h"
 #include "ioctl.h"
 #include "util.h"
@@ -648,6 +649,7 @@ int mwifiex_11n_rx_reorder_pkt(struct mwifiex_private *priv,
 		else
 			pkt_index = (seq_num+MAX_TID_VALUE) - start_win;
 
+		pkt_index = array_index_nospec(pkt_index, tbl->win_size);
 		if (tbl->rx_reorder_ptr[pkt_index]) {
 			ret = -1;
 			goto done;

@@ -1,5 +1,6 @@
 #define pr_fmt(fmt) "xen:" KBUILD_MODNAME ": " fmt
 
+#include <linux/nospec.h>
 #include <linux/notifier.h>
 
 #include <xen/xen.h>
@@ -49,6 +50,7 @@ static void vcpu_hotplug(unsigned int cpu)
 {
 	if (!cpu_possible(cpu))
 		return;
+	cpu = array_index_nospec(cpu, num_possible_cpus());
 
 	switch (vcpu_online(cpu)) {
 	case 1:

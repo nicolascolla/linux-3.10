@@ -1417,6 +1417,7 @@ struct htt_tx_fetch_ind {
 static inline void *
 ath10k_htt_get_tx_fetch_ind_resp_ids(struct htt_tx_fetch_ind *ind)
 {
+	barrier_nospec();
 	return (void *)&ind->records[le16_to_cpu(ind->num_records)];
 }
 

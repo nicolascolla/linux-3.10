@@ -29,6 +29,7 @@
 #include <linux/types.h>
 #include <linux/uaccess.h>
 #include <linux/thermal.h>
+#include <linux/nospec.h>
 #include <acpi/acpi_bus.h>
 #include <acpi/acpi_drivers.h>
 #include <linux/platform_device.h>
@@ -192,6 +193,7 @@ static int fan_set_state_acpi4(struct acpi_device *device, unsigned long state)
 
 	if (state >= fan->fps_count)
 		return -EINVAL;
+	state = array_index_nospec(state, fan->fps_count);
 
 	status = acpi_execute_simple_method(device->handle, "_FSL",
 					    fan->fps[state].control);

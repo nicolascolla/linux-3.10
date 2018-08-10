@@ -49,6 +49,7 @@
 #include <linux/sched/deadline.h>
 #include <linux/timer.h>
 #include <linux/freezer.h>
+#include <linux/nospec.h>
 
 #include <asm/uaccess.h>
 
@@ -106,6 +107,7 @@ static const int hrtimer_clock_to_base_table[MAX_CLOCKS] = {
 
 static inline int hrtimer_clockid_to_base(clockid_t clock_id)
 {
+	clock_id = array_index_nospec(clock_id, MAX_CLOCKS);
 	return hrtimer_clock_to_base_table[clock_id];
 }
 

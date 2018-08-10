@@ -49,6 +49,7 @@
 #include <linux/sched.h>
 #include <linux/semaphore.h>
 #include <linux/slab.h>
+#include <linux/nospec.h>
 
 #include <asm/uaccess.h>
 
@@ -483,6 +484,8 @@ static ssize_t ib_umad_write(struct file *filp, const char __user *buf,
 		ret = -EINVAL;
 		goto err;
 	}
+	packet->mad.hdr.id = array_index_nospec(packet->mad.hdr.id,
+						IB_UMAD_MAX_AGENTS);
 
 	buf += hdr_size(file);
 
@@ -860,7 +863,13 @@ static int ib_umad_unreg_agent(struct ib_umad_file *file, u32 __user *arg)
 	mutex_lock(&file->port->file_mutex);
 	mutex_lock(&file->mutex);
 
-	if (id >= IB_UMAD_MAX_AGENTS || !__get_agent(file, id)) {
+	if (id >= IB_UMAD_MAX_AGENTS) {
+		ret = -EINVAL;
+		goto out;
+	}
+	id = array_index_nospec(id, IB_UMAD_MAX_AGENTS);
+
+	if (!__get_agent(file, id)) {
 		ret = -EINVAL;
 		goto out;
 	}

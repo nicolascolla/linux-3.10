@@ -45,6 +45,7 @@
 #include <linux/cdev.h>
 #include <linux/anon_inodes.h>
 #include <linux/slab.h>
+#include <linux/nospec.h>
 
 #include <asm/uaccess.h>
 
@@ -696,8 +697,14 @@ static ssize_t ib_uverbs_write(struct file *filp, const char __user *buf,
 		 IB_USER_VERBS_CMD_FLAGS_MASK) >> IB_USER_VERBS_CMD_FLAGS_SHIFT;
 
 	if (!flags) {
-		if (command >= ARRAY_SIZE(uverbs_cmd_table) ||
-		    !uverbs_cmd_table[command]) {
+		if (command >= ARRAY_SIZE(uverbs_cmd_table)) {
+			ret = -EINVAL;
+			goto out;
+		}
+		command = array_index_nospec(command,
+					     ARRAY_SIZE(uverbs_cmd_table));
+
+		if (!uverbs_cmd_table[command]) {
 			ret = -EINVAL;
 			goto out;
 		}
@@ -718,8 +725,14 @@ static ssize_t ib_uverbs_write(struct file *filp, const char __user *buf,
 		struct ib_udata uhw;
 		size_t written_count = count;
 
-		if (command >= ARRAY_SIZE(uverbs_ex_cmd_table) ||
-		    !uverbs_ex_cmd_table[command]) {
+		if (command >= ARRAY_SIZE(uverbs_ex_cmd_table)) {
+			ret = -ENOSYS;
+			goto out;
+		}
+		command = array_index_nospec(command,
+					     ARRAY_SIZE(uverbs_ex_cmd_table));
+
+		if (!uverbs_ex_cmd_table[command]) {
 			ret = -ENOSYS;
 			goto out;
 		}

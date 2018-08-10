@@ -28,6 +28,7 @@
 #include <linux/uaccess.h>
 #include <linux/vfio.h>
 #include <linux/vgaarb.h>
+#include <linux/nospec.h>
 
 #include "vfio_pci_private.h"
 
@@ -639,6 +640,7 @@ static long vfio_pci_ioctl(void *device_data,
 		struct vfio_region_info info;
 		struct vfio_info_cap caps = { .buf = NULL, .size = 0 };
 		int i, ret;
+		u32 index;
 
 		minsz = offsetofend(struct vfio_region_info, offset);
 
@@ -657,7 +659,8 @@ static long vfio_pci_ioctl(void *device_data,
 			break;
 		case VFIO_PCI_BAR0_REGION_INDEX ... VFIO_PCI_BAR5_REGION_INDEX:
 			info.offset = VFIO_PCI_INDEX_TO_OFFSET(info.index);
-			info.size = pci_resource_len(pdev, info.index);
+			index = array_index_nospec(info.index, DEVICE_COUNT_RESOURCE);
+			info.size = pci_resource_len(pdev, index);
 			if (!info.size) {
 				info.flags = 0;
 				break;
@@ -665,7 +668,8 @@ static long vfio_pci_ioctl(void *device_data,
 
 			info.flags = VFIO_REGION_INFO_FLAG_READ |
 				     VFIO_REGION_INFO_FLAG_WRITE;
-			if (vdev->bar_mmap_supported[info.index]) {
+			index = array_index_nospec(info.index, PCI_STD_RESOURCE_END + 1);
+			if (vdev->bar_mmap_supported[index]) {
 				info.flags |= VFIO_REGION_INFO_FLAG_MMAP;
 				if (info.index == vdev->msix_bar) {
 					ret = msix_sparse_mmap_cap(vdev, &caps);
@@ -684,7 +688,8 @@ static long vfio_pci_ioctl(void *device_data,
 			info.flags = 0;
 
 			/* Report the BAR size, not the ROM size */
-			info.size = pci_resource_len(pdev, info.index);
+			index = array_index_nospec(info.index, DEVICE_COUNT_RESOURCE);
+			info.size = pci_resource_len(pdev, index);
 			if (!info.size)
 				break;
 
@@ -718,6 +723,7 @@ static long vfio_pci_ioctl(void *device_data,
 				return -EINVAL;
 
 			i = info.index - VFIO_PCI_NUM_REGIONS;
+			i = array_index_nospec(i, vdev->num_regions);
 
 			info.offset = VFIO_PCI_INDEX_TO_OFFSET(info.index);
 			info.size = vdev->region[i].size;

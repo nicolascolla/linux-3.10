@@ -147,6 +147,7 @@ static int can_create(struct net *net, struct socket *sock, int protocol,
 
 	if (protocol < 0 || protocol >= CAN_NPROTO)
 		return -EINVAL;
+	protocol = array_index_nospec(protocol, CAN_NPROTO);
 
 	if (!net_eq(net, &init_net))
 		return -EAFNOSUPPORT;

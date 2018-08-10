@@ -23,6 +23,7 @@
 #include <linux/mutex.h>
 #include <linux/idr.h>
 #include <linux/slab.h>
+#include <linux/nospec.h>
 
 #include <scsi/scsi.h>
 #include <scsi/scsi_cmnd.h>
@@ -604,10 +605,15 @@ ch_open(struct inode *inode, struct file *file)
 }
 
 static int
-ch_checkrange(scsi_changer *ch, unsigned int type, unsigned int unit)
+ch_checkrange_nospec(scsi_changer *ch, unsigned int *type, unsigned int unit)
 {
-	if (type >= CH_TYPES  ||  unit >= ch->counts[type])
+	if (*type >= CH_TYPES)
 		return -1;
+	*type = array_index_nospec(*type, CH_TYPES);
+
+	if (unit >= ch->counts[*type])
+		return -1;
+
 	return 0;
 }
 
@@ -666,7 +672,7 @@ static long ch_ioctl(struct file *file,
 		if (copy_from_user(&pos, argp, sizeof (pos)))
 			return -EFAULT;
 
-		if (0 != ch_checkrange(ch, pos.cp_type, pos.cp_unit)) {
+		if (0 != ch_checkrange_nospec(ch, &pos.cp_type, pos.cp_unit)) {
 			DPRINTK("CHIOPOSITION: invalid parameter\n");
 			return -EBADSLT;
 		}
@@ -685,8 +691,8 @@ static long ch_ioctl(struct file *file,
 		if (copy_from_user(&mv, argp, sizeof (mv)))
 			return -EFAULT;
 
-		if (0 != ch_checkrange(ch, mv.cm_fromtype, mv.cm_fromunit) ||
-		    0 != ch_checkrange(ch, mv.cm_totype,   mv.cm_tounit  )) {
+		if (0 != ch_checkrange_nospec(ch, &mv.cm_fromtype, mv.cm_fromunit) ||
+		    0 != ch_checkrange_nospec(ch, &mv.cm_totype,   mv.cm_tounit  )) {
 			DPRINTK("CHIOMOVE: invalid parameter\n");
 			return -EBADSLT;
 		}
@@ -707,9 +713,9 @@ static long ch_ioctl(struct file *file,
 		if (copy_from_user(&mv, argp, sizeof (mv)))
 			return -EFAULT;
 
-		if (0 != ch_checkrange(ch, mv.ce_srctype,  mv.ce_srcunit ) ||
-		    0 != ch_checkrange(ch, mv.ce_fdsttype, mv.ce_fdstunit) ||
-		    0 != ch_checkrange(ch, mv.ce_sdsttype, mv.ce_sdstunit)) {
+		if (0 != ch_checkrange_nospec(ch, &mv.ce_srctype,  mv.ce_srcunit ) ||
+		    0 != ch_checkrange_nospec(ch, &mv.ce_fdsttype, mv.ce_fdstunit) ||
+		    0 != ch_checkrange_nospec(ch, &mv.ce_sdsttype, mv.ce_sdstunit)) {
 			DPRINTK("CHIOEXCHANGE: invalid parameter\n");
 			return -EBADSLT;
 		}
@@ -733,6 +739,7 @@ static long ch_ioctl(struct file *file,
 			return -EFAULT;
 		if (ces.ces_type < 0 || ces.ces_type >= CH_TYPES)
 			return -EINVAL;
+		ces.ces_type = array_index_nospec(ces.ces_type, CH_TYPES);
 
 		return ch_gstatus(ch, ces.ces_type, ces.ces_data);
 	}
@@ -748,7 +755,7 @@ static long ch_ioctl(struct file *file,
 		if (copy_from_user(&cge, argp, sizeof (cge)))
 			return -EFAULT;
 
-		if (0 != ch_checkrange(ch, cge.cge_type, cge.cge_unit))
+		if (0 != ch_checkrange_nospec(ch, &cge.cge_type, cge.cge_unit))
 			return -EINVAL;
 		elem = ch->firsts[cge.cge_type] + cge.cge_unit;
 
@@ -831,7 +838,7 @@ static long ch_ioctl(struct file *file,
 		if (copy_from_user(&csv, argp, sizeof(csv)))
 			return -EFAULT;
 
-		if (0 != ch_checkrange(ch, csv.csv_type, csv.csv_unit)) {
+		if (0 != ch_checkrange_nospec(ch, &csv.csv_type, csv.csv_unit)) {
 			DPRINTK("CHIOSVOLTAG: invalid parameter\n");
 			return -EBADSLT;
 		}
@@ -884,6 +891,7 @@ static long ch_ioctl_compat(struct file * file,
 			return -EFAULT;
 		if (ces32.ces_type < 0 || ces32.ces_type >= CH_TYPES)
 			return -EINVAL;
+		ces32.ces_type = array_index_nospec(ces32.ces_type, CH_TYPES);
 
 		data = compat_ptr(ces32.ces_data);
 		return ch_gstatus(ch, ces32.ces_type, data);

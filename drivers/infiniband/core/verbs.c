@@ -43,6 +43,7 @@
 #include <linux/slab.h>
 #include <linux/in.h>
 #include <linux/in6.h>
+#include <linux/nospec.h>
 #include <net/addrconf.h>
 #include <linux/security.h>
 
@@ -1201,6 +1202,9 @@ int ib_modify_qp_is_ok(enum ib_qp_state cur_state, enum ib_qp_state next_state,
 	    next_state < 0 || next_state > IB_QPS_ERR)
 		return 0;
 
+	cur_state  = array_index_nospec(cur_state,  IB_QPS_ERR + 1);
+	next_state = array_index_nospec(next_state, IB_QPS_ERR + 1);
+
 	if (mask & IB_QP_CUR_STATE  &&
 	    cur_state != IB_QPS_RTR && cur_state != IB_QPS_RTS &&
 	    cur_state != IB_QPS_SQD && cur_state != IB_QPS_SQE)
@@ -1228,7 +1232,7 @@ int ib_resolve_eth_dmac(struct ib_device *device,
 	int           ret = 0;
 	struct ib_global_route *grh;
 
-	if (!rdma_is_port_valid(device, rdma_ah_get_port_num(ah_attr)))
+	if (!rdma_is_port_valid_nospec(device, &ah_attr->port_num));
 		return -EINVAL;
 
 	if (ah_attr->type != RDMA_AH_ATTR_TYPE_ROCE)

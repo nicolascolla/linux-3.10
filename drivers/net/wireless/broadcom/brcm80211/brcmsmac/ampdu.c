@@ -13,6 +13,7 @@
  * OF CONTRACT, NEGLIGENCE OR OTHER TORTIOUS ACTION, ARISING OUT OF OR IN
  * CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
  */
+#include <linux/nospec.h>
 #include <net/mac80211.h>
 
 #include "rate.h"
@@ -485,6 +486,7 @@ brcms_c_ampdu_tx_operational(struct brcms_c_info *wlc, u8 tid,
 	struct scb *scb = &wlc->pri_scb;
 	scb_ampdu = &scb->scb_ampdu;
 
+	tid = array_index_nospec(tid, AMPDU_MAX_SCB_TID);
 	if (!ampdu->ini_enable[tid]) {
 		brcms_err(wlc->hw->d11core, "%s: Rejecting tid %d\n",
 			  __func__, tid);
@@ -580,7 +582,8 @@ int brcms_c_ampdu_add_frame(struct brcms_ampdu_session *session,
 
 	if (ampdu_frames == 0) {
 		u8 plcp0, plcp3, is40, sgi, mcs;
-		uint fifo = le16_to_cpu(txh->TxFrameID) & TXFID_QUEUE_MASK;
+		uint fifo = array_index_nospec(le16_to_cpu(txh->TxFrameID) & TXFID_QUEUE_MASK,
+					       NUM_FFPLD_FIFO);
 		struct brcms_fifo_info *f = &ampdu->fifo_tb[fifo];
 
 		if (rr) {
@@ -661,6 +664,7 @@ void brcms_c_ampdu_finalize(struct brcms_ampdu_session *session)
 	/* Need to fix up last MPDU first to adjust AMPDU length */
 	txh = (struct d11txh *)last->data;
 	fifo = le16_to_cpu(txh->TxFrameID) & TXFID_QUEUE_MASK;
+	fifo = array_index_nospec(fifo, NUM_FFPLD_FIFO);
 	f = &ampdu->fifo_tb[fifo];
 
 	mcl = le16_to_cpu(txh->MacTxControlLow);
@@ -1099,6 +1103,7 @@ void brcms_c_ampdu_macaddr_upd(struct brcms_c_info *wlc)
 
 bool brcms_c_aggregatable(struct brcms_c_info *wlc, u8 tid)
 {
+	tid = array_index_nospec(tid, AMPDU_MAX_SCB_TID);
 	return wlc->ampdu->ini_enable[tid];
 }
 

@@ -2534,11 +2534,32 @@ static inline u8 rdma_end_port(const struct ib_device *device)
 	return rdma_cap_ib_switch(device) ? 0 : device->phys_port_cnt;
 }
 
-static inline int rdma_is_port_valid(const struct ib_device *device,
-				     unsigned int port)
+static inline int rdma_is_port_valid_nospec(const struct ib_device *device,
+					    u8 *port)
 {
-	return (port >= rdma_start_port(device) &&
-		port <= rdma_end_port(device));
+	if (*port < rdma_start_port(device) ||
+	    *port > rdma_end_port(device))
+		return 0;
+
+	*port = array_index_nospec(*port - rdma_start_port(device),
+				   rdma_end_port(device) - rdma_start_port(device) + 1);
+	*port += rdma_start_port(device);
+
+	return 1;
+}
+
+static inline int rdma_is_port_valid_nospec_uint(const struct ib_device *device,
+					    unsigned int *port)
+{
+	if (*port < rdma_start_port(device) ||
+	    *port > rdma_end_port(device))
+		return 0;
+
+	*port = array_index_nospec(*port - rdma_start_port(device),
+				   rdma_end_port(device) - rdma_start_port(device) + 1);
+	*port += rdma_start_port(device);
+
+	return 1;
 }
 
 static inline bool rdma_protocol_ib(const struct ib_device *device, u8 port_num)

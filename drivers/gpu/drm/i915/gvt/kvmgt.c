@@ -41,6 +41,7 @@
 #include <linux/kvm_host.h>
 #include <linux/vfio.h>
 #include <linux/mdev.h>
+#include <linux/nospec.h>
 
 #include "i915_drv.h"
 #include "gvt.h"
@@ -984,7 +985,7 @@ static long intel_vgpu_ioctl(struct mdev_device *mdev, unsigned int cmd,
 			break;
 		case VFIO_PCI_BAR0_REGION_INDEX:
 			info.offset = VFIO_PCI_INDEX_TO_OFFSET(info.index);
-			info.size = vgpu->cfg_space.bar[info.index].size;
+			info.size = vgpu->cfg_space.bar[VFIO_PCI_BAR0_REGION_INDEX].size;
 			if (!info.size) {
 				info.flags = 0;
 				break;
@@ -1039,7 +1040,8 @@ static long intel_vgpu_ioctl(struct mdev_device *mdev, unsigned int cmd,
 						vgpu->vdev.num_regions)
 					return -EINVAL;
 
-				i = info.index - VFIO_PCI_NUM_REGIONS;
+				i = array_index_nospec(info.index - VFIO_PCI_NUM_REGIONS,
+						       vgpu->vdev.num_regions);
 
 				info.offset =
 					VFIO_PCI_INDEX_TO_OFFSET(info.index);

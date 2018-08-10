@@ -24,6 +24,7 @@
 #include "mac.h"
 
 #include <linux/log2.h>
+#include <linux/nospec.h>
 
 #define HTT_RX_RING_SIZE HTT_RX_RING_SIZE_MAX
 #define HTT_RX_RING_FILL_LEVEL (((HTT_RX_RING_SIZE) / 2) - 1)
@@ -943,9 +944,10 @@ static char *ath10k_get_tid(struct ieee80211_hdr *hdr, char *out, size_t size)
 
 	qc = ieee80211_get_qos_ctl(hdr);
 	tid = *qc & IEEE80211_QOS_CTL_TID_MASK;
-	if (tid < 8)
+	if (tid < 8) {
+		tid = array_index_nospec(tid, 8);
 		snprintf(out, size, "tid %d (%s)", tid, tid_to_ac[tid]);
-	else
+	} else
 		snprintf(out, size, "tid %d", tid);
 
 	return out;
@@ -1730,7 +1732,6 @@ static void ath10k_htt_rx_tx_compl_ind(struct ath10k *ar,
 		 *  writer, you don't need extra locking to use these macro.
 		 */
 		if (!kfifo_put(&htt->txdone_fifo, &tx_done)) {
-			gmb();
 			ath10k_warn(ar, "txdone fifo overrun, msdu_id %d status %d\n",
 				    tx_done.msdu_id, tx_done.status);
 			ath10k_txrx_tx_unref(htt, &tx_done);
@@ -2404,8 +2405,10 @@ static void ath10k_htt_fetch_peer_stats(struct ath10k *ar,
 
 	sta = peer->sta;
 	for (i = 0; i < num_ppdu; i++) {
+		u8 idx = array_index_nospec(i * ppdu_len,
+					    skb->len - sizeof(struct htt_resp_hdr) + 1);
 		tx_stats = (struct htt_per_peer_tx_stats_ind *)
-			   (resp->peer_tx_stats.payload + i * ppdu_len);
+			   (resp->peer_tx_stats.payload + idx);
 
 		p_tx_stats->succ_bytes = __le32_to_cpu(tx_stats->succ_bytes);
 		p_tx_stats->retry_bytes = __le32_to_cpu(tx_stats->retry_bytes);
@@ -2430,6 +2433,7 @@ bool ath10k_htt_t2h_msg_handler(struct ath10k *ar, struct sk_buff *skb)
 	struct ath10k_htt *htt = &ar->htt;
 	struct htt_resp *resp = (struct htt_resp *)skb->data;
 	enum htt_t2h_msg_type type;
+	u8 msg_type;
 
 	/* confirm alignment */
 	if (!IS_ALIGNED((unsigned long)skb->data, 4))
@@ -2443,7 +2447,10 @@ bool ath10k_htt_t2h_msg_handler(struct ath10k *ar, struct sk_buff *skb)
 			   resp->hdr.msg_type, ar->htt.t2h_msg_types_max);
 		return true;
 	}
-	type = ar->htt.t2h_msg_types[resp->hdr.msg_type];
+	msg_type = array_index_nospec(resp->hdr.msg_type,
+				      ar->htt.t2h_msg_types_max);
+
+	type = ar->htt.t2h_msg_types[msg_type];
 
 	switch (type) {
 	case HTT_T2H_MSG_TYPE_VERSION_CONF: {

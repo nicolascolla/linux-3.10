@@ -41,6 +41,7 @@
 #include <linux/module.h>
 #include <linux/etherdevice.h>
 #include <linux/random.h>
+#include <linux/nospec.h>
 #include <net/mac80211.h>
 #include <net/cfg80211.h>
 #include "hw.h"
@@ -1418,7 +1419,7 @@ static int carl9170_op_ampdu_action(struct ieee80211_hw *hw,
 {
 	struct ieee80211_sta *sta = params->sta;
 	enum ieee80211_ampdu_mlme_action action = params->action;
-	u16 tid = params->tid;
+	u16 tid = array_index_nospec(params->tid, IEEE80211_NUM_TIDS);
 	u16 *ssn = &params->ssn;
 	struct ar9170 *ar = hw->priv;
 	struct carl9170_sta_info *sta_info = (void *) sta->drv_priv;

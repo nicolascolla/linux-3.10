@@ -21,6 +21,7 @@
 #include <linux/parser.h>
 #include <linux/string.h>
 #include <linux/err.h>
+#include <linux/nospec.h>
 #include <keys/user-type.h>
 #include <keys/trusted-type.h>
 #include <keys/encrypted-type.h>
@@ -775,6 +776,7 @@ static int encrypted_instantiate(struct key *key,
 
 	if (datalen <= 0 || datalen > 32767 || !prep->data)
 		return -EINVAL;
+	datalen = array_index_nospec(datalen, 32768);
 
 	datablob = kmalloc(datalen + 1, GFP_KERNEL);
 	if (!datablob)
@@ -836,6 +838,7 @@ static int encrypted_update(struct key *key, struct key_preparsed_payload *prep)
 		return -ENOKEY;
 	if (datalen <= 0 || datalen > 32767 || !prep->data)
 		return -EINVAL;
+	datalen = array_index_nospec(datalen, 32768);
 
 	buf = kmalloc(datalen + 1, GFP_KERNEL);
 	if (!buf)

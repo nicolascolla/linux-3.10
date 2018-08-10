@@ -63,6 +63,7 @@
  *
  *****************************************************************************/
 #include <linux/devcoredump.h>
+#include <linux/nospec.h>
 #include "iwl-drv.h"
 #include "runtime.h"
 #include "dbg.h"
@@ -1039,6 +1040,7 @@ int iwl_fw_start_dbg_conf(struct iwl_fw_runtime *fwrt, u8 conf_id)
 	if (WARN_ONCE(conf_id >= ARRAY_SIZE(fwrt->fw->dbg_conf_tlv),
 		      "Invalid configuration %d\n", conf_id))
 		return -EINVAL;
+	conf_id = array_index_nospec(conf_id, ARRAY_SIZE(fwrt->fw->dbg_conf_tlv));
 
 	/* EARLY START - firmware's configuration is hard coded */
 	if ((!fwrt->fw->dbg_conf_tlv[conf_id] ||

@@ -1,6 +1,7 @@
 #include <linux/mutex.h>
 #include <linux/socket.h>
 #include <linux/skbuff.h>
+#include <linux/nospec.h>
 #include <net/netlink.h>
 #include <net/net_namespace.h>
 #include <linux/module.h>
@@ -141,18 +142,20 @@ static int __sock_diag_rcv_msg(struct sk_buff *skb, struct nlmsghdr *nlh)
 	int err;
 	struct sock_diag_req *req = nlmsg_data(nlh);
 	const struct sock_diag_handler *hndl;
+	u8 sdiag_family;
 
 	if (nlmsg_len(nlh) < sizeof(*req))
 		return -EINVAL;
 
 	if (req->sdiag_family >= AF_MAX)
 		return -EINVAL;
+	sdiag_family = array_index_nospec(req->sdiag_family, AF_MAX);
 
-	if (sock_diag_handlers[req->sdiag_family] == NULL)
+	if (sock_diag_handlers[sdiag_family] == NULL)
 		sock_load_diag_module(req->sdiag_family, 0);
 
 	mutex_lock(&sock_diag_table_mutex);
-	hndl = sock_diag_handlers[req->sdiag_family];
+	hndl = sock_diag_handlers[sdiag_family];
 	if (hndl == NULL)
 		err = -ENOENT;
 	else

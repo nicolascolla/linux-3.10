@@ -40,6 +40,7 @@
 #include <linux/ieee80211.h>
 #include <linux/slab.h>
 #include <linux/export.h>
+#include <linux/nospec.h>
 #include <net/mac80211.h>
 #include "ieee80211_i.h"
 #include "driver-ops.h"
@@ -269,6 +270,7 @@ void ___ieee80211_start_rx_ba_session(struct sta_info *sta,
 		       sta->sta.addr, tid);
 		goto end;
 	}
+	tid = array_index_nospec(tid, IEEE80211_FIRST_TSPEC_TSID);
 
 	if (!sta->sta.ht_cap.ht_supported) {
 		ht_dbg(sta->sdata,

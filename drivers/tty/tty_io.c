@@ -95,6 +95,7 @@
 #include <linux/seq_file.h>
 #include <linux/serial.h>
 #include <linux/ratelimit.h>
+#include <linux/nospec.h>
 
 #include <linux/uaccess.h>
 
@@ -2035,6 +2036,7 @@ retry_open:
 			retval = PTR_ERR(driver);
 			goto err_unlock;
 		}
+		index = array_index_nospec(index, driver->num);
 
 		/* check whether we're reopening an existing tty */
 		tty = tty_driver_lookup_tty(driver, inode, index);

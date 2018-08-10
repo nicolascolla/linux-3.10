@@ -844,6 +844,7 @@ static struct fc_exch *fc_exch_find(struct fc_exch_mgr *mp, u16 xid)
 			"indicates invalid CPU %d\n", xid, cpu);
 		return NULL;
 	}
+	cpu = array_index_nospec(cpu, nr_cpu_ids);
 
 	if ((xid >= mp->min_xid) && (xid <= mp->max_xid)) {
 		pool = per_cpu_ptr(mp->pool, cpu);

@@ -19,6 +19,7 @@
 #include <linux/nfsacl.h>
 #include <linux/seq_file.h>
 #include <linux/inetdevice.h>
+#include <linux/nospec.h>
 #include <net/addrconf.h>
 #include <net/ipv6.h>
 #include <net/net_namespace.h>
@@ -130,6 +131,8 @@ int nfsd_vers(int vers, enum vers_op change)
 {
 	if (vers < NFSD_MINVERS || vers >= NFSD_NRVERS)
 		return 0;
+	vers = array_index_nospec(vers, NFSD_NRVERS);
+
 	switch(change) {
 	case NFSD_SET:
 		nfsd_versions[vers] = nfsd_version[vers];

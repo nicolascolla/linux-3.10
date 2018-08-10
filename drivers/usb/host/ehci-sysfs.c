@@ -18,6 +18,7 @@
 
 /* this file is part of ehci-hcd.c */
 
+#include <linux/nospec.h>
 
 /* Display the ports dedicated to the companion controller */
 static ssize_t show_companion(struct device *dev,
@@ -65,6 +66,8 @@ static ssize_t store_companion(struct device *dev,
 	if (portnum <= 0 || portnum > HCS_N_PORTS(ehci->hcs_params))
 		return -ENOENT;
 	portnum--;
+	portnum = array_index_nospec(portnum, HCS_N_PORTS(ehci->hcs_params));
+
 	if (new_owner)
 		set_bit(portnum, &ehci->companion_ports);
 	else

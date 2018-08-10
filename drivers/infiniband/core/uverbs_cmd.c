@@ -1968,13 +1968,13 @@ static int modify_qp(struct ib_uverbs_file *file,
 	}
 
 	if ((cmd->base.attr_mask & IB_QP_PORT) &&
-	    !rdma_is_port_valid(qp->device, cmd->base.port_num)) {
+	    !rdma_is_port_valid_nospec(qp->device, &cmd->base.port_num)) {
 		ret = -EINVAL;
 		goto release_qp;
 	}
 
 	if ((cmd->base.attr_mask & IB_QP_ALT_PATH) &&
-	    !rdma_is_port_valid(qp->device, cmd->base.alt_port_num)) {
+	    !rdma_is_port_valid_nospec(qp->device, &cmd->base.alt_port_num)) {
 		ret = -EINVAL;
 		goto release_qp;
 	}
@@ -2542,7 +2542,7 @@ ssize_t ib_uverbs_create_ah(struct ib_uverbs_file *file,
 	if (copy_from_user(&cmd, buf, sizeof cmd))
 		return -EFAULT;
 
-	if (!rdma_is_port_valid(ib_dev, cmd.attr.port_num))
+	if (!rdma_is_port_valid_nospec(ib_dev, &cmd.attr.port_num))
 		return -EINVAL;
 
 	INIT_UDATA(&udata, buf + sizeof(cmd),

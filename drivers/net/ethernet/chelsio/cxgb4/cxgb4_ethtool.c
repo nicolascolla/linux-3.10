@@ -1163,10 +1163,12 @@ static int set_eeprom(struct net_device *dev, struct ethtool_eeprom *eeprom,
 		if (!buf)
 			return -ENOMEM;
 		err = eeprom_rd_phys(adapter, aligned_offset, (u32 *)buf);
-		if (!err && aligned_len > 4)
+		if (!err && aligned_len > 4) {
+			barrier_nospec();
 			err = eeprom_rd_phys(adapter,
 					     aligned_offset + aligned_len - 4,
 					     (u32 *)&buf[aligned_len - 4]);
+		}
 		if (err)
 			goto out;
 		memcpy(buf + (eeprom->offset & 3), data, eeprom->len);

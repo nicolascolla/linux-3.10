@@ -38,6 +38,7 @@
 #include <linux/slab.h>
 #include <linux/workqueue.h>
 #include <linux/netdevice.h>
+#include <linux/nospec.h>
 #include <net/addrconf.h>
 
 #include <rdma/ib_cache.h>
@@ -505,7 +506,7 @@ int ib_find_cached_gid_by_port(struct ib_device *ib_dev,
 	struct ib_gid_attr val = {.ndev = ndev, .gid_type = gid_type};
 	unsigned long flags;
 
-	if (!rdma_is_port_valid(ib_dev, port))
+	if (!rdma_is_port_valid_nospec(ib_dev, &port))
 		return -ENOENT;
 
 	table = ib_dev->cache.ports[port - rdma_start_port(ib_dev)].gid;
@@ -562,7 +563,7 @@ static int ib_cache_gid_find_by_filter(struct ib_device *ib_dev,
 	bool found = false;
 
 
-	if (!rdma_is_port_valid(ib_dev, port) ||
+	if (!rdma_is_port_valid_nospec(ib_dev, &port) ||
 	    !rdma_protocol_roce(ib_dev, port))
 		return -EPROTONOSUPPORT;
 
@@ -844,7 +845,7 @@ int ib_get_cached_gid(struct ib_device *device,
 	unsigned long flags;
 	struct ib_gid_table *table;
 
-	if (!rdma_is_port_valid(device, port_num))
+	if (!rdma_is_port_valid_nospec(device, &port_num))
 		return -EINVAL;
 
 	table = device->cache.ports[port_num - rdma_start_port(device)].gid;
@@ -894,7 +895,7 @@ int ib_get_cached_pkey(struct ib_device *device,
 	unsigned long flags;
 	int ret = 0;
 
-	if (!rdma_is_port_valid(device, port_num))
+	if (!rdma_is_port_valid_nospec(device, &port_num))
 		return -EINVAL;
 
 	read_lock_irqsave(&device->cache.lock, flags);
@@ -903,8 +904,10 @@ int ib_get_cached_pkey(struct ib_device *device,
 
 	if (index < 0 || index >= cache->table_len)
 		ret = -EINVAL;
-	else
+	else {
+		index = array_index_nospec(index, cache->table_len);
 		*pkey = cache->table[index];
+	}
 
 	read_unlock_irqrestore(&device->cache.lock, flags);
 
@@ -943,7 +946,7 @@ int ib_find_cached_pkey(struct ib_device *device,
 	int ret = -ENOENT;
 	int partial_ix = -1;
 
-	if (!rdma_is_port_valid(device, port_num))
+	if (!rdma_is_port_valid_nospec(device, &port_num))
 		return -EINVAL;
 
 	read_lock_irqsave(&device->cache.lock, flags);
@@ -983,7 +986,7 @@ int ib_find_exact_cached_pkey(struct ib_device *device,
 	int i;
 	int ret = -ENOENT;
 
-	if (!rdma_is_port_valid(device, port_num))
+	if (!rdma_is_port_valid_nospec(device, &port_num))
 		return -EINVAL;
 
 	read_lock_irqsave(&device->cache.lock, flags);
@@ -1012,7 +1015,7 @@ int ib_get_cached_lmc(struct ib_device *device,
 	unsigned long flags;
 	int ret = 0;
 
-	if (!rdma_is_port_valid(device, port_num))
+	if (!rdma_is_port_valid_nospec(device, &port_num))
 		return -EINVAL;
 
 	read_lock_irqsave(&device->cache.lock, flags);
@@ -1058,7 +1061,7 @@ static void ib_cache_update(struct ib_device *device,
 	bool			   use_roce_gid_table =
 					rdma_cap_roce_gid_table(device, port);
 
-	if (!rdma_is_port_valid(device, port))
+	if (!rdma_is_port_valid_nospec(device, &port))
 		return;
 
 	table = device->cache.ports[port - rdma_start_port(device)].gid;

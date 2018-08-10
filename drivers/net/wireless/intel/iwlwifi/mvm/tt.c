@@ -66,6 +66,7 @@
  *****************************************************************************/
 
 #include <linux/sort.h>
+#include <linux/nospec.h>
 
 #include "mvm.h"
 
@@ -661,6 +662,7 @@ static int iwl_mvm_tzone_get_trip_temp(struct thermal_zone_device *device,
 
 	if (trip < 0 || trip >= IWL_MAX_DTS_TRIPS)
 		return -EINVAL;
+	trip = array_index_nospec(trip, IWL_MAX_DTS_TRIPS);
 
 	*temp = mvm->tz_device.temp_trips[trip] * 1000;
 
@@ -702,6 +704,7 @@ static int iwl_mvm_tzone_set_trip_temp(struct thermal_zone_device *device,
 		ret = -EINVAL;
 		goto out;
 	}
+	trip = array_index_nospec(trip, IWL_MAX_DTS_TRIPS);
 
 	if ((temp / 1000) > S16_MAX) {
 		ret = -EINVAL;
@@ -817,6 +820,7 @@ static int iwl_mvm_tcool_set_cur_state(struct thermal_cooling_device *cdev,
 		ret = -EINVAL;
 		goto unlock;
 	}
+	new_state = array_index_nospec(new_state, ARRAY_SIZE(iwl_mvm_cdev_budgets));
 
 	ret = iwl_mvm_ctdp_command(mvm, CTDP_CMD_OPERATION_START,
 				   new_state);

@@ -30,6 +30,7 @@
 #include <linux/io.h>
 #include <linux/aio.h>
 #include <linux/security.h>
+#include <linux/nospec.h>
 
 #include <asm/uaccess.h>
 
@@ -914,6 +915,7 @@ static int memory_open(struct inode *inode, struct file *filp)
 	minor = iminor(inode);
 	if (minor >= ARRAY_SIZE(devlist))
 		return -ENXIO;
+	minor = array_index_nospec(minor, ARRAY_SIZE(devlist));
 
 	dev = &devlist[minor];
 	if (!dev->fops)

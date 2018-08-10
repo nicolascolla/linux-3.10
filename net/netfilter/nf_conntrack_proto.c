@@ -22,6 +22,7 @@
 #include <linux/notifier.h>
 #include <linux/kernel.h>
 #include <linux/netdevice.h>
+#include <linux/nospec.h>
 
 #include <net/netfilter/nf_conntrack.h>
 #include <net/netfilter/nf_conntrack_l3proto.h>
@@ -68,8 +69,10 @@ nf_ct_unregister_sysctl(struct ctl_table_header **header,
 struct nf_conntrack_l4proto *
 __nf_ct_l4proto_find(u_int16_t l3proto, u_int8_t l4proto)
 {
-	if (unlikely(l3proto >= AF_MAX || nf_ct_protos[l3proto] == NULL))
+	if (unlikely(l3proto >= AF_MAX ||
+	    nf_ct_protos[array_index_nospec(l3proto, AF_MAX)] == NULL))
 		return &nf_conntrack_l4proto_generic;
+	l3proto = array_index_nospec(l3proto, AF_MAX);
 
 	return rcu_dereference(nf_ct_protos[l3proto][l4proto]);
 }

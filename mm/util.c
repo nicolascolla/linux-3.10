@@ -11,6 +11,7 @@
 #include <linux/hugetlb.h>
 #include <linux/vmalloc.h>
 #include <linux/userfaultfd_k.h>
+#include <linux/nospec.h>
 
 #include <asm/sections.h>
 #include <asm/uaccess.h>
@@ -249,7 +250,7 @@ EXPORT_SYMBOL(kzfree);
 char *strndup_user(const char __user *s, long n)
 {
 	char *p;
-	long length;
+	long length, idx;
 
 	length = strnlen_user(s, n);
 
@@ -264,7 +265,8 @@ char *strndup_user(const char __user *s, long n)
 	if (IS_ERR(p))
 		return p;
 
-	p[length - 1] = '\0';
+	idx = array_index_nospec(length - 1, n);
+	p[idx] = '\0';
 
 	return p;
 }

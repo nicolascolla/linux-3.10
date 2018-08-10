@@ -22,6 +22,7 @@
 #include <linux/slab.h>
 #include <linux/string.h>
 #include <linux/errno.h>
+#include <linux/nospec.h>
 #include <net/netlabel.h>
 #include "sidtab.h"
 #include "mls.h"
@@ -528,7 +529,8 @@ int mls_compute_sid(struct context *scontext,
 			return mls_range_set(newcontext, r);
 
 		if (tclass && tclass <= policydb.p_classes.nprim) {
-			cladatum = policydb.class_val_to_struct[tclass - 1];
+			u16 idx = array_index_nospec(tclass - 1, policydb.p_classes.nprim);
+			cladatum = policydb.class_val_to_struct[idx];
 			if (cladatum)
 				default_range = cladatum->default_range;
 		}

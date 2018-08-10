@@ -17,6 +17,7 @@
 #include <linux/quotaops.h>
 #include <linux/types.h>
 #include <linux/writeback.h>
+#include <linux/nospec.h>
 
 static int check_quotactl_permission(struct super_block *sb, int type, int cmd,
 				     qid_t id)
@@ -84,6 +85,7 @@ static int quota_getfmt(struct super_block *sb, int type, void __user *addr)
 		mutex_unlock(&sb_dqopt(sb)->dqonoff_mutex);
 		return -ESRCH;
 	}
+	type = array_index_nospec(type, MAXQUOTAS);
 	fmt = sb_dqopt(sb)->info[type].dqi_format->qf_fmt_id;
 	mutex_unlock(&sb_dqopt(sb)->dqonoff_mutex);
 	if (copy_to_user(addr, &fmt, sizeof(fmt)))

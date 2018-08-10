@@ -17,6 +17,7 @@
  * this warranty disclaimer.
  */
 
+#include <linux/nospec.h>
 #include "decl.h"
 #include "ioctl.h"
 #include "util.h"
@@ -708,12 +709,16 @@ void mwifiex_hist_data_set(struct mwifiex_private *priv, u8 rx_rate, s8 snr,
 			   s8 nflr)
 {
 	struct mwifiex_histogram_data *phist_data = priv->hist_data;
+	u8 idx;
 
 	atomic_inc(&phist_data->num_samples);
+	rx_rate = array_index_nospec(rx_rate, MWIFIEX_MAX_AC_RX_RATES);
 	atomic_inc(&phist_data->rx_rate[rx_rate]);
 	atomic_inc(&phist_data->snr[snr]);
-	atomic_inc(&phist_data->noise_flr[128 + nflr]);
-	atomic_inc(&phist_data->sig_str[nflr - snr]);
+	idx = array_index_nospec(128 + nflr, MWIFIEX_MAX_NOISE_FLR);
+	atomic_inc(&phist_data->noise_flr[idx]);
+	idx = array_index_nospec(nflr - snr, MWIFIEX_MAX_SIG_STRENGTH);
+	atomic_inc(&phist_data->sig_str[idx]);
 }
 
 /* function to reset histogram data during init/reset */

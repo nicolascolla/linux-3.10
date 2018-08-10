@@ -26,6 +26,7 @@
 #include <linux/rtnetlink.h>
 #include <linux/sched.h>
 #include <linux/net.h>
+#include <linux/nospec.h>
 
 /*
  * Some useful ethtool_ops methods that're device independent.
@@ -1725,6 +1726,15 @@ static noinline_for_stack int ethtool_set_channels(struct net_device *dev,
 	    (channels.combined_count > max.max_combined) ||
 	    (channels.other_count > max.max_other))
 		return -EINVAL;
+
+	channels.rx_count = array_index_nospec(channels.rx_count,
+					       max.max_rx + 1);
+	channels.tx_count = array_index_nospec(channels.tx_count,
+					       max.max_tx + 1);
+	channels.combined_count = array_index_nospec(channels.combined_count,
+					       max.max_combined + 1);
+	channels.other_count = array_index_nospec(channels.other_count,
+					       max.max_other + 1);
 
 	/* ensure the new Rx count fits within the configured Rx flow
 	 * indirection table settings */

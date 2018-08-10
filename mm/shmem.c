@@ -33,6 +33,7 @@
 #include <linux/swap.h>
 #include <linux/aio.h>
 #include <linux/syscalls.h>
+#include <linux/nospec.h>
 #include <uapi/linux/memfd.h>
 
 static struct vfsmount *shm_mnt;
@@ -3207,6 +3208,7 @@ SYSCALL_DEFINE2(memfd_create,
 		return -EFAULT;
 	if (len > MFD_NAME_MAX_LEN + 1)
 		return -EINVAL;
+	len = array_index_nospec(len, MFD_NAME_MAX_LEN + 2);
 
 	name = kmalloc(len + MFD_NAME_PREFIX_LEN, GFP_TEMPORARY);
 	if (!name)

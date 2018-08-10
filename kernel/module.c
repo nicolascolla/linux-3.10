@@ -3440,6 +3440,12 @@ static int may_init_module(void)
 	if (!capable(CAP_SYS_MODULE) || modules_disabled)
 		return -EPERM;
 
+	/*
+	 * Make sure we don't speculate past the CAP_SYS_MODULE check.  The
+	 * module code trusts the module data completely.
+	 */
+	barrier_nospec();
+
 	return 0;
 }
 

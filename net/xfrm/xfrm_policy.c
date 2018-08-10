@@ -25,6 +25,7 @@
 #include <linux/module.h>
 #include <linux/cache.h>
 #include <linux/audit.h>
+#include <linux/nospec.h>
 #include <net/dst.h>
 #include <net/flow.h>
 #include <net/xfrm.h>
@@ -354,6 +355,8 @@ static void __get_hash_thresh(struct net *net,
 			      unsigned short family, int dir,
 			      u8 *dbits, u8 *sbits)
 {
+	dir = array_index_nospec(dir, XFRM_POLICY_MAX * 2);
+
 	switch (family) {
 	case AF_INET:
 		*dbits = net->policy_bydst[dir].dbits4;
@@ -3328,6 +3331,7 @@ int xfrm_migrate(const struct xfrm_selector *sel, u8 dir, u8 type,
 		err = -EINVAL;
 		goto out;
 	}
+	dir = array_index_nospec(dir, XFRM_POLICY_MAX);
 
 	/* Stage 1 - find policy */
 	if ((pol = xfrm_migrate_policy_find(sel, dir, type, net)) == NULL) {

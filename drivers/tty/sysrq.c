@@ -45,6 +45,7 @@
 #include <linux/moduleparam.h>
 #include <linux/jiffies.h>
 #include <linux/rcupdate.h>
+#include <linux/nospec.h>
 
 #include <asm/ptrace.h>
 #include <asm/irq_regs.h>
@@ -496,8 +497,10 @@ struct sysrq_key_op *__sysrq_get_key_op(int key)
         int i;
 
 	i = sysrq_key_table_key2index(key);
-	if (i != -1)
+	if (i != -1) {
+		i = array_index_nospec(i, ARRAY_SIZE(sysrq_key_table));
 	        op_p = sysrq_key_table[i];
+	}
 
         return op_p;
 }

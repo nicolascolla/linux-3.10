@@ -35,6 +35,7 @@
 #include <linux/init.h>
 #include <linux/device.h>
 #include <linux/moduleparam.h>
+#include <linux/nospec.h>
 #include <linux/isdn/capiutil.h>
 #include <linux/isdn/capicmd.h>
 
@@ -265,6 +266,7 @@ static struct capiminor *capiminor_get(unsigned int minor)
 	struct capiminor *mp;
 
 	spin_lock(&capiminors_lock);
+	minor = array_index_nospec(minor, capi_ttyminors);
 	mp = capiminors[minor];
 	if (mp)
 		tty_port_get(&mp->port);

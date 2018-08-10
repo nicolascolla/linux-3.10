@@ -51,6 +51,7 @@
 
 #include <linux/if_ether.h>
 #include <linux/if_vlan.h>
+#include <linux/nospec.h>
 
 #include "opa_vnic_internal.h"
 
@@ -390,6 +391,7 @@ u8 opa_vnic_get_vl(struct opa_vnic_adapter *adapter, struct sk_buff *skb)
 
 	if (skb_vlan_tag_present(skb)) {
 		u8 pcp = skb_vlan_tag_get(skb) >> VLAN_PRIO_SHIFT;
+		pcp = array_index_nospec(pcp, OPA_VNIC_MAX_NUM_PCP);
 
 		if (is_multicast_ether_addr(mac_hdr->h_dest))
 			vl = info->vport.pcp_to_vl_mc[pcp];

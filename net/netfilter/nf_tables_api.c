@@ -16,6 +16,7 @@
 #include <linux/netfilter.h>
 #include <linux/netfilter/nfnetlink.h>
 #include <linux/netfilter/nf_tables.h>
+#include <linux/nospec.h>
 #include <net/netfilter/nf_tables_core.h>
 #include <net/netfilter/nf_tables.h>
 #include <net/net_namespace.h>
@@ -1324,6 +1325,7 @@ static int nf_tables_newchain(struct net *net, struct sock *nlsk,
 		nf_hookfn *hookfn;
 		u32 hooknum, priority;
 
+		family = array_index_nospec(family, AF_MAX);
 		type = chain_type[family][NFT_CHAIN_T_DEFAULT];
 		if (nla[NFTA_CHAIN_TYPE]) {
 			type = nf_tables_chain_type_lookup(afi,
@@ -1344,6 +1346,8 @@ static int nf_tables_newchain(struct net *net, struct sock *nlsk,
 		hooknum = ntohl(nla_get_be32(ha[NFTA_HOOK_HOOKNUM]));
 		if (hooknum >= afi->nhooks)
 			return -EINVAL;
+		hooknum = array_index_nospec(hooknum, afi->nhooks);
+
 		priority = ntohl(nla_get_be32(ha[NFTA_HOOK_PRIORITY]));
 
 		if (!(type->hook_mask & (1 << hooknum)))

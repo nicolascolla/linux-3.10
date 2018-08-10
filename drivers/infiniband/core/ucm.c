@@ -45,6 +45,7 @@
 #include <linux/idr.h>
 #include <linux/mutex.h>
 #include <linux/slab.h>
+#include <linux/nospec.h>
 
 #include <asm/uaccess.h>
 
@@ -1103,6 +1104,7 @@ static ssize_t ib_ucm_write(struct file *filp, const char __user *buf,
 	struct ib_ucm_file *file = filp->private_data;
 	struct ib_ucm_cmd_hdr hdr;
 	ssize_t result;
+	u32 cmd;
 
 	if (!ib_safe_file_access(filp)) {
 		pr_err_once("ucm_write: process %d (%s) changed security contexts after opening file descriptor, this is not allowed.\n",
@@ -1118,11 +1120,12 @@ static ssize_t ib_ucm_write(struct file *filp, const char __user *buf,
 
 	if (hdr.cmd >= ARRAY_SIZE(ucm_cmd_table))
 		return -EINVAL;
+	cmd = array_index_nospec(hdr.cmd, ARRAY_SIZE(ucm_cmd_table));
 
 	if (hdr.in + sizeof(hdr) > len)
 		return -EINVAL;
 
-	result = ucm_cmd_table[hdr.cmd](file, buf + sizeof(hdr),
+	result = ucm_cmd_table[cmd](file, buf + sizeof(hdr),
 					hdr.in, hdr.out);
 	if (!result)
 		result = len;

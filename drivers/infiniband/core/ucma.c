@@ -43,6 +43,7 @@
 #include <linux/sysctl.h>
 #include <linux/module.h>
 #include <linux/nsproxy.h>
+#include <linux/nospec.h>
 
 #include <rdma/rdma_user_cm.h>
 #include <rdma/ib_marshall.h>
@@ -1601,6 +1602,7 @@ static ssize_t ucma_write(struct file *filp, const char __user *buf,
 	struct ucma_file *file = filp->private_data;
 	struct rdma_ucm_cmd_hdr hdr;
 	ssize_t ret;
+	u32 cmd;
 
 	if (!ib_safe_file_access(filp)) {
 		pr_err_once("ucma_write: process %d (%s) changed security contexts after opening file descriptor, this is not allowed.\n",
@@ -1616,14 +1618,15 @@ static ssize_t ucma_write(struct file *filp, const char __user *buf,
 
 	if (hdr.cmd >= ARRAY_SIZE(ucma_cmd_table))
 		return -EINVAL;
+	cmd = array_index_nospec(hdr.cmd, ARRAY_SIZE(ucma_cmd_table));
 
 	if (hdr.in + sizeof(hdr) > len)
 		return -EINVAL;
 
-	if (!ucma_cmd_table[hdr.cmd])
+	if (!ucma_cmd_table[cmd])
 		return -ENOSYS;
 
-	ret = ucma_cmd_table[hdr.cmd](file, buf + sizeof(hdr), hdr.in, hdr.out);
+	ret = ucma_cmd_table[cmd](file, buf + sizeof(hdr), hdr.in, hdr.out);
 	if (!ret)
 		ret = len;
 

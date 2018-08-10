@@ -281,6 +281,7 @@
 #include <linux/fcntl.h>
 #include <linux/blkdev.h>
 #include <linux/times.h>
+#include <linux/nospec.h>
 
 #include <asm/uaccess.h>
 
@@ -1773,6 +1774,7 @@ static int dvd_read_physical(struct cdrom_device_info *cdi, dvd_struct *s,
 
 	if (layer_num >= DVD_LAYERS)
 		return -EINVAL;
+	layer_num = array_index_nospec(layer_num, DVD_LAYERS);
 
 	init_cdrom_command(cgc, buf, sizeof(buf), CGC_DATA_READ);
 	cgc->cmd[0] = GPCMD_READ_DVD_STRUCTURE;
@@ -2337,6 +2339,7 @@ static int cdrom_ioctl_media_changed(struct cdrom_device_info *cdi,
 
 	if ((unsigned int)arg >= cdi->capacity)
 		return -EINVAL;
+	arg = array_index_nospec((unsigned int)arg, cdi->capacity);
 
 	info = kmalloc(sizeof(*info), GFP_KERNEL);
 	if (!info)
@@ -2508,6 +2511,8 @@ static int cdrom_ioctl_drive_status(struct cdrom_device_info *cdi,
 		return cdi->ops->drive_status(cdi, CDSL_CURRENT);
 	if (((int)arg >= cdi->capacity))
 		return -EINVAL;
+	arg = array_index_nospec((int)arg, cdi->capacity);
+
 	return cdrom_slot_status(cdi, arg);
 }
 

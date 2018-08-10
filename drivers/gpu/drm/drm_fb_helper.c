@@ -34,6 +34,7 @@
 #include <linux/sysrq.h>
 #include <linux/slab.h>
 #include <linux/module.h>
+#include <linux/nospec.h>
 #include <drm/drmP.h>
 #include <drm/drm_crtc.h>
 #include <drm/drm_fb_helper.h>
@@ -1211,6 +1212,7 @@ static int setcmap_pseudo_palette(struct fb_cmap *cmap, struct fb_info *info)
 		u16 green = cmap->green[i];
 		u16 blue = cmap->blue[i];
 		u32 value;
+		int idx;
 
 		red >>= 16 - info->var.red.length;
 		green >>= 16 - info->var.green.length;
@@ -1224,7 +1226,9 @@ static int setcmap_pseudo_palette(struct fb_cmap *cmap, struct fb_info *info)
 			mask <<= info->var.transp.offset;
 			value |= mask;
 		}
-		palette[cmap->start + i] = value;
+
+		idx = array_index_nospec(cmap->start + i, 16);
+		palette[idx] = value;
 	}
 
 	return 0;
@@ -1287,21 +1291,28 @@ static struct drm_property_blob *setcmap_new_gamma_lut(struct drm_crtc *crtc,
 		u16 *b = g + crtc->gamma_size;
 
 		for (i = 0; i < cmap->start; i++) {
-			lut[i].red = r[i];
-			lut[i].green = g[i];
-			lut[i].blue = b[i];
+			int idx = array_index_nospec(i, size);
+
+			lut[idx].red = r[idx];
+			lut[idx].green = g[idx];
+			lut[idx].blue = b[idx];
 		}
 		for (i = cmap->start + cmap->len; i < size; i++) {
-			lut[i].red = r[i];
-			lut[i].green = g[i];
-			lut[i].blue = b[i];
+			int idx = array_index_nospec(i, size);
+
+			lut[idx].red = r[idx];
+			lut[idx].green = g[idx];
+			lut[idx].blue = b[idx];
 		}
 	}
 
 	for (i = 0; i < cmap->len; i++) {
-		lut[cmap->start + i].red = cmap->red[i];
-		lut[cmap->start + i].green = cmap->green[i];
-		lut[cmap->start + i].blue = cmap->blue[i];
+		int idx1 = array_index_nospec(cmap->start + i, size);
+		int idx2 = array_index_nospec(i, size);
+
+		lut[idx1].red = cmap->red[idx2];
+		lut[idx1].green = cmap->green[idx2];
+		lut[idx1].blue = cmap->blue[idx2];
 	}
 
 	return gamma_lut;

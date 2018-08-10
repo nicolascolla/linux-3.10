@@ -65,6 +65,7 @@
 #include <linux/ioport.h>
 #include <linux/interrupt.h>
 #include <linux/vmalloc.h>
+#include <linux/nospec.h>
 
 #include "sisusb.h"
 #include "sisusb_init.h"
@@ -169,6 +170,7 @@ sisusb_get_sisusb_lock_and_check(unsigned short console)
 	if (in_atomic())
 		return NULL;
 
+	console = array_index_nospec(console, MAX_NR_CONSOLES);
 	sisusb = sisusb_get_sisusb(console);
 	if (!sisusb)
 		return NULL;

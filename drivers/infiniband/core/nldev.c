@@ -207,7 +207,7 @@ static int nldev_port_get_doit(struct sk_buff *skb, struct nlmsghdr *nlh)
 	struct ib_device *device;
 	struct sk_buff *msg;
 	u32 index;
-	u32 port;
+	u8 port;
 	int err;
 
 	err = nlmsg_parse(nlh, 0, tb, RDMA_NLDEV_ATTR_MAX - 1,
@@ -223,7 +223,7 @@ static int nldev_port_get_doit(struct sk_buff *skb, struct nlmsghdr *nlh)
 		return -EINVAL;
 
 	port = nla_get_u32(tb[RDMA_NLDEV_ATTR_PORT_INDEX]);
-	if (!rdma_is_port_valid(device, port))
+	if (!rdma_is_port_valid_nospec(device, &port))
 		return -EINVAL;
 
 	msg = nlmsg_new(NLMSG_DEFAULT_SIZE, GFP_KERNEL);

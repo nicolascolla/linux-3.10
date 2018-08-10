@@ -47,6 +47,7 @@
 #include <linux/interrupt.h>
 #include <linux/pci.h>
 #include <linux/ethtool.h>
+#include <linux/nospec.h>
 
 #include "nfpcore/nfp.h"
 #include "nfpcore/nfp_nsp.h"
@@ -806,6 +807,8 @@ static u32 ethtool_flow_to_nfp_flag(u32 flow_type)
 
 	if (flow_type >= ARRAY_SIZE(xlate_ethtool_to_nfp))
 		return 0;
+	flow_type = array_index_nospec(flow_type,
+				       ARRAY_SIZE(xlate_ethtool_to_nfp));
 
 	return xlate_ethtool_to_nfp[flow_type];
 }

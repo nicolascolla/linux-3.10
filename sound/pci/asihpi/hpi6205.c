@@ -29,6 +29,7 @@
 *******************************************************************************/
 #define SOURCEFILE_NAME "hpi6205.c"
 
+#include <linux/nospec.h>
 #include "hpi_internal.h"
 #include "hpimsginit.h"
 #include "hpidebug.h"
@@ -304,6 +305,7 @@ static void outstream_message(struct hpi_adapter_obj *pao,
 			phm->adapter_index);
 		return;
 	}
+	phm->obj_index = array_index_nospec(phm->obj_index, HPI_MAX_STREAMS);
 
 	switch (phm->function) {
 	case HPI_OSTREAM_WRITE:

@@ -25,6 +25,7 @@
 #include <drm/drmP.h>
 #include "amdgpu.h"
 #include "amdgpu_gfx.h"
+#include <linux/nospec.h>
 
 /*
  * GPU scratch registers helpers function.
@@ -95,8 +96,10 @@ void amdgpu_gfx_parse_disable_cu(unsigned *mask, unsigned max_se, unsigned max_s
 		}
 
 		if (se < max_se && sh < max_sh && cu < 16) {
+			unsigned long idx = array_index_nospec(se * max_sh + sh,
+							       max_se * max_sh);
 			DRM_INFO("amdgpu: disabling CU %u.%u.%u\n", se, sh, cu);
-			mask[se * max_sh + sh] |= 1u << cu;
+			mask[idx] |= 1u << cu;
 		} else {
 			DRM_ERROR("amdgpu: disable_cu %u.%u.%u is out of range\n",
 				  se, sh, cu);

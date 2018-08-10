@@ -3724,6 +3724,8 @@ static int i40e_add_fdir_ethtool(struct i40e_vsi *vsi,
 
 			if (vf >= pf->num_alloc_vfs)
 				return -EINVAL;
+			vf = array_index_nospec(vf, pf->num_alloc_vfs);
+
 			if (ring >= pf->vf[vf].num_queue_pairs)
 				return -EINVAL;
 			dest_vsi = pf->vf[vf].lan_vsi_id;

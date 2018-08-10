@@ -25,6 +25,7 @@
 /* Bluetooth HCI Management interface */
 
 #include <linux/module.h>
+#include <linux/nospec.h>
 #include <asm/unaligned.h>
 
 #include <net/bluetooth/bluetooth.h>
@@ -241,8 +242,11 @@ static u8 mgmt_status_table[] = {
 
 static u8 mgmt_status(u8 hci_status)
 {
-	if (hci_status < ARRAY_SIZE(mgmt_status_table))
+	if (hci_status < ARRAY_SIZE(mgmt_status_table)) {
+		hci_status = array_index_nospec(hci_status,
+						ARRAY_SIZE(mgmt_status_table));
 		return mgmt_status_table[hci_status];
+	}
 
 	return MGMT_STATUS_FAILED;
 }

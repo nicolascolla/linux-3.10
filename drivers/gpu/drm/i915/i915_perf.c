@@ -194,6 +194,7 @@
 #include <linux/anon_inodes.h>
 #include <linux/sizes.h>
 #include <linux/uuid.h>
+#include <linux/nospec.h>
 
 #include "i915_drv.h"
 #include "i915_oa_hsw.h"
@@ -2757,6 +2758,8 @@ static int read_properties_unlocked(struct drm_i915_private *dev_priv,
 					  value);
 				return -EINVAL;
 			}
+			value = array_index_nospec(value, I915_OA_FORMAT_MAX);
+
 			if (!dev_priv->perf.oa.oa_formats[value].size) {
 				DRM_DEBUG("Unsupported OA report format %llu\n",
 					  value);

@@ -32,6 +32,7 @@
 
 #include <linux/tcp.h>
 #include <linux/if_vlan.h>
+#include <linux/nospec.h>
 #include "en.h"
 #include "ipoib/ipoib.h"
 #include "en_accel/ipsec_rxtx.h"
@@ -107,6 +108,8 @@ u16 mlx5e_select_queue(struct net_device *dev, struct sk_buff *skb,
 	if (channel_ix >= num_channels)
 		channel_ix = reciprocal_scale(channel_ix, num_channels);
 
+	channel_ix = array_index_nospec(channel_ix, MLX5E_MAX_NUM_CHANNELS);
+	up = array_index_nospec(up, MLX5E_MAX_NUM_TC);
 	return priv->channel_tc2txq[channel_ix][up];
 }
 

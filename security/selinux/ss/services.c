@@ -52,6 +52,7 @@
 #include <linux/selinux.h>
 #include <linux/flex_array.h>
 #include <linux/vmalloc.h>
+#include <linux/nospec.h>
 #include <net/netlabel.h>
 
 #include "flask.h"
@@ -1446,8 +1447,10 @@ static int security_compute_sid(u32 ssid,
 		goto out_unlock;
 	}
 
-	if (tclass && tclass <= policydb.p_classes.nprim)
-		cladatum = policydb.class_val_to_struct[tclass - 1];
+	if (tclass && tclass <= policydb.p_classes.nprim) {
+		u16 idx = array_index_nospec(tclass - 1, policydb.p_classes.nprim);
+		cladatum = policydb.class_val_to_struct[idx];
+	}
 
 	/* Set the user identity. */
 	switch (specified) {

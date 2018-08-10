@@ -37,6 +37,7 @@
 #include <linux/export.h>
 #include <linux/vmalloc.h>
 #include <linux/hugetlb.h>
+#include <linux/nospec.h>
 
 #include <rdma/ib_verbs.h>
 #include <rdma/ib_umem.h>
@@ -716,6 +717,8 @@ void ib_umem_odp_unmap_dma_pages(struct ib_umem *umem, u64 virt,
 	mutex_lock(&umem->odp_data->umem_mutex);
 	for (addr = virt; addr < bound; addr += BIT(umem->page_shift)) {
 		idx = (addr - ib_umem_start(umem)) >> umem->page_shift;
+		idx = array_index_nospec(idx,
+			(ib_umem_end(umem) - ib_umem_start(umem)) >> umem->page_shift);
 		if (umem->odp_data->page_list[idx]) {
 			struct page *page = umem->odp_data->page_list[idx];
 			dma_addr_t dma = umem->odp_data->dma_list[idx];

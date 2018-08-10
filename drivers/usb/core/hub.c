@@ -28,6 +28,7 @@
 #include <linux/mutex.h>
 #include <linux/random.h>
 #include <linux/pm_qos.h>
+#include <linux/nospec.h>
 
 #include <linux/uaccess.h>
 #include <asm/byteorder.h>
@@ -1816,6 +1817,7 @@ static int find_port_owner(struct usb_device *hdev, unsigned port1,
 		struct usb_dev_state ***ppowner)
 {
 	struct usb_hub *hub = usb_hub_to_struct_hub(hdev);
+	unsigned idx;
 
 	if (hdev->state == USB_STATE_NOTATTACHED)
 		return -ENODEV;
@@ -1825,7 +1827,8 @@ static int find_port_owner(struct usb_device *hdev, unsigned port1,
 	/* Devices not managed by the hub driver
 	 * will always have maxchild equal to 0.
 	 */
-	*ppowner = &(hub->ports[port1 - 1]->port_owner);
+	idx = array_index_nospec(port1 - 1, hdev->maxchild);
+	*ppowner = &(hub->ports[idx]->port_owner);
 	return 0;
 }
 

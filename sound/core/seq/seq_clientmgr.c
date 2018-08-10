@@ -27,6 +27,7 @@
 #include <sound/core.h>
 #include <sound/minors.h>
 #include <linux/kmod.h>
+#include <linux/nospec.h>
 
 #include <sound/seq_kernel.h>
 #include "seq_clientmgr.h"
@@ -125,6 +126,8 @@ struct snd_seq_client *snd_seq_client_use_ptr(int clientid)
 			   clientid);
 		return NULL;
 	}
+	clientid = array_index_nospec(clientid, SNDRV_SEQ_MAX_CLIENTS);
+
 	spin_lock_irqsave(&clients_lock, flags);
 	client = clientptr(clientid);
 	if (client)
@@ -140,7 +143,9 @@ struct snd_seq_client *snd_seq_client_use_ptr(int clientid)
 		static char card_requested[SNDRV_CARDS];
 		if (clientid < SNDRV_SEQ_GLOBAL_CLIENTS) {
 			int idx;
-			
+
+			clientid = array_index_nospec(clientid,
+						      SNDRV_SEQ_GLOBAL_CLIENTS);
 			if (!client_requested[clientid]) {
 				client_requested[clientid] = 1;
 				for (idx = 0; idx < 15; idx++) {
@@ -999,7 +1004,7 @@ static ssize_t snd_seq_write(struct file *file, const char __user *buf,
 {
 	struct snd_seq_client *client = file->private_data;
 	int written = 0, len;
-	int err = -EINVAL;
+	int err;
 	struct snd_seq_event event;
 
 	if (!(snd_seq_file_flags(file) & SNDRV_SEQ_LFLG_OUTPUT))
@@ -1014,11 +1019,15 @@ static ssize_t snd_seq_write(struct file *file, const char __user *buf,
 
 	/* allocate the pool now if the pool is not allocated yet */ 
 	if (client->pool->size > 0 && !snd_seq_write_pool_allocated(client)) {
-		if (snd_seq_pool_init(client->pool) < 0)
+		mutex_lock(&client->ioctl_mutex);
+		err = snd_seq_pool_init(client->pool);
+		mutex_unlock(&client->ioctl_mutex);
+		if (err < 0)
 			return -ENOMEM;
 	}
 
 	/* only process whole events */
+	err = -EINVAL;
 	while (count >= sizeof(struct snd_seq_event)) {
 		/* Read in the event header from the user */
 		len = sizeof(event);

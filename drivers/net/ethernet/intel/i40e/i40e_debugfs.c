@@ -28,6 +28,7 @@
 
 #include <linux/fs.h>
 #include <linux/debugfs.h>
+#include <linux/nospec.h>
 
 #include "i40e.h"
 
@@ -561,6 +562,8 @@ static void i40e_dbg_dump_desc(int cnt, int vsi_seid, int ring_id, int desc_n,
 		dev_info(&pf->pdev->dev, "ring %d not found\n", ring_id);
 		return;
 	}
+	ring_id = array_index_nospec(ring_id, vsi->num_queue_pairs);
+
 	if (!vsi->tx_rings || !vsi->tx_rings[0]->desc) {
 		dev_info(&pf->pdev->dev,
 			 "descriptor rings have not been allocated for vsi %d\n",
@@ -599,6 +602,8 @@ static void i40e_dbg_dump_desc(int cnt, int vsi_seid, int ring_id, int desc_n,
 				 "descriptor %d not found\n", desc_n);
 			goto out;
 		}
+		desc_n = array_index_nospec(desc_n, ring->count);
+
 		if (!is_rx_ring) {
 			txd = I40E_TX_DESC(ring, desc_n);
 			dev_info(&pf->pdev->dev,
@@ -712,7 +717,7 @@ static void i40e_dbg_dump_vf(struct i40e_pf *pf, int vf_id)
 	if (!pf->num_alloc_vfs) {
 		dev_info(&pf->pdev->dev, "no VFs allocated\n");
 	} else if ((vf_id >= 0) && (vf_id < pf->num_alloc_vfs)) {
-		gmb();
+		vf_id = array_index_nospec(vf_id, pf->num_alloc_vfs);
 		vf = &pf->vf[vf_id];
 		vsi = pf->vsi[vf->lan_vsi_idx];
 		dev_info(&pf->pdev->dev, "vf %2d: VSI id=%d, seid=%d, qps=%d\n",

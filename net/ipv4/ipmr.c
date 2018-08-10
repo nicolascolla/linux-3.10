@@ -47,6 +47,7 @@
 #include <linux/init.h>
 #include <linux/if_ether.h>
 #include <linux/slab.h>
+#include <linux/nospec.h>
 #include <net/net_namespace.h>
 #include <net/ip.h>
 #include <net/protocol.h>
@@ -563,6 +564,7 @@ static int vif_delete(struct mr_table *mrt, int vifi, int notify,
 
 	if (vifi < 0 || vifi >= mrt->maxvif)
 		return -EADDRNOTAVAIL;
+	vifi = array_index_nospec(vifi, mrt->maxvif);
 
 	v = &mrt->vif_table[vifi];
 
@@ -1139,6 +1141,7 @@ static int ipmr_mfc_add(struct net *net, struct mr_table *mrt,
 
 	if (mfc->mfcc_parent >= MAXVIFS)
 		return -ENFILE;
+	mfc->mfcc_parent = array_index_nospec(mfc->mfcc_parent, MAXVIFS);
 
 	line = MFC_HASH(mfc->mfcc_mcastgrp.s_addr, mfc->mfcc_origin.s_addr);
 
@@ -1331,6 +1334,8 @@ int ip_mroute_setsockopt(struct sock *sk, int optname, char __user *optval, unsi
 			return -EFAULT;
 		if (vif.vifc_vifi >= MAXVIFS)
 			return -ENFILE;
+		vif.vifc_vifi = array_index_nospec(vif.vifc_vifi, MAXVIFS);
+
 		rtnl_lock();
 		if (optname == MRT_ADD_VIF) {
 			ret = vif_add(net, mrt, &vif,
@@ -1496,6 +1501,7 @@ int ipmr_ioctl(struct sock *sk, int cmd, void __user *arg)
 	struct mfc_cache *c;
 	struct net *net = sock_net(sk);
 	struct mr_table *mrt;
+	vifi_t vifi;
 
 	mrt = ipmr_get_table(net, raw_sk(sk)->ipmr_table ? : RT_TABLE_DEFAULT);
 	if (mrt == NULL)
@@ -1507,9 +1513,11 @@ int ipmr_ioctl(struct sock *sk, int cmd, void __user *arg)
 			return -EFAULT;
 		if (vr.vifi >= mrt->maxvif)
 			return -EINVAL;
+		vifi = array_index_nospec(vr.vifi, mrt->maxvif);
+
 		read_lock(&mrt_lock);
-		vif = &mrt->vif_table[vr.vifi];
-		if (VIF_EXISTS(mrt, vr.vifi)) {
+		vif = &mrt->vif_table[vifi];
+		if (VIF_EXISTS(mrt, vifi)) {
 			vr.icount = vif->pkt_in;
 			vr.ocount = vif->pkt_out;
 			vr.ibytes = vif->bytes_in;
@@ -1570,6 +1578,7 @@ int ipmr_compat_ioctl(struct sock *sk, unsigned int cmd, void __user *arg)
 	struct mfc_cache *c;
 	struct net *net = sock_net(sk);
 	struct mr_table *mrt;
+	vifi_t vifi;
 
 	mrt = ipmr_get_table(net, raw_sk(sk)->ipmr_table ? : RT_TABLE_DEFAULT);
 	if (mrt == NULL)
@@ -1581,9 +1590,11 @@ int ipmr_compat_ioctl(struct sock *sk, unsigned int cmd, void __user *arg)
 			return -EFAULT;
 		if (vr.vifi >= mrt->maxvif)
 			return -EINVAL;
+		vifi = array_index_nospec(vr.vifi, mrt->maxvif);
+
 		read_lock(&mrt_lock);
-		vif = &mrt->vif_table[vr.vifi];
-		if (VIF_EXISTS(mrt, vr.vifi)) {
+		vif = &mrt->vif_table[vifi];
+		if (VIF_EXISTS(mrt, vifi)) {
 			vr.icount = vif->pkt_in;
 			vr.ocount = vif->pkt_out;
 			vr.ibytes = vif->bytes_in;
@@ -2159,13 +2170,15 @@ static int __ipmr_fill_mroute(struct mr_table *mrt, struct sk_buff *skb,
 	struct rtnexthop *nhp;
 	struct nlattr *mp_attr;
 	struct rta_mfc_stats mfcs;
+	vifi_t mfc_parent;
 
 	/* If cache is unresolved, don't try to parse IIF and OIF */
 	if (c->mfc_parent >= MAXVIFS)
 		return -ENOENT;
+	mfc_parent = array_index_nospec(c->mfc_parent, MAXVIFS);
 
-	if (VIF_EXISTS(mrt, c->mfc_parent) &&
-	    nla_put_u32(skb, RTA_IIF, mrt->vif_table[c->mfc_parent].dev->ifindex) < 0)
+	if (VIF_EXISTS(mrt, mfc_parent) &&
+	    nla_put_u32(skb, RTA_IIF, mrt->vif_table[mfc_parent].dev->ifindex) < 0)
 		return -EMSGSIZE;
 
 	if (!(mp_attr = nla_nest_start(skb, RTA_MULTIPATH)))

@@ -23,6 +23,7 @@
 #include <linux/slab.h>
 #include <linux/string.h>
 #include <linux/usb.h>
+#include <linux/nospec.h>
 
 #include "usb.h"
 
@@ -34,9 +35,11 @@ static int usb_open(struct inode *inode, struct file *file)
 {
 	int err = -ENODEV;
 	const struct file_operations *new_fops;
+	unsigned minor;
 
 	down_read(&minor_rwsem);
-	new_fops = fops_get(usb_minors[iminor(inode)]);
+	minor = array_index_nospec(iminor(inode), MAX_USB_MINORS);
+	new_fops = fops_get(usb_minors[minor]);
 
 	if (!new_fops)
 		goto done;

@@ -806,7 +806,7 @@ int ib_query_port(struct ib_device *device,
 	union ib_gid gid;
 	int err;
 
-	if (!rdma_is_port_valid(device, port_num))
+	if (!rdma_is_port_valid_nospec(device, &port_num))
 		return -EINVAL;
 
 	memset(port_attr, 0, sizeof(*port_attr));
@@ -996,7 +996,7 @@ int ib_modify_port(struct ib_device *device,
 {
 	int rc;
 
-	if (!rdma_is_port_valid(device, port_num))
+	if (!rdma_is_port_valid_nospec(device, &port_num))
 		return -EINVAL;
 
 	if (device->modify_port)

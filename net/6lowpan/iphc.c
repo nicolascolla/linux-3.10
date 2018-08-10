@@ -632,7 +632,9 @@ int lowpan_header_decompress(struct sk_buff *skb, const struct net_device *dev,
 
 	/* Hop Limit */
 	if ((iphc0 & LOWPAN_IPHC_HLIM_MASK) != LOWPAN_IPHC_HLIM_00) {
-		hdr.hop_limit = lowpan_ttl_values[iphc0 & LOWPAN_IPHC_HLIM_MASK];
+		u8 idx = array_index_nospec(iphc0 & LOWPAN_IPHC_HLIM_MASK,
+					    ARRAY_SIZE(lowpan_ttl_values));
+		hdr.hop_limit = lowpan_ttl_values[idx];
 	} else {
 		if (lowpan_fetch_skb(skb, &hdr.hop_limit,
 				     sizeof(hdr.hop_limit)))

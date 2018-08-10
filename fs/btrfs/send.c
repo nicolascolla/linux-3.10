@@ -26,6 +26,7 @@
 #include <linux/radix-tree.h>
 #include <linux/vmalloc.h>
 #include <linux/string.h>
+#include <linux/nospec.h>
 
 #include "send.h"
 #include "backref.h"
@@ -6214,7 +6215,8 @@ long btrfs_ioctl_send(struct file *mnt_file, void __user *arg_)
 		goto out;
 	}
 
-	sctx->clone_roots_cnt = arg->clone_sources_count;
+	sctx->clone_roots_cnt = array_index_nospec(arg->clone_sources_count,
+						   ULLONG_MAX / sizeof(*arg->clone_sources) + 1);
 
 	sctx->send_max_size = BTRFS_SEND_BUF_SIZE;
 	sctx->send_buf = kvmalloc(sctx->send_max_size, GFP_KERNEL);

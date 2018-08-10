@@ -61,6 +61,7 @@
 #include <linux/module.h>
 #include <linux/vmalloc.h>
 #include <linux/string.h>
+#include <linux/nospec.h>
 
 #include "hfi.h"
 #include "sdma.h"
@@ -355,6 +356,7 @@ int hfi1_user_sdma_process_request(struct hfi1_filedata *fd,
 			  dd->unit, uctxt->ctxt, fd->subctxt, info.comp_idx);
 		return -EINVAL;
 	}
+	info.comp_idx = array_index_nospec(info.comp_idx, hfi1_sdma_comp_ring_size);
 
 	/*
 	 * Sanity check the header io vector count.  Need at least 1 vector

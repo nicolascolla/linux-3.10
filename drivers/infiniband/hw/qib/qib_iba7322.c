@@ -42,6 +42,7 @@
 #include <linux/io.h>
 #include <linux/jiffies.h>
 #include <linux/module.h>
+#include <linux/nospec.h>
 #include <rdma/ib_verbs.h>
 #include <rdma/ib_smi.h>
 #ifdef CONFIG_INFINIBAND_QIB_DCA
@@ -7694,12 +7695,14 @@ static void find_best_ent(struct qib_pportdata *ppd,
 		 * table.
 		 */
 		idx = ppd->cpspec->no_eep;
+		idx = array_index_nospec(idx, TXDDS_TABLE_SZ);
 		*sdr_dds = &txdds_sdr[idx];
 		*ddr_dds = &txdds_ddr[idx];
 		*qdr_dds = &txdds_qdr[idx];
 	} else if (ppd->cpspec->no_eep < (TXDDS_TABLE_SZ + TXDDS_EXTRA_SZ)) {
 		/* similar to above, but index into the "extra" table. */
 		idx = ppd->cpspec->no_eep - TXDDS_TABLE_SZ;
+		idx = array_index_nospec(idx, TXDDS_EXTRA_SZ);
 		*sdr_dds = &txdds_extra_sdr[idx];
 		*ddr_dds = &txdds_extra_ddr[idx];
 		*qdr_dds = &txdds_extra_qdr[idx];
@@ -7709,6 +7712,7 @@ static void find_best_ent(struct qib_pportdata *ppd,
 		idx = ppd->cpspec->no_eep - (TXDDS_TABLE_SZ + TXDDS_EXTRA_SZ);
 		pr_info("IB%u:%u use idx %u into txdds_mfg\n",
 			ppd->dd->unit, ppd->port, idx);
+		idx = array_index_nospec(idx, TXDDS_MFG_SZ);
 		*sdr_dds = &txdds_extra_mfg[idx];
 		*ddr_dds = &txdds_extra_mfg[idx];
 		*qdr_dds = &txdds_extra_mfg[idx];

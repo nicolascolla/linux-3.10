@@ -50,6 +50,7 @@
 #include <linux/log2.h>
 #include <linux/aer.h>
 #include <linux/crash_dump.h>
+#include <linux/nospec.h>
 
 #if IS_ENABLED(CONFIG_CNIC)
 #define BCM_CNIC 1
@@ -370,6 +371,7 @@ static void bnx2_setup_cnic_irq_info(struct bnx2 *bp)
 		cp->irq_arr[0].irq_flags &= ~CNIC_IRQ_FL_MSIX;
 	}
 
+	sb_id = array_index_nospec(sb_id, BNX2_MAX_MSIX_VEC);
 	cp->irq_arr[0].vector = bp->irq_tbl[sb_id].vector;
 	cp->irq_arr[0].status_blk = (void *)
 		((unsigned long) bnapi->status_blk.msi +

@@ -11,6 +11,7 @@
 #include <linux/kernel.h>
 #include <linux/init.h>
 #include <linux/module.h>
+#include <linux/nospec.h>
 #include <linux/netlink.h>
 #include <linux/netfilter.h>
 #include <linux/netfilter/nfnetlink.h>
@@ -529,6 +530,7 @@ nfnl_compat_get(struct sock *nfnl, struct sk_buff *skb,
 	const char *name;
 	u32 rev;
 	struct sk_buff *skb2;
+	u8 nfgen_family;
 
 	if (tb[NFTA_COMPAT_NAME] == NULL ||
 	    tb[NFTA_COMPAT_REV] == NULL ||
@@ -559,8 +561,9 @@ nfnl_compat_get(struct sock *nfnl, struct sk_buff *skb,
 			nfmsg->nfgen_family);
 		return -EINVAL;
 	}
+	nfgen_family = array_index_nospec(nfmsg->nfgen_family, NFPROTO_NUMPROTO);
 
-	try_then_request_module(xt_find_revision(nfmsg->nfgen_family, name,
+	try_then_request_module(xt_find_revision(nfgen_family, name,
 						 rev, target, &ret),
 						 fmt, name);
 

@@ -15,6 +15,7 @@
  * OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
  */
 
+#include <linux/nospec.h>
 #include "core.h"
 #include "txrx.h"
 #include "htt.h"
@@ -192,6 +193,7 @@ void ath10k_peer_map_event(struct ath10k_htt *htt,
 {
 	struct ath10k *ar = htt->ar;
 	struct ath10k_peer *peer;
+	u16 peer_id;
 
 	if (ev->peer_id >= ATH10K_MAX_NUM_PEER_IDS) {
 		ath10k_warn(ar,
@@ -199,6 +201,7 @@ void ath10k_peer_map_event(struct ath10k_htt *htt,
 			    ev->peer_id);
 		return;
 	}
+	peer_id = array_index_nospec(ev->peer_id, ATH10K_MAX_NUM_PEER_IDS);
 
 	spin_lock_bh(&ar->data_lock);
 	peer = ath10k_peer_find(ar, ev->vdev_id, ev->addr);
@@ -216,8 +219,8 @@ void ath10k_peer_map_event(struct ath10k_htt *htt,
 	ath10k_dbg(ar, ATH10K_DBG_HTT, "htt peer map vdev %d peer %pM id %d\n",
 		   ev->vdev_id, ev->addr, ev->peer_id);
 
-	WARN_ON(ar->peer_map[ev->peer_id] && (ar->peer_map[ev->peer_id] != peer));
-	ar->peer_map[ev->peer_id] = peer;
+	WARN_ON(ar->peer_map[peer_id] && (ar->peer_map[peer_id] != peer));
+	ar->peer_map[peer_id] = peer;
 	set_bit(ev->peer_id, peer->peer_ids);
 exit:
 	spin_unlock_bh(&ar->data_lock);
@@ -228,6 +231,7 @@ void ath10k_peer_unmap_event(struct ath10k_htt *htt,
 {
 	struct ath10k *ar = htt->ar;
 	struct ath10k_peer *peer;
+	u16 peer_id;
 
 	if (ev->peer_id >= ATH10K_MAX_NUM_PEER_IDS) {
 		ath10k_warn(ar,
@@ -235,6 +239,7 @@ void ath10k_peer_unmap_event(struct ath10k_htt *htt,
 			    ev->peer_id);
 		return;
 	}
+	peer_id = array_index_nospec(ev->peer_id, ATH10K_MAX_NUM_PEER_IDS);
 
 	spin_lock_bh(&ar->data_lock);
 	peer = ath10k_peer_find_by_id(ar, ev->peer_id);
@@ -247,7 +252,7 @@ void ath10k_peer_unmap_event(struct ath10k_htt *htt,
 	ath10k_dbg(ar, ATH10K_DBG_HTT, "htt peer unmap vdev %d peer %pM id %d\n",
 		   peer->vdev_id, peer->addr, ev->peer_id);
 
-	ar->peer_map[ev->peer_id] = NULL;
+	ar->peer_map[peer_id] = NULL;
 	clear_bit(ev->peer_id, peer->peer_ids);
 
 	if (bitmap_empty(peer->peer_ids, ATH10K_MAX_NUM_PEER_IDS)) {

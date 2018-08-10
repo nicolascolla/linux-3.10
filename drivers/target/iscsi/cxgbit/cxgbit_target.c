@@ -8,6 +8,7 @@
 
 #include <linux/workqueue.h>
 #include <linux/kthread.h>
+#include <linux/nospec.h>
 #include <asm/unaligned.h>
 #include <net/tcp.h>
 #include <target/target_core_base.h>
@@ -1471,7 +1472,8 @@ cxgbit_lro_skb_merge(struct cxgbit_sock *csk, struct sk_buff *skb, u8 pdu_idx)
 		hpdu_cb->hdr = pdu_cb->hdr;
 		hpdu_cb->hlen = pdu_cb->hlen;
 
-		memcpy(&hssi->frags[hfrag_idx], &ssi->frags[pdu_cb->hfrag_idx],
+		memcpy(&hssi->frags[hfrag_idx],
+		       &ssi->frags[array_index_nospec(pdu_cb->hfrag_idx, MAX_SKB_FRAGS)],
 		       sizeof(skb_frag_t));
 
 		get_page(skb_frag_page(&hssi->frags[hfrag_idx]));
@@ -1494,7 +1496,7 @@ cxgbit_lro_skb_merge(struct cxgbit_sock *csk, struct sk_buff *skb, u8 pdu_idx)
 		len = 0;
 		for (i = 0; i < pdu_cb->nr_dfrags; dfrag_idx++, i++) {
 			memcpy(&hssi->frags[dfrag_idx],
-			       &ssi->frags[pdu_cb->dfrag_idx + i],
+			       &ssi->frags[array_index_nospec(pdu_cb->dfrag_idx + i, MAX_SKB_FRAGS)],
 			       sizeof(skb_frag_t));
 
 			get_page(skb_frag_page(&hssi->frags[dfrag_idx]));

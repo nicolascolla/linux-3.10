@@ -53,6 +53,7 @@
 #include <linux/timer.h>
 #include <linux/vmalloc.h>
 #include <linux/highmem.h>
+#include <linux/nospec.h>
 
 #include "hfi.h"
 #include "common.h"
@@ -780,6 +781,7 @@ struct sdma_engine *sdma_select_engine_vl(
 		rval = NULL;
 		goto done;
 	}
+	vl = array_index_nospec(vl, num_vls);
 
 	rcu_read_lock();
 	m = rcu_dereference(dd->sdma_map);

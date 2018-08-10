@@ -6417,6 +6417,7 @@ static int sctp_getsockopt_pr_assocstatus(struct sock *sk, int len,
 	policy = params.sprstat_policy;
 	if (policy & ~SCTP_PR_SCTP_MASK)
 		goto out;
+	policy &= SCTP_PR_SCTP_MASK; /* nospec */
 
 	asoc = sctp_id2assoc(sk, params.sprstat_assoc_id);
 	if (!asoc)

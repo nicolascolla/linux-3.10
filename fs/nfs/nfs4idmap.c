@@ -45,6 +45,7 @@
 #include <linux/key-type.h>
 #include <keys/user-type.h>
 #include <linux/module.h>
+#include <linux/nospec.h>
 
 #include "internal.h"
 #include "netns.h"
@@ -626,7 +627,7 @@ static int nfs_idmap_read_and_verify_message(struct idmap_msg *im,
 	case IDMAP_CONV_IDTONAME:
 		if (upcall->im_id != im->im_id)
 			break;
-		len = strlen(im->im_name);
+		len = array_index_nospec(strlen(im->im_name), IDMAP_NAMESZ);
 		ret = nfs_idmap_instantiate(key, authkey, im->im_name, len);
 		break;
 	default:

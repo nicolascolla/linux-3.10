@@ -19,6 +19,7 @@
  * along with this program; if not, see <http://www.gnu.org/licenses/>.
  */
 
+#include <linux/nospec.h>
 #include "asix.h"
 
 int asix_read_cmd(struct usbnet *dev, u8 cmd, u16 value, u16 index,
@@ -633,6 +634,7 @@ int asix_set_eeprom(struct net_device *net, struct ethtool_eeprom *eeprom,
 	int first_word, last_word;
 	int i;
 	int ret;
+	unsigned int buf_len;
 
 	netdev_dbg(net, "write EEPROM len %d, offset %d, magic 0x%x\n",
 		   eeprom->len, eeprom->offset, eeprom->magic);
@@ -646,8 +648,8 @@ int asix_set_eeprom(struct net_device *net, struct ethtool_eeprom *eeprom,
 	first_word = eeprom->offset >> 1;
 	last_word = (eeprom->offset + eeprom->len - 1) >> 1;
 
-	eeprom_buff = kmalloc(sizeof(u16) * (last_word - first_word + 1),
-			      GFP_KERNEL);
+	buf_len = sizeof(u16) * (last_word - first_word + 1);
+	eeprom_buff = kmalloc(buf_len, GFP_KERNEL);
 	if (!eeprom_buff)
 		return -ENOMEM;
 
@@ -663,8 +665,11 @@ int asix_set_eeprom(struct net_device *net, struct ethtool_eeprom *eeprom,
 	}
 
 	if ((eeprom->offset + eeprom->len) & 1) {
+		unsigned int idx = array_index_nospec(last_word - first_word,
+						      buf_len);
+
 		ret = asix_read_cmd(dev, AX_CMD_READ_EEPROM, last_word, 0, 2,
-				    &eeprom_buff[last_word - first_word], 0);
+				    &eeprom_buff[idx], 0);
 		if (ret < 0) {
 			netdev_err(net, "Failed to read EEPROM at offset 0x%02x.\n", last_word);
 			goto free;
@@ -682,10 +687,12 @@ int asix_set_eeprom(struct net_device *net, struct ethtool_eeprom *eeprom,
 	msleep(20);
 
 	for (i = first_word; i <= last_word; i++) {
+		unsigned int idx = array_index_nospec(i - first_word, buf_len);
+
 		netdev_dbg(net, "write to EEPROM at offset 0x%02x, data 0x%04x\n",
-			   i, eeprom_buff[i - first_word]);
+			   i, eeprom_buff[idx]);
 		ret = asix_write_cmd(dev, AX_CMD_WRITE_EEPROM, i,
-				     eeprom_buff[i - first_word], 0, NULL, 0);
+				     eeprom_buff[idx], 0, NULL, 0);
 		if (ret < 0) {
 			netdev_err(net, "Failed to write EEPROM at offset 0x%02x.\n",
 				   i);

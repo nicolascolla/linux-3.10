@@ -38,6 +38,7 @@
 #include <linux/device.h>
 #include <linux/firmware.h>
 #include <linux/mutex.h>
+#include <linux/nospec.h>
 #include <asm/unaligned.h>
 
 #include "usbatm.h"
@@ -481,7 +482,7 @@ static ssize_t cxacru_sysfs_store_adsl_config(struct device *dev,
 		pos += tmp;
 
 		/* skip trailing newline */
-		if (buf[pos] == '\n' && pos == len-1)
+		if (buf[array_index_nospec(pos, len)] == '\n' && pos == len-1)
 			pos++;
 
 		data[num * 2 + 1] = cpu_to_le32(index);

@@ -16,6 +16,7 @@
 #include <linux/cryptohash.h>
 #include <linux/kernel.h>
 #include <linux/export.h>
+#include <linux/nospec.h>
 #include <net/tcp.h>
 #include <net/route.h>
 
@@ -215,7 +216,11 @@ int __cookie_v4_check(const struct iphdr *iph, const struct tcphdr *th,
 	__u32 mssind = check_tcp_syn_cookie(cookie, iph->saddr, iph->daddr,
 					    th->source, th->dest, seq);
 
-	return mssind < ARRAY_SIZE(msstab) ? msstab[mssind] : 0;
+	if (mssind >= ARRAY_SIZE(msstab))
+		return 0;
+	mssind = array_index_nospec(mssind, ARRAY_SIZE(msstab));
+
+	return msstab[mssind];
 }
 EXPORT_SYMBOL_GPL(__cookie_v4_check);
 

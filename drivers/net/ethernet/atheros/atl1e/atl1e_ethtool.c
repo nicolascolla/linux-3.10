@@ -23,6 +23,7 @@
 #include <linux/netdevice.h>
 #include <linux/ethtool.h>
 #include <linux/slab.h>
+#include <linux/nospec.h>
 
 #include "atl1e.h"
 
@@ -282,9 +283,10 @@ static int atl1e_set_eeprom(struct net_device *netdev,
 	if (((eeprom->offset + eeprom->len) & 3)) {
 		/* need read/modify/write of last changed EEPROM word */
 		/* only the first byte of the word is being modified */
+		int idx = array_index_nospec(last_dword - first_dword,
+					     AT_EEPROM_LEN);
 
-		if (!atl1e_read_eeprom(hw, last_dword * 4,
-				&(eeprom_buff[last_dword - first_dword]))) {
+		if (!atl1e_read_eeprom(hw, last_dword * 4, &(eeprom_buff[idx]))) {
 			ret_val = -EIO;
 			goto out;
 		}

@@ -46,7 +46,7 @@
 #include <linux/sysfs.h>
 #include <linux/acpi.h>
 #include <linux/io.h>
-
+#include <linux/nospec.h>
 
 /*
  * If force_addr is set to anything different from 0, we forcibly enable
@@ -284,8 +284,12 @@ static const u8 via_lut[] = {
  */
 static inline u8 TEMP_TO_REG(long val)
 {
-	return via_lut[val <= -50000 ? 0 : val >= 110000 ? 160 :
-		      (val < 0 ? val - 500 : val + 500) / 1000 + 50];
+	unsigned long idx;
+
+	idx = array_index_nospec(val <= -50000 ? 0 : val >= 110000 ? 160 :
+				 (val < 0 ? val - 500 : val + 500) / 1000 + 50,
+				 ARRAY_SIZE(via_lut));
+	return via_lut[idx];
 }
 
 /* for 8-bit temperature hyst and over registers */
