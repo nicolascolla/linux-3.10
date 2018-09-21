@@ -778,12 +778,12 @@ stf_barrier_fallback:
 	sync
 	ld	r9,PACA_AUX_EXRFI+EX_R9(r13)
 	ld	r10,PACA_AUX_EXRFI+EX_R10(r13)
-	GET_PACA(r13);
 	ori	31,31,0
 	.rept 14
 	b	1f
 1:
 	.endr
+	GET_PACA(r13);
 	blr
 
 	.globl rfi_flush_fallback

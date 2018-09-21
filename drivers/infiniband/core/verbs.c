@@ -1232,7 +1232,7 @@ int ib_resolve_eth_dmac(struct ib_device *device,
 	int           ret = 0;
 	struct ib_global_route *grh;
 
-	if (!rdma_is_port_valid_nospec(device, &ah_attr->port_num));
+	if (!rdma_is_port_valid_nospec(device, &ah_attr->port_num))
 		return -EINVAL;
 
 	if (ah_attr->type != RDMA_AH_ATTR_TYPE_ROCE)
