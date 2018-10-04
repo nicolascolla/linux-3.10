@@ -746,6 +746,7 @@ struct acpi_dev_node {
  * @coherent_dma_mask: Like dma_mask, but for alloc_coherent mapping as not all
  * 		hardware supports 64-bit addresses for consistent allocations
  * 		such descriptors.
+ * @dma_pfn_offset: offset of DMA memory range relatively of RAM
  * @dma_parms:	A low level driver may set these to teach IOMMU code about
  * 		segment limitations.
  * @dma_pools:	Dma pools (if dma'ble device).
@@ -765,6 +766,8 @@ struct acpi_dev_node {
  * 		device (i.e. the bus driver that discovered the device).
  * @offline_disabled: If set, the device is permanently online.
  * @offline:	Set after successful invocation of bus type's .offline().
+ * @of_node_reused: Set if the device-tree node is shared with an ancestor
+ *              device.
  *
  * At the lowest level, every device in a Linux system is represented by an
  * instance of struct device. The device structure contains the information
@@ -861,6 +864,11 @@ struct device_rh {
 
 	/* RHEL7: due to KABI this can't go into struct class */
 	RH_KABI_EXTEND(int (*class_shutdown_pre)(struct device *dev))
+
+	/* RHEL7: due to KABI this can't go into struct class */
+	RH_KABI_EXTEND(unsigned long  dma_pfn_offset)
+	RH_KABI_EXTEND(bool of_node_reused:1)
+
 };
 /* allocator for device_rh */
 extern void device_rh_alloc(struct device *dev);
@@ -1018,6 +1026,7 @@ extern int device_offline(struct device *dev);
 extern int device_online(struct device *dev);
 extern void set_primary_fwnode(struct device *dev, struct fwnode_handle *fwnode);
 extern void set_secondary_fwnode(struct device *dev, struct fwnode_handle *fwnode);
+void device_set_of_node_from_dev(struct device *dev, const struct device *dev2);
 
 /*
  * Root device objects for grouping under /sys/devices
@@ -1070,6 +1079,27 @@ struct device *device_create_with_groups(struct class *cls,
 			     const struct attribute_group **groups,
 			     const char *fmt, ...);
 extern void device_destroy(struct class *cls, dev_t devt);
+
+extern int __must_check device_add_groups(struct device *dev,
+					const struct attribute_group **groups);
+extern void device_remove_groups(struct device *dev,
+				 const struct attribute_group **groups);
+
+static inline int __must_check device_add_group(struct device *dev,
+					const struct attribute_group *grp)
+{
+	const struct attribute_group *groups[] = { grp, NULL };
+
+	return device_add_groups(dev, groups);
+}
+
+static inline void device_remove_group(struct device *dev,
+				       const struct attribute_group *grp)
+{
+	const struct attribute_group *groups[] = { grp, NULL };
+
+	return device_remove_groups(dev, groups);
+}
 
 /*
  * Platform "fixup" functions - allow the platform to have their say

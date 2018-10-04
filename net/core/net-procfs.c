@@ -1,7 +1,6 @@
 #include <linux/netdevice.h>
 #include <linux/proc_fs.h>
 #include <linux/seq_file.h>
-#include <linux/nospec.h>
 #include <net/wext.h>
 
 #define BUCKET_SPACE (32 - NETDEV_HASHBITS - 1)
@@ -248,8 +247,6 @@ static void *ptype_seq_next(struct seq_file *seq, void *v, loff_t *pos)
 	while (nxt == &ptype_base[hash]) {
 		if (++hash >= PTYPE_HASH_SIZE)
 			return NULL;
-		hash = array_index_nospec(hash, PTYPE_HASH_SIZE);
-
 		nxt = ptype_base[hash].next;
 	}
 found:

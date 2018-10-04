@@ -11,7 +11,6 @@
 #include <linux/etherdevice.h>
 #include <linux/if_ether.h>
 #include <linux/if_vlan.h>
-#include <linux/nospec.h>
 #include <scsi/scsi_tcq.h>
 
 #include "qedi.h"
@@ -539,7 +538,6 @@ static int qedi_iscsi_offload_conn(struct qedi_endpoint *qedi_ep)
 	conn_info->ka_max_probe_cnt = DEF_KA_MAX_PROBE_COUNT;
 	conn_info->dup_ack_theshold = 3;
 	conn_info->rcv_wnd = 65535;
-	conn_info->cwnd = DEF_MAX_CWND;
 
 	conn_info->ss_thresh = 65535;
 	conn_info->srtt = 300;
@@ -557,8 +555,8 @@ static int qedi_iscsi_offload_conn(struct qedi_endpoint *qedi_ep)
 				       (qedi_ep->ip_type == TCP_IPV6),
 				       1, (qedi_ep->vlan_id != 0));
 
+	conn_info->cwnd = DEF_MAX_CWND * conn_info->mss;
 	conn_info->rcv_wnd_scale = 4;
-	conn_info->ts_ticks_per_second = 1000;
 	conn_info->da_timeout_value = 200;
 	conn_info->ack_frequency = 2;
 
@@ -1151,7 +1149,7 @@ static int qedi_data_avail(struct qedi_ctx *qedi, u16 vlanid)
 	if (vlanid)
 		__vlan_hwaccel_put_tag(skb, htons(ETH_P_8021Q), vlanid);
 
-	rc = qedi_ops->ll2->start_xmit(cdev, skb);
+	rc = qedi_ops->ll2->start_xmit(cdev, skb, 0);
 	if (rc) {
 		QEDI_ERR(&qedi->dbg_ctx, "ll2 start_xmit returned %d\n",
 			 rc);
@@ -1223,7 +1221,6 @@ static int qedi_set_path(struct Scsi_Host *shost, struct iscsi_path *path_data)
 	}
 
 	iscsi_cid = (u32)path_data->handle;
-	iscsi_cid = array_index_nospec(iscsi_cid, qedi->max_active_conns);
 	qedi_ep = qedi->ep_tbl[iscsi_cid];
 	QEDI_INFO(&qedi->dbg_ctx, QEDI_LOG_INFO,
 		  "iscsi_cid=0x%x, qedi_ep=%p\n", iscsi_cid, qedi_ep);
@@ -1558,7 +1555,8 @@ char *qedi_get_iscsi_error(enum iscsi_error_types err_code)
 	return msg;
 }
 
-void qedi_process_iscsi_error(struct qedi_endpoint *ep, struct async_data *data)
+void qedi_process_iscsi_error(struct qedi_endpoint *ep,
+			      struct iscsi_eqe_data *data)
 {
 	struct qedi_conn *qedi_conn;
 	struct qedi_ctx *qedi;
@@ -1604,7 +1602,8 @@ void qedi_process_iscsi_error(struct qedi_endpoint *ep, struct async_data *data)
 		qedi_start_conn_recovery(qedi_conn->qedi, qedi_conn);
 }
 
-void qedi_process_tcp_error(struct qedi_endpoint *ep, struct async_data *data)
+void qedi_process_tcp_error(struct qedi_endpoint *ep,
+			    struct iscsi_eqe_data *data)
 {
 	struct qedi_conn *qedi_conn;
 

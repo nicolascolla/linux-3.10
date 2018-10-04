@@ -32,7 +32,6 @@ struct xfs_mount;
 struct xfs_trans;
 struct xfs_trans_res;
 struct xfs_dquot_acct;
-struct xfs_busy_extent;
 
 typedef struct xfs_log_item {
 	struct list_head		li_ail;		/* AIL pointers */
@@ -102,10 +101,6 @@ typedef struct xfs_trans {
 	unsigned int		t_rtx_res;	/* # of rt extents resvd */
 	unsigned int		t_rtx_res_used;	/* # of resvd rt extents used */
 	struct xlog_ticket	*t_ticket;	/* log mgr ticket */
-	xfs_lsn_t		t_lsn;		/* log seq num of start of
-						 * transaction. */
-	xfs_lsn_t		t_commit_lsn;	/* log seq num of end of
-						 * transaction. */
 	struct xfs_mount	*t_mountp;	/* ptr to fs mount struct */
 	struct xfs_dquot_acct   *t_dqinfo;	/* acctg info for dquots */
 	unsigned int		t_flags;	/* misc flags */
@@ -223,7 +218,6 @@ int		xfs_trans_free_extent(struct xfs_trans *,
 				      struct xfs_efd_log_item *, xfs_fsblock_t,
 				      xfs_extlen_t);
 int		xfs_trans_commit(struct xfs_trans *);
-int		__xfs_trans_roll(struct xfs_trans **, struct xfs_inode *, int *);
 int		xfs_trans_roll(struct xfs_trans **, struct xfs_inode *);
 void		xfs_trans_cancel(xfs_trans_t *);
 int		xfs_trans_ail_init(struct xfs_mount *);

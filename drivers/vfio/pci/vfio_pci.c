@@ -28,7 +28,6 @@
 #include <linux/uaccess.h>
 #include <linux/vfio.h>
 #include <linux/vgaarb.h>
-#include <linux/nospec.h>
 
 #include "vfio_pci_private.h"
 
@@ -272,6 +271,12 @@ static int vfio_pci_enable(struct vfio_pci_device *vdev)
 
 	if (!vfio_vga_disabled() && vfio_pci_is_vga(pdev))
 		vdev->has_vga = true;
+
+	if (vfio_pci_is_vga(pdev) && pdev->vendor == PCI_VENDOR_ID_INTEL) {
+		if (vfio_pci_igd_opregion_init(vdev) == 0)
+			dev_info(&pdev->dev,
+				 "Intel IGD OpRegion support enabled\n");
+	}
 
 	vfio_pci_probe_mmaps(vdev);
 
@@ -559,6 +564,8 @@ static int msix_sparse_mmap_cap(struct vfio_pci_device *vdev,
 	if (!sparse)
 		return -ENOMEM;
 
+	sparse->header.id = VFIO_REGION_INFO_CAP_SPARSE_MMAP;
+	sparse->header.version = 1;
 	sparse->nr_areas = nr_areas;
 
 	if (vdev->msix_offset & PAGE_MASK) {
@@ -574,8 +581,7 @@ static int msix_sparse_mmap_cap(struct vfio_pci_device *vdev,
 		i++;
 	}
 
-	ret = vfio_info_add_capability(caps, VFIO_REGION_INFO_CAP_SPARSE_MMAP,
-				       sparse);
+	ret = vfio_info_add_capability(caps, &sparse->header, size);
 	kfree(sparse);
 
 	return ret;
@@ -640,7 +646,6 @@ static long vfio_pci_ioctl(void *device_data,
 		struct vfio_region_info info;
 		struct vfio_info_cap caps = { .buf = NULL, .size = 0 };
 		int i, ret;
-		u32 index;
 
 		minsz = offsetofend(struct vfio_region_info, offset);
 
@@ -659,8 +664,7 @@ static long vfio_pci_ioctl(void *device_data,
 			break;
 		case VFIO_PCI_BAR0_REGION_INDEX ... VFIO_PCI_BAR5_REGION_INDEX:
 			info.offset = VFIO_PCI_INDEX_TO_OFFSET(info.index);
-			index = array_index_nospec(info.index, DEVICE_COUNT_RESOURCE);
-			info.size = pci_resource_len(pdev, index);
+			info.size = pci_resource_len(pdev, info.index);
 			if (!info.size) {
 				info.flags = 0;
 				break;
@@ -668,8 +672,7 @@ static long vfio_pci_ioctl(void *device_data,
 
 			info.flags = VFIO_REGION_INFO_FLAG_READ |
 				     VFIO_REGION_INFO_FLAG_WRITE;
-			index = array_index_nospec(info.index, PCI_STD_RESOURCE_END + 1);
-			if (vdev->bar_mmap_supported[index]) {
+			if (vdev->bar_mmap_supported[info.index]) {
 				info.flags |= VFIO_REGION_INFO_FLAG_MMAP;
 				if (info.index == vdev->msix_bar) {
 					ret = msix_sparse_mmap_cap(vdev, &caps);
@@ -688,8 +691,7 @@ static long vfio_pci_ioctl(void *device_data,
 			info.flags = 0;
 
 			/* Report the BAR size, not the ROM size */
-			index = array_index_nospec(info.index, DEVICE_COUNT_RESOURCE);
-			info.size = pci_resource_len(pdev, index);
+			info.size = pci_resource_len(pdev, info.index);
 			if (!info.size)
 				break;
 
@@ -716,14 +718,15 @@ static long vfio_pci_ioctl(void *device_data,
 			break;
 		default:
 		{
-			struct vfio_region_info_cap_type cap_type;
+			struct vfio_region_info_cap_type cap_type = {
+					.header.id = VFIO_REGION_INFO_CAP_TYPE,
+					.header.version = 1 };
 
 			if (info.index >=
 			    VFIO_PCI_NUM_REGIONS + vdev->num_regions)
 				return -EINVAL;
 
 			i = info.index - VFIO_PCI_NUM_REGIONS;
-			i = array_index_nospec(i, vdev->num_regions);
 
 			info.offset = VFIO_PCI_INDEX_TO_OFFSET(info.index);
 			info.size = vdev->region[i].size;
@@ -732,9 +735,8 @@ static long vfio_pci_ioctl(void *device_data,
 			cap_type.type = vdev->region[i].type;
 			cap_type.subtype = vdev->region[i].subtype;
 
-			ret = vfio_info_add_capability(&caps,
-						      VFIO_REGION_INFO_CAP_TYPE,
-						      &cap_type);
+			ret = vfio_info_add_capability(&caps, &cap_type.header,
+						       sizeof(cap_type));
 			if (ret)
 				return ret;
 
@@ -1179,6 +1181,19 @@ static int vfio_pci_probe(struct pci_dev *pdev, const struct pci_device_id *id)
 
 	if (pdev->hdr_type != PCI_HEADER_TYPE_NORMAL)
 		return -EINVAL;
+
+	/*
+	 * Prevent binding to PFs with VFs enabled, this too easily allows
+	 * userspace instance with VFs and PFs from the same device, which
+	 * cannot work.  Disabling SR-IOV here would initiate removing the
+	 * VFs, which would unbind the driver, which is prone to blocking
+	 * if that VF is also in use by vfio-pci.  Just reject these PFs
+	 * and let the user sort it out.
+	 */
+	if (pci_num_vf(pdev)) {
+		pci_warn(pdev, "Cannot bind to PF with SR-IOV enabled\n");
+		return -EBUSY;
+	}
 
 	group = vfio_iommu_group_get(&pdev->dev);
 	if (!group)

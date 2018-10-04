@@ -41,7 +41,6 @@
  * POSSIBILITY OF SUCH DAMAGES.
  */
 
-#include <linux/nospec.h>
 #include <acpi/acpi.h>
 #include "accommon.h"
 #include "acevents.h"
@@ -311,7 +310,6 @@ struct acpi_gpe_event_info *acpi_ev_low_get_gpe_info(u32 gpe_number,
 	if (gpe_index >= gpe_block->gpe_count) {
 		return (NULL);
 	}
-	gpe_index = array_index_nospec(gpe_index, gpe_block->gpe_count);
 
 	return (&gpe_block->event_info[gpe_index]);
 }

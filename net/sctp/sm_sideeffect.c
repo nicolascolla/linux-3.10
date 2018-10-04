@@ -847,6 +847,10 @@ static void sctp_cmd_new_state(sctp_cmd_seq_t *cmds,
 		if (!sctp_style(sk, UDP))
 			sk->sk_state_change(sk);
 	}
+
+	if (sctp_state(asoc, SHUTDOWN_PENDING) &&
+	    !sctp_outq_is_empty(&asoc->outqueue))
+		sctp_outq_uncork(&asoc->outqueue, GFP_ATOMIC);
 }
 
 /* Helper function to delete an association. */
@@ -940,7 +944,6 @@ static void sctp_cmd_process_fwdtsn(struct sctp_ulpq *ulpq,
 	struct sctp_fwdtsn_skip *skip;
 	/* Walk through all the skipped SSNs */
 	sctp_walk_fwdtsn(skip, chunk) {
-		barrier_nospec();
 		sctp_ulpq_skip(ulpq, ntohs(skip->stream), ntohs(skip->ssn));
 	}
 }
@@ -1629,8 +1632,8 @@ static int sctp_cmd_interpreter(sctp_event_t event_type,
 		case SCTP_CMD_PROCESS_CTSN:
 			/* Dummy up a SACK for processing. */
 			sackh.cum_tsn_ack = cmd->obj.be32;
-			sackh.a_rwnd = asoc->peer.rwnd +
-					asoc->outqueue.outstanding_bytes;
+			sackh.a_rwnd = htonl(asoc->peer.rwnd +
+					     asoc->outqueue.outstanding_bytes);
 			sackh.num_gap_ack_blocks = 0;
 			sackh.num_dup_tsns = 0;
 			chunk->subh.sack_hdr = &sackh;
@@ -1720,6 +1723,10 @@ static int sctp_cmd_interpreter(sctp_event_t event_type,
 			break;
 
 		case SCTP_CMD_SET_ASOC:
+			if (asoc && local_cork) {
+				sctp_outq_uncork(&asoc->outqueue, gfp);
+				local_cork = 0;
+			}
 			asoc = cmd->obj.asoc;
 			break;
 

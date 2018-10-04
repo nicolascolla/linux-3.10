@@ -17,7 +17,6 @@
 #include <linux/module.h>
 #include <linux/rbtree.h>
 #include <linux/stacktrace.h>
-#include <linux/nospec.h>
 
 #define DM_MSG_PREFIX "bufio"
 
@@ -169,7 +168,7 @@ static inline int dm_bufio_cache_index(struct dm_bufio_client *c)
 
 	BUG_ON(ret >= ARRAY_SIZE(dm_bufio_caches));
 
-	return array_index_nospec(ret, ARRAY_SIZE(dm_bufio_caches));
+	return ret;
 }
 
 #define DM_BUFIO_CACHE(c)	(dm_bufio_caches[dm_bufio_cache_index(c)])

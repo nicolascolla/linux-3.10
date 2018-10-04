@@ -70,6 +70,7 @@
 #define ACPI_SIG_HPET           "HPET"	/* High Precision Event Timer table */
 #define ACPI_SIG_IBFT           "IBFT"	/* iSCSI Boot Firmware Table */
 #define ACPI_SIG_IVRS           "IVRS"	/* I/O Virtualization Reporting Structure */
+#define ACPI_SIG_LPIT           "LPIT"	/* Low Power Idle Table */
 #define ACPI_SIG_MCFG           "MCFG"	/* PCI Memory Mapped Configuration table */
 #define ACPI_SIG_MCHI           "MCHI"	/* Management Controller Host Interface table */
 #define ACPI_SIG_MTMR           "MTMR"	/* MID Timer table */
@@ -84,6 +85,7 @@
 #define ACPI_SIG_WDAT           "WDAT"	/* Watchdog Action Table */
 #define ACPI_SIG_WDDT           "WDDT"	/* Watchdog Timer Description Table */
 #define ACPI_SIG_WDRT           "WDRT"	/* Watchdog Resource Table */
+#define ACPI_SIG_WSMT           "WSMT"	/* Windows SMM Security Migrations Table */
 
 #ifdef ACPI_UNDEFINED_TABLES
 /*
@@ -816,6 +818,70 @@ struct acpi_ivrs_memory {
 
 /*******************************************************************************
  *
+ * LPIT - Low Power Idle Table
+ *
+ * Conforms to "ACPI Low Power Idle Table (LPIT) and _LPD Proposal (DRAFT)"
+ *
+ ******************************************************************************/
+
+struct acpi_table_lpit {
+	struct acpi_table_header header;	/* Common ACPI table header */
+};
+
+/* LPIT subtable header */
+
+struct acpi_lpit_header {
+	u32 type;		/* Subtable type */
+	u32 length;		/* Subtable length */
+	u16 unique_id;
+	u16 reserved;
+	u32 flags;
+};
+
+/* Values for subtable Type above */
+
+enum acpi_lpit_type {
+	ACPI_LPIT_TYPE_NATIVE_CSTATE = 0x00,
+	ACPI_LPIT_TYPE_SIMPLE_IO = 0x01
+};
+
+/* Masks for Flags field above  */
+
+#define ACPI_LPIT_STATE_DISABLED    (1)
+#define ACPI_LPIT_NO_COUNTER        (1<<1)
+
+/*
+ * LPIT subtables, correspond to Type in struct acpi_lpit_header
+ */
+
+/* 0x00: Native C-state instruction based LPI structure */
+
+struct acpi_lpit_native {
+	struct acpi_lpit_header header;
+	struct acpi_generic_address entry_trigger;
+	u32 residency;
+	u32 latency;
+	struct acpi_generic_address residency_counter;
+	u64 counter_frequency;
+};
+
+/* 0x01: Simple I/O based LPI structure */
+
+struct acpi_lpit_io {
+	struct acpi_lpit_header header;
+	struct acpi_generic_address entry_trigger;
+	u32 trigger_action;
+	u64 trigger_value;
+	u64 trigger_mask;
+	struct acpi_generic_address minimum_idle_state;
+	u32 residency;
+	u32 latency;
+	struct acpi_generic_address residency_counter;
+	u64 counter_frequency;
+};
+
+/*******************************************************************************
+ *
  * MCFG - PCI Memory Mapped Configuration table and sub-table
  *        Version 1
  *
@@ -1332,6 +1398,27 @@ struct acpi_table_wdrt {
 	u16 max_count;		/* Maximum counter value supported */
 	u8 units;
 };
+
+/*******************************************************************************
+ *
+ * WSMT - Windows SMM Security Migrations Table
+ *        Version 1
+ *
+ * Conforms to "Windows SMM Security Migrations Table",
+ * Version 1.0, April 18, 2016
+ *
+ ******************************************************************************/
+
+struct acpi_table_wsmt {
+	struct acpi_table_header header;	/* Common ACPI table header */
+	u32 protection_flags;
+};
+
+/* Flags for protection_flags field above */
+
+#define ACPI_WSMT_FIXED_COMM_BUFFERS                (1)
+#define ACPI_WSMT_COMM_BUFFER_NESTED_PTR_PROTECTION (2)
+#define ACPI_WSMT_SYSTEM_RESOURCE_PROTECTION        (4)
 
 /* Reset to default packing */
 

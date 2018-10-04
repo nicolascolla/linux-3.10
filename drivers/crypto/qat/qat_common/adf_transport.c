@@ -45,7 +45,6 @@
   OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 */
 #include <linux/delay.h>
-#include <linux/nospec.h>
 #include "adf_accel_devices.h"
 #include "adf_transport_internal.h"
 #include "adf_transport_access_macros.h"
@@ -245,8 +244,6 @@ int adf_create_ring(struct adf_accel_dev *accel_dev, const char *section,
 		dev_err(&GET_DEV(accel_dev), "Invalid bank number\n");
 		return -EFAULT;
 	}
-	bank_num = array_index_nospec(bank_num, GET_MAX_BANKS(accel_dev));
-
 	if (msg_size > ADF_MSG_SIZE_TO_BYTES(ADF_MAX_MSG_SIZE)) {
 		dev_err(&GET_DEV(accel_dev), "Invalid msg size\n");
 		return -EFAULT;
@@ -270,7 +267,6 @@ int adf_create_ring(struct adf_accel_dev *accel_dev, const char *section,
 		dev_err(&GET_DEV(accel_dev), "Invalid ring number\n");
 		return -EFAULT;
 	}
-	ring_num = array_index_nospec(ring_num, ADF_ETR_MAX_RINGS_PER_BANK);
 
 	bank = &transport_data->banks[bank_num];
 	if (adf_reserve_ring(bank, ring_num)) {

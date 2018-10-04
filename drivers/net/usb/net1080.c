@@ -28,7 +28,6 @@
 #include <linux/usb.h>
 #include <linux/usb/usbnet.h>
 #include <linux/slab.h>
-#include <linux/nospec.h>
 
 #include <asm/unaligned.h>
 
@@ -265,16 +264,8 @@ static inline void nc_dump_status(struct usbnet *dev, u16 status)
  * TTL register
  */
 
-#define	TTL_THIS(ttl)	(0x00ff & ttl)
 #define	TTL_OTHER(ttl)	(0x00ff & (ttl >> 8))
 #define MK_TTL(this,other)	((u16)(((other)<<8)|(0x00ff&(this))))
-
-static inline void nc_dump_ttl(struct usbnet *dev, u16 ttl)
-{
-	netif_dbg(dev, link, dev->net, "net1080 %s-%s ttl 0x%x this = %d, other = %d\n",
-		  dev->udev->bus->bus_name, dev->udev->devpath,
-		  ttl, TTL_THIS(ttl), TTL_OTHER(ttl));
-}
 
 /*-------------------------------------------------------------------------*/
 
@@ -309,7 +300,6 @@ static int net1080_reset(struct usbnet *dev)
 		goto done;
 	}
 	ttl = vp;
-	// nc_dump_ttl(dev, ttl);
 
 	nc_register_write(dev, REG_TTL,
 			MK_TTL(NC_READ_TTL_MS, TTL_OTHER(ttl)) );
@@ -397,9 +387,6 @@ static int net1080_rx_fixup(struct usbnet *dev, struct sk_buff *skb)
 		nc_ensure_sync(dev);
 		// switch (vendor/product ids) { ... }
 	}
-	packet_len = array_index_nospec(packet_len,
-					NC_MAX_PACKET - FRAMED_SIZE(0) + 1);
-
 	skb_pull(skb, hdr_len);
 
 	trailer = (struct nc_trailer *)
@@ -479,14 +466,14 @@ net1080_tx_fixup(struct usbnet *dev, struct sk_buff *skb, gfp_t flags)
 
 encapsulate:
 	/* header first */
-	header = (struct nc_header *) skb_push(skb, sizeof *header);
+	header = skb_push(skb, sizeof *header);
 	header->hdr_len = cpu_to_le16(sizeof (*header));
 	header->packet_len = cpu_to_le16(len);
 	header->packet_id = cpu_to_le16((u16)dev->xid++);
 
 	/* maybe pad; then trailer */
 	if (!((skb->len + sizeof *trailer) & 0x01))
-		*(u8 *)skb_put(skb, 1) = PAD_BYTE;
+		skb_put_u8(skb, PAD_BYTE);
 	trailer = skb_put(skb, sizeof *trailer);
 	put_unaligned(header->packet_id, &trailer->packet_id);
 #if 0

@@ -45,7 +45,6 @@
  * @new_func:	pointer to the patched function code
  * @old_sympos: a hint indicating which symbol position the old function
  *		can be found (optional)
- * @immediate:  patch the func immediately, bypassing safety mechanisms
  * @old_addr:	the address of the function being patched
  * @kobj:	kobject for sysfs resources
  * @stack_node:	list node for klp_ops func_stack list
@@ -81,7 +80,6 @@ struct klp_func {
 	 * in kallsyms for the given object is used.
 	 */
 	unsigned long old_sympos;
-	bool immediate;
 
 	/* internal */
 	unsigned long old_addr;
@@ -142,7 +140,6 @@ struct klp_object {
  * struct klp_patch - patch structure for live patching
  * @mod:	reference to the live patch module
  * @objs:	object entries for kernel objects to be patched
- * @immediate:  patch all funcs immediately, bypassing safety mechanisms
  * @list:	list node for global list of registered patches
  * @kobj:	kobject for sysfs resources
  * @enabled:	the patch is enabled (but operation may be incomplete)
@@ -152,7 +149,6 @@ struct klp_patch {
 	/* external */
 	struct module *mod;
 	struct klp_object *objs;
-	bool immediate;
 
 	/* internal */
 	struct list_head list;
@@ -195,13 +191,20 @@ static inline bool klp_have_reliable_stack(void)
 	       IS_ENABLED(CONFIG_HAVE_RELIABLE_STACKTRACE);
 }
 
+typedef int (*klp_shadow_ctor_t)(void *obj,
+				 void *shadow_data,
+				 void *ctor_data);
+typedef void (*klp_shadow_dtor_t)(void *obj, void *shadow_data);
+
 void *klp_shadow_get(void *obj, unsigned long id);
-void *klp_shadow_alloc(void *obj, unsigned long id, void *data,
-		       size_t size, gfp_t gfp_flags);
-void *klp_shadow_get_or_alloc(void *obj, unsigned long id, void *data,
-			      size_t size, gfp_t gfp_flags);
-void klp_shadow_free(void *obj, unsigned long id);
-void klp_shadow_free_all(unsigned long id);
+void *klp_shadow_alloc(void *obj, unsigned long id,
+		       size_t size, gfp_t gfp_flags,
+		       klp_shadow_ctor_t ctor, void *ctor_data);
+void *klp_shadow_get_or_alloc(void *obj, unsigned long id,
+			      size_t size, gfp_t gfp_flags,
+			      klp_shadow_ctor_t ctor, void *ctor_data);
+void klp_shadow_free(void *obj, unsigned long id, klp_shadow_dtor_t dtor);
+void klp_shadow_free_all(unsigned long id, klp_shadow_dtor_t dtor);
 
 #else /* !CONFIG_LIVEPATCH */
 

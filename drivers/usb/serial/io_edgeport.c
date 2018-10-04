@@ -1,13 +1,9 @@
+// SPDX-License-Identifier: GPL-2.0+
 /*
  * Edgeport USB Serial Converter driver
  *
  * Copyright (C) 2000 Inside Out Networks, All rights reserved.
  * Copyright (C) 2001-2002 Greg Kroah-Hartman <greg@kroah.com>
- *
- *	This program is free software; you can redistribute it and/or modify
- *	it under the terms of the GNU General Public License as published by
- *	the Free Software Foundation; either version 2 of the License, or
- *	(at your option) any later version.
  *
  * Supports the following devices:
  *	Edgeport/4
@@ -1544,11 +1540,6 @@ static void edge_set_termios(struct tty_struct *tty,
 	struct usb_serial_port *port, struct ktermios *old_termios)
 {
 	struct edgeport_port *edge_port = usb_get_serial_port_data(port);
-	unsigned int cflag;
-
-	cflag = tty->termios.c_cflag;
-	dev_dbg(&port->dev, "%s - clfag %08x iflag %08x\n", __func__, tty->termios.c_cflag, tty->termios.c_iflag);
-	dev_dbg(&port->dev, "%s - old clfag %08x old iflag %08x\n", __func__, old_termios->c_cflag, old_termios->c_iflag);
 
 	if (edge_port == NULL)
 		return;
@@ -2291,7 +2282,6 @@ static int write_cmd_usb(struct edgeport_port *edge_port,
 		/* something went wrong */
 		dev_err(dev, "%s - usb_submit_urb(write command) failed, status = %d\n",
 			__func__, status);
-		usb_kill_urb(urb);
 		usb_free_urb(urb);
 		atomic_dec(&CmdUrbs);
 		return status;
@@ -2844,14 +2834,9 @@ static int edge_startup(struct usb_serial *serial)
 	bool interrupt_in_found;
 	bool bulk_in_found;
 	bool bulk_out_found;
-	static __u32 descriptor[3] = {	EDGE_COMPATIBILITY_MASK0,
-					EDGE_COMPATIBILITY_MASK1,
-					EDGE_COMPATIBILITY_MASK2 };
-
-	if (serial->num_bulk_in < 1 || serial->num_interrupt_in < 1) {
-		dev_err(&serial->interface->dev, "missing endpoints\n");
-		return -ENODEV;
-	}
+	static const __u32 descriptor[3] = {	EDGE_COMPATIBILITY_MASK0,
+						EDGE_COMPATIBILITY_MASK1,
+						EDGE_COMPATIBILITY_MASK2 };
 
 	dev = serial->dev;
 
@@ -3120,6 +3105,9 @@ static struct usb_serial_driver edgeport_2port_device = {
 	.description		= "Edgeport 2 port adapter",
 	.id_table		= edgeport_2port_id_table,
 	.num_ports		= 2,
+	.num_bulk_in		= 1,
+	.num_bulk_out		= 1,
+	.num_interrupt_in	= 1,
 	.open			= edge_open,
 	.close			= edge_close,
 	.throttle		= edge_throttle,
@@ -3152,6 +3140,9 @@ static struct usb_serial_driver edgeport_4port_device = {
 	.description		= "Edgeport 4 port adapter",
 	.id_table		= edgeport_4port_id_table,
 	.num_ports		= 4,
+	.num_bulk_in		= 1,
+	.num_bulk_out		= 1,
+	.num_interrupt_in	= 1,
 	.open			= edge_open,
 	.close			= edge_close,
 	.throttle		= edge_throttle,
@@ -3184,6 +3175,9 @@ static struct usb_serial_driver edgeport_8port_device = {
 	.description		= "Edgeport 8 port adapter",
 	.id_table		= edgeport_8port_id_table,
 	.num_ports		= 8,
+	.num_bulk_in		= 1,
+	.num_bulk_out		= 1,
+	.num_interrupt_in	= 1,
 	.open			= edge_open,
 	.close			= edge_close,
 	.throttle		= edge_throttle,
@@ -3216,6 +3210,9 @@ static struct usb_serial_driver epic_device = {
 	.description		= "EPiC device",
 	.id_table		= Epic_port_id_table,
 	.num_ports		= 1,
+	.num_bulk_in		= 1,
+	.num_bulk_out		= 1,
+	.num_interrupt_in	= 1,
 	.open			= edge_open,
 	.close			= edge_close,
 	.throttle		= edge_throttle,

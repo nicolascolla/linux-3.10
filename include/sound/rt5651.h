@@ -11,11 +11,26 @@
 #ifndef __LINUX_SND_RT5651_H
 #define __LINUX_SND_RT5651_H
 
-struct rt5651_platform_data {
-	/* IN2 can optionally be differential */
-	bool in2_diff;
+/*
+ * Note these MUST match the values from the DT binding:
+ * Documentation/devicetree/bindings/sound/rt5651.txt
+ */
+enum rt5651_jd_src {
+	RT5651_JD_NULL,
+	RT5651_JD1_1,
+	RT5651_JD1_2,
+	RT5651_JD2,
+};
 
-	bool dmic_en;
+/*
+ * Note these MUST match the values from the DT binding:
+ * Documentation/devicetree/bindings/sound/rt5651.txt
+ */
+enum rt5651_ovcd_sf {
+	RT5651_OVCD_SF_0P5,
+	RT5651_OVCD_SF_0P75,
+	RT5651_OVCD_SF_1P0,
+	RT5651_OVCD_SF_1P5,
 };
 
 #endif

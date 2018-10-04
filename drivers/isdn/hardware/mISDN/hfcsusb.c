@@ -35,7 +35,6 @@
 #include <linux/usb.h>
 #include <linux/mISDNhw.h>
 #include <linux/slab.h>
-#include <linux/nospec.h>
 #include "hfcsusb.h"
 
 static unsigned int debug;
@@ -479,7 +478,6 @@ static int
 open_bchannel(struct hfcsusb *hw, struct channel_req *rq)
 {
 	struct bchannel		*bch;
-	unsigned char		idx;
 
 	if (rq->adr.channel == 0 || rq->adr.channel > 2)
 		return -EINVAL;
@@ -490,8 +488,7 @@ open_bchannel(struct hfcsusb *hw, struct channel_req *rq)
 		printk(KERN_DEBUG "%s: %s B%i\n",
 		       hw->name, __func__, rq->adr.channel);
 
-	idx = array_index_nospec(rq->adr.channel - 1, 2);
-	bch = &hw->bch[idx];
+	bch = &hw->bch[rq->adr.channel - 1];
 	if (test_and_set_bit(FLG_OPEN, &bch->Flags))
 		return -EBUSY; /* b-channel can be only open once */
 	bch->ch.protocol = rq->protocol;

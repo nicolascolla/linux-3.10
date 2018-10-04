@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0
 /* dvb-usb-remote.c is part of the DVB USB library.
  *
  * Copyright (C) 2004-6 Patrick Boettcher (patrick.boettcher@desy.de)
@@ -7,7 +8,6 @@
  */
 #include "dvb-usb-common.h"
 #include <linux/usb/input.h>
-#include <linux/nospec.h>
 
 static unsigned int
 legacy_dvb_usb_get_keymap_index(const struct input_keymap_entry *ke,
@@ -53,7 +53,6 @@ static int legacy_dvb_usb_getkeycode(struct input_dev *dev,
 	index = legacy_dvb_usb_get_keymap_index(ke, keymap, keymap_size);
 	if (index >= keymap_size)
 		return -EINVAL;
-	index = array_index_nospec(index, keymap_size);
 
 	ke->keycode = keymap[index].keycode;
 	if (ke->keycode == KEY_UNKNOWN)
@@ -84,7 +83,6 @@ static int legacy_dvb_usb_setkeycode(struct input_dev *dev,
 	 */
 	if (index >= keymap_size)
 		return -EINVAL;
-	index = array_index_nospec(index, keymap_size);
 
 	*old_keycode = keymap[index].keycode;
 	keymap->keycode = ke->keycode;

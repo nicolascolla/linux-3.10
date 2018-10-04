@@ -500,9 +500,10 @@ EXPORT_SYMBOL(path_put);
 static bool path_connected(const struct path *path)
 {
 	struct vfsmount *mnt = path->mnt;
+	struct super_block *sb = mnt->mnt_sb;
 
-	/* Only bind mounts can have disconnected paths */
-	if (mnt->mnt_root == mnt->mnt_sb->s_root)
+	/* Bind mounts and multi-root filesystems can have disconnected paths */
+	if (!(sb->s_iflags & SB_I_MULTIROOT) && (mnt->mnt_root == sb->s_root))
 		return true;
 
 	return is_subdir(path->dentry, mnt->mnt_root);
@@ -2915,22 +2916,10 @@ no_open:
 		dentry = lookup_real(dir, dentry, nd->flags);
 		if (IS_ERR(dentry))
 			return PTR_ERR(dentry);
-
-		if (create_error) {
-			int open_flag = op->open_flag;
-
-			error = create_error;
-			if ((open_flag & O_EXCL)) {
-				if (!dentry->d_inode)
-					goto out;
-			} else if (!dentry->d_inode) {
-				goto out;
-			} else if ((open_flag & O_TRUNC) &&
-				   S_ISREG(dentry->d_inode->i_mode)) {
-				goto out;
-			}
-			/* will fail later, go on to get the right error */
-		}
+	}
+	if (create_error && !dentry->d_inode) {
+		error = create_error;
+		goto out;
 	}
 looked_up:
 	path->dentry = dentry;

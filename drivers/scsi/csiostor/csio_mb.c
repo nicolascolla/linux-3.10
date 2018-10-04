@@ -1217,7 +1217,7 @@ csio_mb_issue(struct csio_hw *hw, struct csio_mb *mbp)
 		/* Queue mbox cmd, if another mbox cmd is active */
 		if (mbp->mb_cbfn == NULL) {
 			rv = -EBUSY;
-			csio_dbg(hw, "Couldnt own Mailbox %x op:0x%x\n",
+			csio_dbg(hw, "Couldn't own Mailbox %x op:0x%x\n",
 				    hw->pfn, *((uint8_t *)mbp->mb));
 
 			goto error_out;
@@ -1245,14 +1245,14 @@ csio_mb_issue(struct csio_hw *hw, struct csio_mb *mbp)
 				rv = owner ? -EBUSY : -ETIMEDOUT;
 
 				csio_dbg(hw,
-					 "Couldnt own Mailbox %x op:0x%x "
+					 "Couldn't own Mailbox %x op:0x%x "
 					 "owner:%x\n",
 					 hw->pfn, *((uint8_t *)mbp->mb), owner);
 				goto error_out;
 			} else {
 				if (mbm->mcurrent == NULL) {
 					csio_err(hw,
-						 "Couldnt own Mailbox %x "
+						 "Couldn't own Mailbox %x "
 						 "op:0x%x owner:%x\n",
 						 hw->pfn, *((uint8_t *)mbp->mb),
 						 owner);
@@ -1661,13 +1661,10 @@ csio_mb_cancel_all(struct csio_hw *hw, struct list_head *cbfn_q)
  */
 int
 csio_mbm_init(struct csio_mbm *mbm, struct csio_hw *hw,
-	      void (*timer_fn)(uintptr_t))
+	      void (*timer_fn)(struct timer_list *))
 {
-	struct timer_list *timer = &mbm->timer;
-
-	init_timer(timer);
-	timer->function = timer_fn;
-	timer->data = (unsigned long)hw;
+	mbm->hw = hw;
+	timer_setup(&mbm->timer, timer_fn, 0);
 
 	INIT_LIST_HEAD(&mbm->req_q);
 	INIT_LIST_HEAD(&mbm->cbfn_q);

@@ -37,7 +37,6 @@
 #include <linux/sysfs.h>
 #include <linux/thermal.h>
 #include <linux/err.h>
-#include <linux/nospec.h>
 
 #include "core.h"
 
@@ -232,7 +231,6 @@ static int mlxsw_thermal_get_trip_type(struct thermal_zone_device *tzdev,
 
 	if (trip < 0 || trip >= MLXSW_THERMAL_NUM_TRIPS)
 		return -EINVAL;
-	trip = array_index_nospec(trip, MLXSW_THERMAL_NUM_TRIPS);
 
 	*p_type = thermal->trips[trip].type;
 	return 0;
@@ -245,7 +243,6 @@ static int mlxsw_thermal_get_trip_temp(struct thermal_zone_device *tzdev,
 
 	if (trip < 0 || trip >= MLXSW_THERMAL_NUM_TRIPS)
 		return -EINVAL;
-	trip = array_index_nospec(trip, MLXSW_THERMAL_NUM_TRIPS);
 
 	*p_temp = thermal->trips[trip].temp;
 	return 0;
@@ -259,7 +256,6 @@ static int mlxsw_thermal_set_trip_temp(struct thermal_zone_device *tzdev,
 	if (trip < 0 || trip >= MLXSW_THERMAL_NUM_TRIPS ||
 	    temp > MLXSW_THERMAL_MAX_TEMP)
 		return -EINVAL;
-	trip = array_index_nospec(trip, MLXSW_THERMAL_NUM_TRIPS);
 
 	thermal->trips[trip].temp = temp;
 	return 0;

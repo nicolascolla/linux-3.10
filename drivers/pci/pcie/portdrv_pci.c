@@ -16,7 +16,6 @@
 #include <linux/pcieport_if.h>
 #include <linux/aer.h>
 #include <linux/dmi.h>
-#include <linux/pci-aspm.h>
 
 #include "../pci.h"
 #include "portdrv.h"
@@ -36,22 +35,18 @@ MODULE_LICENSE("GPL");
 bool pcie_ports_disabled;
 
 /*
- * If this switch is set, ACPI _OSC will be used to determine whether or not to
- * enable PCIe port native services.
+ * If the user specified "pcie_ports=native", use the PCIe services regardless
+ * of whether the platform has given us permission.  On ACPI systems, this
+ * means we ignore _OSC.
  */
-bool pcie_ports_auto = true;
+bool pcie_ports_native;
 
 static int __init pcie_port_setup(char *str)
 {
-	if (!strncmp(str, "compat", 6)) {
+	if (!strncmp(str, "compat", 6))
 		pcie_ports_disabled = true;
-	} else if (!strncmp(str, "native", 6)) {
-		pcie_ports_disabled = false;
-		pcie_ports_auto = false;
-	} else if (!strncmp(str, "auto", 4)) {
-		pcie_ports_disabled = false;
-		pcie_ports_auto = true;
-	}
+	else if (!strncmp(str, "native", 6))
+		pcie_ports_native = true;
 
 	return 1;
 }
@@ -384,7 +379,7 @@ static int __init pcie_portdrv_init(void)
 	int retval;
 
 	if (pcie_ports_disabled)
-		return pci_register_driver(&pcie_portdriver);
+		return -EACCES;
 
 	dmi_check_system(pcie_portdrv_dmi_table);
 

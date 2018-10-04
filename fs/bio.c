@@ -1326,6 +1326,16 @@ static struct bio *__bio_map_user_iov(struct request_queue *q,
 	bio = bio_kmalloc(gfp_mask, nr_pages);
 	if (!bio)
 		return ERR_PTR(-ENOMEM);
+	/*
+	 * set data direction and .bi_bdev for avoiding kernel oops, since
+	 * q->merge_bvec_fn from bio_add_pc_page() need that.
+	 *
+	 * But actual .bi_sector still can't be provided, so don't expect
+	 * .merge_bvec_fn to work well.
+	 */
+	if (!write_to_vm)
+		bio->bi_rw |= REQ_WRITE;
+	bio->bi_bdev = bdev;
 
 	ret = -ENOMEM;
 	pages = kcalloc(nr_pages, sizeof(struct page *), gfp_mask);
@@ -1391,13 +1401,6 @@ static struct bio *__bio_map_user_iov(struct request_queue *q,
 
 	kfree(pages);
 
-	/*
-	 * set data direction, and check if mapped pages need bouncing
-	 */
-	if (!write_to_vm)
-		bio->bi_rw |= REQ_WRITE;
-
-	bio->bi_bdev = bdev;
 	bio->bi_flags |= (1 << BIO_USER_MAPPED);
 	return bio;
 
@@ -1763,29 +1766,29 @@ void bio_check_pages_dirty(struct bio *bio)
 	}
 }
 
-void generic_start_io_acct(int rw, unsigned long sectors,
-			   struct hd_struct *part)
+void generic_start_io_acct(struct request_queue *q, int rw,
+			   unsigned long sectors, struct hd_struct *part)
 {
 	int cpu = part_stat_lock();
 
-	part_round_stats(cpu, part);
+	part_round_stats(q, cpu, part);
 	part_stat_inc(cpu, part, ios[rw]);
 	part_stat_add(cpu, part, sectors[rw], sectors);
-	part_inc_in_flight(part, rw);
+	part_inc_in_flight(q, part, rw);
 
 	part_stat_unlock();
 }
 EXPORT_SYMBOL(generic_start_io_acct);
 
-void generic_end_io_acct(int rw, struct hd_struct *part,
-			 unsigned long start_time)
+void generic_end_io_acct(struct request_queue *q, int rw,
+			 struct hd_struct *part, unsigned long start_time)
 {
 	unsigned long duration = jiffies - start_time;
 	int cpu = part_stat_lock();
 
 	part_stat_add(cpu, part, ticks[rw], duration);
-	part_round_stats(cpu, part);
-	part_dec_in_flight(part, rw);
+	part_round_stats(q, cpu, part);
+	part_dec_in_flight(q, part, rw);
 
 	part_stat_unlock();
 }

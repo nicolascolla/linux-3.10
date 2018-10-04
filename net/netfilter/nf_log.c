@@ -5,7 +5,6 @@
 #include <linux/skbuff.h>
 #include <linux/netfilter.h>
 #include <linux/seq_file.h>
-#include <linux/nospec.h>
 #include <net/protocol.h>
 #include <net/netfilter/nf_log.h>
 
@@ -137,8 +136,6 @@ int nf_log_bind_pf(struct net *net, u_int8_t pf,
 {
 	if (pf >= ARRAY_SIZE(net->nf.nf_loggers))
 		return -EINVAL;
-	pf = array_index_nospec(pf, ARRAY_SIZE(net->nf.nf_loggers));
-
 	mutex_lock(&nf_log_mutex);
 	if (__find_logger(pf, logger->name) == NULL) {
 		mutex_unlock(&nf_log_mutex);
@@ -154,8 +151,6 @@ void nf_log_unbind_pf(struct net *net, u_int8_t pf)
 {
 	if (pf >= ARRAY_SIZE(net->nf.nf_loggers))
 		return;
-	pf = array_index_nospec(pf, ARRAY_SIZE(net->nf.nf_loggers));
-
 	mutex_lock(&nf_log_mutex);
 	RCU_INIT_POINTER(net->nf.nf_loggers[pf], NULL);
 	mutex_unlock(&nf_log_mutex);

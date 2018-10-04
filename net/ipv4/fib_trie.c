@@ -73,7 +73,6 @@
 #include <linux/slab.h>
 #include <linux/export.h>
 #include <linux/notifier.h>
-#include <linux/nospec.h>
 #include <net/net_namespace.h>
 #include <net/ip.h>
 #include <net/protocol.h>
@@ -1205,6 +1204,7 @@ int fib_table_insert(struct net *net, struct fib_table *tb,
 			new_fa->fa_state = state & ~FA_S_ACCESSED;
 			new_fa->fa_slen = fa->fa_slen;
 			new_fa->tb_id = tb->tb_id;
+			new_fa->fa_default = -1;
 
 			call_fib_entry_notifiers(net, FIB_EVENT_ENTRY_REPLACE,
 						 key, plen, fi,
@@ -1253,6 +1253,7 @@ int fib_table_insert(struct net *net, struct fib_table *tb,
 	new_fa->fa_state = 0;
 	new_fa->fa_slen = slen;
 	new_fa->tb_id = tb->tb_id;
+	new_fa->fa_default = -1;
 
 	/* Insert new entry to the list. */
 	err = fib_insert_alias(t, tp, l, new_fa, fa, key);
@@ -1330,7 +1331,6 @@ int fib_table_lookup(struct fib_table *tb, const struct flowi4 *flp,
 		 */
 		if (index >= (1ul << n->bits))
 			break;
-		index = array_index_nospec(index, 1ul << n->bits);
 
 		/* we have found a leaf. Prefixes have already been compared */
 		if (IS_LEAF(n))
@@ -2057,7 +2057,6 @@ struct fib_table *fib_trie_table(u32 id, struct fib_table *alias)
 		return NULL;
 
 	tb->tb_id = id;
-	tb->tb_default = -1;
 	tb->tb_num_default = 0;
 	tb->tb_data = (alias ? alias->__data : tb->__data);
 

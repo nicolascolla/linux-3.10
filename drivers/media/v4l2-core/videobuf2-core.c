@@ -18,7 +18,6 @@
 #include <linux/poll.h>
 #include <linux/slab.h>
 #include <linux/sched.h>
-#include <linux/nospec.h>
 
 #include <media/v4l2-dev.h>
 #include <media/v4l2-fh.h>
@@ -260,8 +259,7 @@ static void __vb2_free_mem(struct vb2_queue *q, unsigned int buffers)
 
 	for (buffer = q->num_buffers - buffers; buffer < q->num_buffers;
 	     ++buffer) {
-		unsigned int idx = array_index_nospec(buffer, VIDEO_MAX_FRAME);
-		vb = q->bufs[idx];
+		vb = q->bufs[buffer];
 		if (!vb)
 			continue;
 
@@ -288,10 +286,9 @@ static void __vb2_queue_free(struct vb2_queue *q, unsigned int buffers)
 	if (q->ops->buf_cleanup) {
 		for (buffer = q->num_buffers - buffers; buffer < q->num_buffers;
 		     ++buffer) {
-			unsigned int idx = array_index_nospec(buffer, VIDEO_MAX_FRAME);
-			if (NULL == q->bufs[idx])
+			if (NULL == q->bufs[buffer])
 				continue;
-			q->ops->buf_cleanup(q->bufs[idx]);
+			q->ops->buf_cleanup(q->bufs[buffer]);
 		}
 	}
 
@@ -301,9 +298,8 @@ static void __vb2_queue_free(struct vb2_queue *q, unsigned int buffers)
 	/* Free videobuf buffers */
 	for (buffer = q->num_buffers - buffers; buffer < q->num_buffers;
 	     ++buffer) {
-		unsigned int idx = array_index_nospec(buffer, VIDEO_MAX_FRAME);
-		kfree(q->bufs[idx]);
-		q->bufs[idx] = NULL;
+		kfree(q->bufs[buffer]);
+		q->bufs[buffer] = NULL;
 	}
 
 	q->num_buffers -= buffers;
@@ -464,7 +460,7 @@ int vb2_querybuf(struct vb2_queue *q, struct v4l2_buffer *b)
 		dprintk(1, "querybuf: buffer index out of range\n");
 		return -EINVAL;
 	}
-	vb = q->bufs[array_index_nospec(b->index, q->num_buffers)];
+	vb = q->bufs[b->index];
 	ret = __verify_planes_array(vb, b);
 	if (!ret)
 		__fill_v4l2_buffer(vb, b);
@@ -1231,7 +1227,7 @@ int vb2_prepare_buf(struct vb2_queue *q, struct v4l2_buffer *b)
 		return -EINVAL;
 	}
 
-	vb = q->bufs[array_index_nospec(b->index, q->num_buffers)];
+	vb = q->bufs[b->index];
 	if (NULL == vb) {
 		/* Should never happen */
 		dprintk(1, "%s(): buffer is NULL\n", __func__);
@@ -1324,7 +1320,7 @@ int vb2_qbuf(struct vb2_queue *q, struct v4l2_buffer *b)
 		goto unlock;
 	}
 
-	vb = q->bufs[array_index_nospec(b->index, q->num_buffers)];
+	vb = q->bufs[b->index];
 	if (NULL == vb) {
 		/* Should never happen */
 		dprintk(1, "qbuf: buffer is NULL\n");

@@ -12,7 +12,6 @@
 #include <linux/module.h>
 #include <linux/if_arp.h>
 #include <linux/types.h>
-#include <linux/nospec.h>
 #include <net/ip.h>
 #include <net/pkt_sched.h>
 
@@ -88,12 +87,10 @@ static u16 ieee80211_downgrade_queue(struct ieee80211_sub_if_data *sdata,
 				     struct sta_info *sta, struct sk_buff *skb)
 {
 	struct ieee80211_if_managed *ifmgd = &sdata->u.mgd;
-	u32 priority = array_index_nospec(skb->priority,
-					  ARRAY_SIZE(ieee802_1d_to_ac));
 
 	/* in case we are a client verify acm is not set for this ac */
 	while (sdata->wmm_acm & BIT(skb->priority)) {
-		int ac = ieee802_1d_to_ac[priority];
+		int ac = ieee802_1d_to_ac[skb->priority];
 
 		if (ifmgd->tx_tspec[ac].admitted_time &&
 		    skb->priority == ifmgd->tx_tspec[ac].up)
@@ -114,10 +111,8 @@ static u16 ieee80211_downgrade_queue(struct ieee80211_sub_if_data *sdata,
 	if (sta && sta->reserved_tid == skb->priority)
 		skb->priority = ieee80211_fix_reserved_tid(skb->priority);
 
-	priority = array_index_nospec(skb->priority,
-				      ARRAY_SIZE(ieee802_1d_to_ac));
 	/* look up which queue to use for frames with this 1d tag */
-	return ieee802_1d_to_ac[priority];
+	return ieee802_1d_to_ac[skb->priority];
 }
 
 /* Indicate which queue to use for this fully formed 802.11 frame */

@@ -72,12 +72,10 @@
 #include <asm/byteorder.h>
 #include <linux/serial_core.h>
 #include <linux/serial.h>
-#include <linux/nospec.h>
 
 
 #define MOD_AUTHOR			"Option Wireless"
 #define MOD_DESCRIPTION			"USB High Speed Option driver"
-#define MOD_LICENSE			"GPL"
 
 #define HSO_MAX_NET_DEVICES		10
 #define HSO__MAX_MTU			2048
@@ -620,7 +618,6 @@ static struct hso_serial *get_serial_by_index(unsigned index)
 	unsigned long flags;
 
 	spin_lock_irqsave(&serial_table_lock, flags);
-	index = array_index_nospec(index, HSO_SERIAL_TTY_MINORS);
 	if (serial_table[index])
 		serial = dev2ser(serial_table[index]);
 	spin_unlock_irqrestore(&serial_table_lock, flags);
@@ -863,7 +860,6 @@ static void packetizeRx(struct hso_net *odev, unsigned char *ip_pkt,
 	unsigned short temp_bytes;
 	unsigned short buffer_offset = 0;
 	unsigned short frame_len;
-	unsigned char *tmp_rx_buf;
 
 	/* log if needed */
 	hso_dbg(0x1, "Rx %d bytes\n", count);
@@ -913,11 +909,9 @@ static void packetizeRx(struct hso_net *odev, unsigned char *ip_pkt,
 
 				/* Copy what we got so far. make room for iphdr
 				 * after tail. */
-				tmp_rx_buf =
-				    skb_put(odev->skb_rx_buf,
-					    sizeof(struct iphdr));
-				memcpy(tmp_rx_buf, (char *)&(odev->rx_ip_hdr),
-				       sizeof(struct iphdr));
+				skb_put_data(odev->skb_rx_buf,
+					     (char *)&(odev->rx_ip_hdr),
+					     sizeof(struct iphdr));
 
 				/* ETH_HLEN */
 				odev->rx_buf_size = sizeof(struct iphdr);
@@ -936,8 +930,9 @@ static void packetizeRx(struct hso_net *odev, unsigned char *ip_pkt,
 			/* Copy the rest of the bytes that are left in the
 			 * buffer into the waiting sk_buf. */
 			/* Make room for temp_bytes after tail. */
-			tmp_rx_buf = skb_put(odev->skb_rx_buf, temp_bytes);
-			memcpy(tmp_rx_buf, ip_pkt + buffer_offset, temp_bytes);
+			skb_put_data(odev->skb_rx_buf,
+				     ip_pkt + buffer_offset,
+				     temp_bytes);
 
 			odev->rx_buf_missing -= temp_bytes;
 			count -= temp_bytes;
@@ -2267,7 +2262,6 @@ static void hso_serial_common_free(struct hso_serial *serial)
 static int hso_serial_common_create(struct hso_serial *serial, int num_urbs,
 				    int rx_size, int tx_size)
 {
-	struct device *dev;
 	int minor;
 	int i;
 
@@ -2281,7 +2275,6 @@ static int hso_serial_common_create(struct hso_serial *serial, int num_urbs,
 	serial->parent->dev = tty_port_register_device_attr(&serial->port,
 			tty_drv, minor, &serial->parent->interface->dev,
 			serial->parent, hso_serial_dev_groups);
-	dev = serial->parent->dev;
 
 	/* fill in specific data for later use */
 	serial->minor = minor;
@@ -3291,7 +3284,7 @@ module_exit(hso_exit);
 
 MODULE_AUTHOR(MOD_AUTHOR);
 MODULE_DESCRIPTION(MOD_DESCRIPTION);
-MODULE_LICENSE(MOD_LICENSE);
+MODULE_LICENSE("GPL");
 
 /* change the debug level (eg: insmod hso.ko debug=0x04) */
 MODULE_PARM_DESC(debug, "debug level mask [0x01 | 0x02 | 0x04 | 0x08 | 0x10]");

@@ -163,14 +163,27 @@ static void uvc_fixup_video_ctrl(struct uvc_streaming *stream,
 	}
 }
 
+static size_t uvc_video_ctrl_size(struct uvc_streaming *stream)
+{
+	/*
+	 * Return the size of the video probe and commit controls, which depends
+	 * on the protocol version.
+	 */
+	if (stream->dev->uvc_version < 0x0110)
+		return 26;
+	else if (stream->dev->uvc_version < 0x0150)
+		return 34;
+	else
+		return 48;
+}
+
 static int uvc_get_video_ctrl(struct uvc_streaming *stream,
 	struct uvc_streaming_control *ctrl, int probe, __u8 query)
 {
+	__u16 size = uvc_video_ctrl_size(stream);
 	__u8 *data;
-	__u16 size;
 	int ret;
 
-	size = stream->dev->uvc_version >= 0x0110 ? 34 : 26;
 	if ((stream->dev->quirks & UVC_QUIRK_PROBE_DEF) &&
 			query == UVC_GET_DEF)
 		return -EIO;
@@ -225,7 +238,7 @@ static int uvc_get_video_ctrl(struct uvc_streaming *stream,
 	ctrl->dwMaxVideoFrameSize = get_unaligned_le32(&data[18]);
 	ctrl->dwMaxPayloadTransferSize = get_unaligned_le32(&data[22]);
 
-	if (size == 34) {
+	if (size >= 34) {
 		ctrl->dwClockFrequency = get_unaligned_le32(&data[26]);
 		ctrl->bmFramingInfo = data[30];
 		ctrl->bPreferedVersion = data[31];
@@ -254,11 +267,10 @@ out:
 static int uvc_set_video_ctrl(struct uvc_streaming *stream,
 	struct uvc_streaming_control *ctrl, int probe)
 {
+	__u16 size = uvc_video_ctrl_size(stream);
 	__u8 *data;
-	__u16 size;
 	int ret;
 
-	size = stream->dev->uvc_version >= 0x0110 ? 34 : 26;
 	data = kzalloc(size, GFP_KERNEL);
 	if (data == NULL)
 		return -ENOMEM;
@@ -275,7 +287,7 @@ static int uvc_set_video_ctrl(struct uvc_streaming *stream,
 	put_unaligned_le32(ctrl->dwMaxVideoFrameSize, &data[18]);
 	put_unaligned_le32(ctrl->dwMaxPayloadTransferSize, &data[22]);
 
-	if (size == 34) {
+	if (size >= 34) {
 		put_unaligned_le32(ctrl->dwClockFrequency, &data[26]);
 		data[30] = ctrl->bmFramingInfo;
 		data[31] = ctrl->bPreferedVersion;
@@ -728,7 +740,7 @@ static void uvc_video_stats_decode(struct uvc_streaming *stream,
 
 	if (stream->stats.stream.nb_frames == 0 &&
 	    stream->stats.frame.nb_packets == 0)
-		ktime_get_ts(&stream->stats.stream.start_ts);
+		stream->stats.stream.start_ts = ktime_get();
 
 	switch (data[1] & (UVC_STREAM_PTS | UVC_STREAM_SCR)) {
 	case UVC_STREAM_PTS | UVC_STREAM_SCR:
@@ -821,7 +833,7 @@ static void uvc_video_stats_decode(struct uvc_streaming *stream,
 
 	/* Update the packets counters. */
 	stream->stats.frame.nb_packets++;
-	if (len > header_size)
+	if (len <= header_size)
 		stream->stats.frame.nb_empty++;
 
 	if (data[1] & UVC_STREAM_ERR)
@@ -868,22 +880,13 @@ size_t uvc_video_stats_dump(struct uvc_streaming *stream, char *buf,
 {
 	unsigned int scr_sof_freq;
 	unsigned int duration;
-	struct timespec ts;
 	size_t count = 0;
-
-	ts.tv_sec = stream->stats.stream.stop_ts.tv_sec
-		  - stream->stats.stream.start_ts.tv_sec;
-	ts.tv_nsec = stream->stats.stream.stop_ts.tv_nsec
-		   - stream->stats.stream.start_ts.tv_nsec;
-	if (ts.tv_nsec < 0) {
-		ts.tv_sec--;
-		ts.tv_nsec += 1000000000;
-	}
 
 	/* Compute the SCR.SOF frequency estimate. At the nominal 1kHz SOF
 	 * frequency this will not overflow before more than 1h.
 	 */
-	duration = ts.tv_sec * 1000 + ts.tv_nsec / 1000000;
+	duration = ktime_ms_delta(stream->stats.stream.stop_ts,
+				  stream->stats.stream.start_ts);
 	if (duration != 0)
 		scr_sof_freq = stream->stats.stream.scr_sof_count * 1000
 			     / duration;
@@ -924,7 +927,7 @@ static void uvc_video_stats_start(struct uvc_streaming *stream)
 
 static void uvc_video_stats_stop(struct uvc_streaming *stream)
 {
-	ktime_get_ts(&stream->stats.stream.stop_ts);
+	stream->stats.stream.stop_ts = ktime_get();
 }
 
 /* ------------------------------------------------------------------------
@@ -1088,6 +1091,7 @@ static void uvc_video_decode_data(struct uvc_streaming *stream,
 	/* Complete the current frame if the buffer size was exceeded. */
 	if (len > maxlen) {
 		uvc_trace(UVC_TRACE_FRAME, "Frame complete (overflow).\n");
+		buf->error = 1;
 		buf->state = UVC_BUF_STATE_READY;
 	}
 }
@@ -1334,11 +1338,11 @@ static void uvc_video_complete(struct urb *urb)
 	default:
 		uvc_printk(KERN_WARNING, "Non-zero status (%d) in video "
 			"completion handler.\n", urb->status);
-
+		/* fall through */
 	case -ENOENT:		/* usb_kill_urb() called. */
 		if (stream->frozen)
 			return;
-
+		/* fall through */
 	case -ECONNRESET:	/* usb_unlink_urb() called. */
 	case -ESHUTDOWN:	/* The endpoint is being disabled. */
 		uvc_queue_cancel(queue, urb->status == -ESHUTDOWN);
@@ -1480,13 +1484,13 @@ static unsigned int uvc_endpoint_max_bpi(struct usb_device *dev,
 	case USB_SPEED_HIGH:
 		psize = usb_endpoint_maxp(&ep->desc);
 		mult = usb_endpoint_maxp_mult(&ep->desc);
-		return (psize & 0x07ff) * mult;
+		return psize * mult;
 	case USB_SPEED_WIRELESS:
 		psize = usb_endpoint_maxp(&ep->desc);
 		return psize;
 	default:
 		psize = usb_endpoint_maxp(&ep->desc);
-		return psize & 0x07ff;
+		return psize;
 	}
 }
 

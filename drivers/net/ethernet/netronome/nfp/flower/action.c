@@ -47,13 +47,9 @@
 static void nfp_fl_pop_vlan(struct nfp_fl_pop_vlan *pop_vlan)
 {
 	size_t act_size = sizeof(struct nfp_fl_pop_vlan);
-	u16 tmp_pop_vlan_op;
 
-	tmp_pop_vlan_op =
-		FIELD_PREP(NFP_FL_ACT_LEN_LW, act_size >> NFP_FL_LW_SIZ) |
-		FIELD_PREP(NFP_FL_ACT_JMP_ID, NFP_FL_ACTION_OPCODE_POP_VLAN);
-
-	pop_vlan->a_op = cpu_to_be16(tmp_pop_vlan_op);
+	pop_vlan->head.jump_id = NFP_FL_ACTION_OPCODE_POP_VLAN;
+	pop_vlan->head.len_lw = act_size >> NFP_FL_LW_SIZ;
 	pop_vlan->reserved = 0;
 }
 
@@ -62,22 +58,16 @@ nfp_fl_push_vlan(struct nfp_fl_push_vlan *push_vlan,
 		 const struct tc_action *action)
 {
 	size_t act_size = sizeof(struct nfp_fl_push_vlan);
-	struct tcf_vlan *vlan = to_vlan(action);
 	u16 tmp_push_vlan_tci;
-	u16 tmp_push_vlan_op;
 
-	tmp_push_vlan_op =
-		FIELD_PREP(NFP_FL_ACT_LEN_LW, act_size >> NFP_FL_LW_SIZ) |
-		FIELD_PREP(NFP_FL_ACT_JMP_ID, NFP_FL_ACTION_OPCODE_PUSH_VLAN);
-
-	push_vlan->a_op = cpu_to_be16(tmp_push_vlan_op);
-	/* Set action push vlan parameters. */
+	push_vlan->head.jump_id = NFP_FL_ACTION_OPCODE_PUSH_VLAN;
+	push_vlan->head.len_lw = act_size >> NFP_FL_LW_SIZ;
 	push_vlan->reserved = 0;
 	push_vlan->vlan_tpid = tcf_vlan_push_proto(action);
 
 	tmp_push_vlan_tci =
-		FIELD_PREP(NFP_FL_PUSH_VLAN_PRIO, vlan->tcfv_push_prio) |
-		FIELD_PREP(NFP_FL_PUSH_VLAN_VID, vlan->tcfv_push_vid) |
+		FIELD_PREP(NFP_FL_PUSH_VLAN_PRIO, tcf_vlan_push_prio(action)) |
+		FIELD_PREP(NFP_FL_PUSH_VLAN_VID, tcf_vlan_push_vid(action)) |
 		NFP_FL_PUSH_VLAN_CFI;
 	push_vlan->vlan_tci = cpu_to_be16(tmp_push_vlan_tci);
 }
@@ -91,6 +81,9 @@ static bool nfp_fl_netdev_is_tunnel_type(struct net_device *out_dev,
 	if (!strcmp(out_dev->rtnl_link_ops->kind, "vxlan"))
 		return tun_type == NFP_FL_TUNNEL_VXLAN;
 
+	if (!strcmp(out_dev->rtnl_link_ops->kind, "geneve"))
+		return tun_type == NFP_FL_TUNNEL_GENEVE;
+
 	return false;
 }
 
@@ -101,19 +94,13 @@ nfp_fl_output(struct nfp_fl_output *output, const struct tc_action *action,
 	      int *tun_out_cnt)
 {
 	size_t act_size = sizeof(struct nfp_fl_output);
-	u16 tmp_output_op, tmp_flags;
 	struct net_device *out_dev;
-	int ifindex;
+	u16 tmp_flags;
 
-	/* Set action opcode to output action. */
-	tmp_output_op =
-		FIELD_PREP(NFP_FL_ACT_LEN_LW, act_size >> NFP_FL_LW_SIZ) |
-		FIELD_PREP(NFP_FL_ACT_JMP_ID, NFP_FL_ACTION_OPCODE_OUTPUT);
+	output->head.jump_id = NFP_FL_ACTION_OPCODE_OUTPUT;
+	output->head.len_lw = act_size >> NFP_FL_LW_SIZ;
 
-	output->a_op = cpu_to_be16(tmp_output_op);
-
-	ifindex = tcf_mirred_ifindex(action);
-	out_dev = __dev_get_by_index(dev_net(in_dev), ifindex);
+	out_dev = tcf_mirred_dev(action);
 	if (!out_dev)
 		return -EOPNOTSUPP;
 
@@ -152,18 +139,29 @@ nfp_fl_output(struct nfp_fl_output *output, const struct tc_action *action,
 	return 0;
 }
 
-static bool nfp_fl_supported_tun_port(const struct tc_action *action)
+static enum nfp_flower_tun_type
+nfp_fl_get_tun_from_act_l4_port(struct nfp_app *app,
+				const struct tc_action *action)
 {
 	struct ip_tunnel_info *tun = tcf_tunnel_info(action);
+	struct nfp_flower_priv *priv = app->priv;
 
-	return tun->key.tp_dst == htons(NFP_FL_VXLAN_PORT);
+	switch (tun->key.tp_dst) {
+	case htons(NFP_FL_VXLAN_PORT):
+		return NFP_FL_TUNNEL_VXLAN;
+	case htons(NFP_FL_GENEVE_PORT):
+		if (priv->flower_ext_feats & NFP_FL_FEATS_GENEVE)
+			return NFP_FL_TUNNEL_GENEVE;
+		/* FALLTHROUGH */
+	default:
+		return NFP_FL_TUNNEL_NONE;
+	}
 }
 
 static struct nfp_fl_pre_tunnel *nfp_fl_pre_tunnel(char *act_data, int act_len)
 {
 	size_t act_size = sizeof(struct nfp_fl_pre_tunnel);
 	struct nfp_fl_pre_tunnel *pre_tun_act;
-	u16 tmp_pre_tun_op;
 
 	/* Pre_tunnel action must be first on action list.
 	 * If other actions already exist they need pushed forward.
@@ -175,53 +173,45 @@ static struct nfp_fl_pre_tunnel *nfp_fl_pre_tunnel(char *act_data, int act_len)
 
 	memset(pre_tun_act, 0, act_size);
 
-	tmp_pre_tun_op =
-		FIELD_PREP(NFP_FL_ACT_LEN_LW, act_size >> NFP_FL_LW_SIZ) |
-		FIELD_PREP(NFP_FL_ACT_JMP_ID, NFP_FL_ACTION_OPCODE_PRE_TUNNEL);
-
-	pre_tun_act->a_op = cpu_to_be16(tmp_pre_tun_op);
+	pre_tun_act->head.jump_id = NFP_FL_ACTION_OPCODE_PRE_TUNNEL;
+	pre_tun_act->head.len_lw = act_size >> NFP_FL_LW_SIZ;
 
 	return pre_tun_act;
 }
 
 static int
-nfp_fl_set_vxlan(struct nfp_fl_set_vxlan *set_vxlan,
-		 const struct tc_action *action,
-		 struct nfp_fl_pre_tunnel *pre_tun)
+nfp_fl_set_ipv4_udp_tun(struct nfp_fl_set_ipv4_udp_tun *set_tun,
+			const struct tc_action *action,
+			struct nfp_fl_pre_tunnel *pre_tun,
+			enum nfp_flower_tun_type tun_type,
+			struct net_device *netdev)
 {
-	struct ip_tunnel_info *vxlan = tcf_tunnel_info(action);
-	size_t act_size = sizeof(struct nfp_fl_set_vxlan);
-	u32 tmp_set_vxlan_type_index = 0;
-	u16 tmp_set_vxlan_op;
+	size_t act_size = sizeof(struct nfp_fl_set_ipv4_udp_tun);
+	struct ip_tunnel_info *ip_tun = tcf_tunnel_info(action);
+	u32 tmp_set_ip_tun_type_index = 0;
 	/* Currently support one pre-tunnel so index is always 0. */
 	int pretun_idx = 0;
+	struct net *net;
 
-	if (vxlan->options_len) {
-		/* Do not support options e.g. vxlan gpe. */
+	if (ip_tun->options_len)
 		return -EOPNOTSUPP;
-	}
 
-	tmp_set_vxlan_op =
-		FIELD_PREP(NFP_FL_ACT_LEN_LW, act_size >> NFP_FL_LW_SIZ) |
-		FIELD_PREP(NFP_FL_ACT_JMP_ID,
-			   NFP_FL_ACTION_OPCODE_SET_IPV4_TUNNEL);
+	net = dev_net(netdev);
 
-	set_vxlan->a_op = cpu_to_be16(tmp_set_vxlan_op);
+	set_tun->head.jump_id = NFP_FL_ACTION_OPCODE_SET_IPV4_TUNNEL;
+	set_tun->head.len_lw = act_size >> NFP_FL_LW_SIZ;
 
 	/* Set tunnel type and pre-tunnel index. */
-	tmp_set_vxlan_type_index |=
-		FIELD_PREP(NFP_FL_IPV4_TUNNEL_TYPE, NFP_FL_TUNNEL_VXLAN) |
+	tmp_set_ip_tun_type_index |=
+		FIELD_PREP(NFP_FL_IPV4_TUNNEL_TYPE, tun_type) |
 		FIELD_PREP(NFP_FL_IPV4_PRE_TUN_INDEX, pretun_idx);
 
-	set_vxlan->tun_type_index = cpu_to_be32(tmp_set_vxlan_type_index);
-
-	set_vxlan->tun_id = vxlan->key.tun_id;
-	set_vxlan->tun_flags = vxlan->key.tun_flags;
-	set_vxlan->ipv4_ttl = vxlan->key.ttl;
-	set_vxlan->ipv4_tos = vxlan->key.tos;
+	set_tun->tun_type_index = cpu_to_be32(tmp_set_ip_tun_type_index);
+	set_tun->tun_id = ip_tun->key.tun_id;
+	set_tun->ttl = net->ipv4_sysctl_ip_default_ttl;
 
 	/* Complete pre_tunnel action. */
-	pre_tun->ipv4_dst = vxlan->key.u.ipv4.dst;
+	pre_tun->ipv4_dst = ip_tun->key.u.ipv4.dst;
 
 	return 0;
 }
@@ -242,7 +232,6 @@ static int
 nfp_fl_set_eth(const struct tc_action *action, int idx, u32 off,
 	       struct nfp_fl_set_eth *set_eth)
 {
-	u16 tmp_set_eth_op;
 	u32 exact, mask;
 
 	if (off + 4 > ETH_ALEN * 2)
@@ -258,11 +247,8 @@ nfp_fl_set_eth(const struct tc_action *action, int idx, u32 off,
 			    &set_eth->eth_addr_mask[off]);
 
 	set_eth->reserved = cpu_to_be16(0);
-	tmp_set_eth_op = FIELD_PREP(NFP_FL_ACT_LEN_LW,
-				    sizeof(*set_eth) >> NFP_FL_LW_SIZ) |
-			 FIELD_PREP(NFP_FL_ACT_JMP_ID,
-				    NFP_FL_ACTION_OPCODE_SET_ETHERNET);
-	set_eth->a_op = cpu_to_be16(tmp_set_eth_op);
+	set_eth->head.jump_id = NFP_FL_ACTION_OPCODE_SET_ETHERNET;
+	set_eth->head.len_lw = sizeof(*set_eth) >> NFP_FL_LW_SIZ;
 
 	return 0;
 }
@@ -271,7 +257,6 @@ static int
 nfp_fl_set_ip4(const struct tc_action *action, int idx, u32 off,
 	       struct nfp_fl_set_ip4_addrs *set_ip_addr)
 {
-	u16 tmp_set_ipv4_op;
 	__be32 exact, mask;
 
 	/* We are expecting tcf_pedit to return a big endian value */
@@ -295,11 +280,8 @@ nfp_fl_set_ip4(const struct tc_action *action, int idx, u32 off,
 	}
 
 	set_ip_addr->reserved = cpu_to_be16(0);
-	tmp_set_ipv4_op = FIELD_PREP(NFP_FL_ACT_LEN_LW,
-				     sizeof(*set_ip_addr) >> NFP_FL_LW_SIZ) |
-			  FIELD_PREP(NFP_FL_ACT_JMP_ID,
-				     NFP_FL_ACTION_OPCODE_SET_IPV4_ADDRS);
-	set_ip_addr->a_op = cpu_to_be16(tmp_set_ipv4_op);
+	set_ip_addr->head.jump_id = NFP_FL_ACTION_OPCODE_SET_IPV4_ADDRS;
+	set_ip_addr->head.len_lw = sizeof(*set_ip_addr) >> NFP_FL_LW_SIZ;
 
 	return 0;
 }
@@ -308,16 +290,12 @@ static void
 nfp_fl_set_ip6_helper(int opcode_tag, int idx, __be32 exact, __be32 mask,
 		      struct nfp_fl_set_ipv6_addr *ip6)
 {
-	u16 tmp_set_op;
-
 	ip6->ipv6[idx % 4].mask = mask;
 	ip6->ipv6[idx % 4].exact = exact;
 
 	ip6->reserved = cpu_to_be16(0);
-	tmp_set_op = FIELD_PREP(NFP_FL_ACT_LEN_LW, sizeof(*ip6) >>
-				NFP_FL_LW_SIZ) |
-		     FIELD_PREP(NFP_FL_ACT_JMP_ID, opcode_tag);
-	ip6->a_op = cpu_to_be16(tmp_set_op);
+	ip6->head.jump_id = opcode_tag;
+	ip6->head.len_lw = sizeof(*ip6) >> NFP_FL_LW_SIZ;
 }
 
 static int
@@ -354,7 +332,6 @@ nfp_fl_set_tport(const struct tc_action *action, int idx, u32 off,
 		 struct nfp_fl_set_tport *set_tport, int opcode)
 {
 	u32 exact, mask;
-	u16 tmp_set_op;
 
 	if (off)
 		return -EOPNOTSUPP;
@@ -369,10 +346,8 @@ nfp_fl_set_tport(const struct tc_action *action, int idx, u32 off,
 			    set_tport->tp_port_mask);
 
 	set_tport->reserved = cpu_to_be16(0);
-	tmp_set_op = FIELD_PREP(NFP_FL_ACT_LEN_LW,
-				sizeof(*set_tport) >> NFP_FL_LW_SIZ);
-	tmp_set_op |= FIELD_PREP(NFP_FL_ACT_JMP_ID, opcode);
-	set_tport->a_op = cpu_to_be16(tmp_set_op);
+	set_tport->head.jump_id = opcode;
+	set_tport->head.len_lw = sizeof(*set_tport) >> NFP_FL_LW_SIZ;
 
 	return 0;
 }
@@ -430,15 +405,15 @@ nfp_fl_pedit(const struct tc_action *action, char *nfp_action, int *a_len)
 			return err;
 	}
 
-	if (set_eth.a_op) {
+	if (set_eth.head.len_lw) {
 		act_size = sizeof(set_eth);
 		memcpy(nfp_action, &set_eth, act_size);
 		*a_len += act_size;
-	} else if (set_ip_addr.a_op) {
+	} else if (set_ip_addr.head.len_lw) {
 		act_size = sizeof(set_ip_addr);
 		memcpy(nfp_action, &set_ip_addr, act_size);
 		*a_len += act_size;
-	} else if (set_ip6_dst.a_op && set_ip6_src.a_op) {
+	} else if (set_ip6_dst.head.len_lw && set_ip6_src.head.len_lw) {
 		/* TC compiles set src and dst IPv6 address as a single action,
 		 * the hardware requires this to be 2 separate actions.
 		 */
@@ -450,15 +425,15 @@ nfp_fl_pedit(const struct tc_action *action, char *nfp_action, int *a_len)
 		memcpy(&nfp_action[sizeof(set_ip6_src)], &set_ip6_dst,
 		       act_size);
 		*a_len += act_size;
-	} else if (set_ip6_dst.a_op) {
+	} else if (set_ip6_dst.head.len_lw) {
 		act_size = sizeof(set_ip6_dst);
 		memcpy(nfp_action, &set_ip6_dst, act_size);
 		*a_len += act_size;
-	} else if (set_ip6_src.a_op) {
+	} else if (set_ip6_src.head.len_lw) {
 		act_size = sizeof(set_ip6_src);
 		memcpy(nfp_action, &set_ip6_src, act_size);
 		*a_len += act_size;
-	} else if (set_tport.a_op) {
+	} else if (set_tport.head.len_lw) {
 		act_size = sizeof(set_tport);
 		memcpy(nfp_action, &set_tport, act_size);
 		*a_len += act_size;
@@ -473,8 +448,8 @@ nfp_flower_loop_action(const struct tc_action *a,
 		       struct net_device *netdev,
 		       enum nfp_flower_tun_type *tun_type, int *tun_out_cnt)
 {
+	struct nfp_fl_set_ipv4_udp_tun *set_tun;
 	struct nfp_fl_pre_tunnel *pre_tun;
-	struct nfp_fl_set_vxlan *s_vxl;
 	struct nfp_fl_push_vlan *psh_v;
 	struct nfp_fl_pop_vlan *pop_v;
 	struct nfp_fl_output *output;
@@ -522,26 +497,30 @@ nfp_flower_loop_action(const struct tc_action *a,
 
 		nfp_fl_push_vlan(psh_v, a);
 		*a_len += sizeof(struct nfp_fl_push_vlan);
-	} else if (is_tcf_tunnel_set(a) && nfp_fl_supported_tun_port(a)) {
+	} else if (is_tcf_tunnel_set(a)) {
+		struct nfp_repr *repr = netdev_priv(netdev);
+		*tun_type = nfp_fl_get_tun_from_act_l4_port(repr->app, a);
+		if (*tun_type == NFP_FL_TUNNEL_NONE)
+			return -EOPNOTSUPP;
+
 		/* Pre-tunnel action is required for tunnel encap.
 		 * This checks for next hop entries on NFP.
 		 * If none, the packet falls back before applying other actions.
 		 */
 		if (*a_len + sizeof(struct nfp_fl_pre_tunnel) +
-		    sizeof(struct nfp_fl_set_vxlan) > NFP_FL_MAX_A_SIZ)
+		    sizeof(struct nfp_fl_set_ipv4_udp_tun) > NFP_FL_MAX_A_SIZ)
 			return -EOPNOTSUPP;
 
-		*tun_type = NFP_FL_TUNNEL_VXLAN;
 		pre_tun = nfp_fl_pre_tunnel(nfp_fl->action_data, *a_len);
 		nfp_fl->meta.shortcut = cpu_to_be32(NFP_FL_SC_ACT_NULL);
 		*a_len += sizeof(struct nfp_fl_pre_tunnel);
 
-		s_vxl = (struct nfp_fl_set_vxlan *)&nfp_fl->action_data[*a_len];
-		err = nfp_fl_set_vxlan(s_vxl, a, pre_tun);
+		set_tun = (void *)&nfp_fl->action_data[*a_len];
+		err = nfp_fl_set_ipv4_udp_tun(set_tun, a, pre_tun, *tun_type,
+					      netdev);
 		if (err)
 			return err;
-
-		*a_len += sizeof(struct nfp_fl_set_vxlan);
+		*a_len += sizeof(struct nfp_fl_set_ipv4_udp_tun);
 	} else if (is_tcf_tunnel_release(a)) {
 		/* Tunnel decap is handled by default so accept action. */
 		return 0;

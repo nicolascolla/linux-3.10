@@ -323,14 +323,6 @@ static int target_fabric_tf_ops_check(const struct target_core_fabric_ops *tfo)
 		pr_err("Missing tfo->release_cmd()\n");
 		return -EINVAL;
 	}
-	if (!tfo->shutdown_session) {
-		pr_err("Missing tfo->shutdown_session()\n");
-		return -EINVAL;
-	}
-	if (!tfo->close_session) {
-		pr_err("Missing tfo->close_session()\n");
-		return -EINVAL;
-	}
 	if (!tfo->sess_get_index) {
 		pr_err("Missing tfo->sess_get_index()\n");
 		return -EINVAL;
@@ -365,6 +357,10 @@ static int target_fabric_tf_ops_check(const struct target_core_fabric_ops *tfo)
 	}
 	if (!tfo->aborted_task) {
 		pr_err("Missing tfo->aborted_task()\n");
+		return -EINVAL;
+	}
+	if (!tfo->check_stop_free) {
+		pr_err("Missing tfo->check_stop_free()\n");
 		return -EINVAL;
 	}
 	/*
@@ -475,6 +471,7 @@ DEF_CONFIGFS_ATTRIB_SHOW(emulate_3pc);
 DEF_CONFIGFS_ATTRIB_SHOW(pi_prot_type);
 DEF_CONFIGFS_ATTRIB_SHOW(hw_pi_prot_type);
 DEF_CONFIGFS_ATTRIB_SHOW(pi_prot_format);
+DEF_CONFIGFS_ATTRIB_SHOW(pi_prot_verify);
 DEF_CONFIGFS_ATTRIB_SHOW(enforce_pr_isids);
 DEF_CONFIGFS_ATTRIB_SHOW(is_nonrot);
 DEF_CONFIGFS_ATTRIB_SHOW(emulate_rest_reord);
@@ -749,7 +746,7 @@ static ssize_t pi_prot_type_store(struct config_item *item,
 		       dev->transport->name);
 		return -ENOSYS;
 	}
-	if (!(dev->dev_flags & DF_CONFIGURED)) {
+	if (!target_dev_configured(dev)) {
 		pr_err("DIF protection requires device to be configured\n");
 		return -ENODEV;
 	}
@@ -765,6 +762,7 @@ static ssize_t pi_prot_type_store(struct config_item *item,
 		ret = dev->transport->init_prot(dev);
 		if (ret) {
 			da->pi_prot_type = old_prot;
+			da->pi_prot_verify = (bool) da->pi_prot_type;
 			return ret;
 		}
 
@@ -772,6 +770,7 @@ static ssize_t pi_prot_type_store(struct config_item *item,
 		dev->transport->free_prot(dev);
 	}
 
+	da->pi_prot_verify = (bool) da->pi_prot_type;
 	pr_debug("dev[%p]: SE Device Protection Type: %d\n", dev, flag);
 	return count;
 }
@@ -796,7 +795,7 @@ static ssize_t pi_prot_format_store(struct config_item *item,
 		       dev->transport->name);
 		return -ENOSYS;
 	}
-	if (!(dev->dev_flags & DF_CONFIGURED)) {
+	if (!target_dev_configured(dev)) {
 		pr_err("DIF protection format requires device to be configured\n");
 		return -ENODEV;
 	}
@@ -811,6 +810,35 @@ static ssize_t pi_prot_format_store(struct config_item *item,
 		return ret;
 
 	pr_debug("dev[%p]: SE Device Protection Format complete\n", dev);
+	return count;
+}
+
+static ssize_t pi_prot_verify_store(struct config_item *item,
+		const char *page, size_t count)
+{
+	struct se_dev_attrib *da = to_attrib(item);
+	bool flag;
+	int ret;
+
+	ret = strtobool(page, &flag);
+	if (ret < 0)
+		return ret;
+
+	if (!flag) {
+		da->pi_prot_verify = flag;
+		return count;
+	}
+	if (da->hw_pi_prot_type) {
+		pr_warn("DIF protection enabled on underlying hardware,"
+			" ignoring\n");
+		return count;
+	}
+	if (!da->pi_prot_type) {
+		pr_warn("DIF protection not supported by backend, ignoring\n");
+		return count;
+	}
+	da->pi_prot_verify = flag;
+
 	return count;
 }
 
@@ -1027,6 +1055,7 @@ CONFIGFS_ATTR(, emulate_3pc);
 CONFIGFS_ATTR(, pi_prot_type);
 CONFIGFS_ATTR_RO(, hw_pi_prot_type);
 CONFIGFS_ATTR(, pi_prot_format);
+CONFIGFS_ATTR(, pi_prot_verify);
 CONFIGFS_ATTR(, enforce_pr_isids);
 CONFIGFS_ATTR(, is_nonrot);
 CONFIGFS_ATTR(, emulate_rest_reord);
@@ -1066,6 +1095,7 @@ struct configfs_attribute *sbc_attrib_attrs[] = {
 	&attr_pi_prot_type,
 	&attr_hw_pi_prot_type,
 	&attr_pi_prot_format,
+	&attr_pi_prot_verify,
 	&attr_enforce_pr_isids,
 	&attr_is_nonrot,
 	&attr_emulate_rest_reord,
@@ -1520,12 +1550,12 @@ static match_table_t tokens = {
 	{Opt_res_type, "res_type=%d"},
 	{Opt_res_scope, "res_scope=%d"},
 	{Opt_res_all_tg_pt, "res_all_tg_pt=%d"},
-	{Opt_mapped_lun, "mapped_lun=%lld"},
+	{Opt_mapped_lun, "mapped_lun=%u"},
 	{Opt_target_fabric, "target_fabric=%s"},
 	{Opt_target_node, "target_node=%s"},
 	{Opt_tpgt, "tpgt=%d"},
 	{Opt_port_rtpi, "port_rtpi=%d"},
-	{Opt_target_lun, "target_lun=%lld"},
+	{Opt_target_lun, "target_lun=%u"},
 	{Opt_err, NULL}
 };
 
@@ -1602,7 +1632,7 @@ static ssize_t target_pr_res_aptpl_metadata_store(struct config_item *item,
 			}
 			break;
 		case Opt_sa_res_key:
-			ret = kstrtoull(args->from, 0, &tmp_ll);
+			ret = match_u64(args,  &tmp_ll);
 			if (ret < 0) {
 				pr_err("kstrtoull() failed for sa_res_key=\n");
 				goto out;
@@ -1636,10 +1666,10 @@ static ssize_t target_pr_res_aptpl_metadata_store(struct config_item *item,
 			all_tg_pt = (int)arg;
 			break;
 		case Opt_mapped_lun:
-			ret = match_int(args, &arg);
+			ret = match_u64(args, &tmp_ll);
 			if (ret)
 				goto out;
-			mapped_lun = (u64)arg;
+			mapped_lun = (u64)tmp_ll;
 			break;
 		/*
 		 * PR APTPL Metadata for Target Port
@@ -1677,10 +1707,10 @@ static ssize_t target_pr_res_aptpl_metadata_store(struct config_item *item,
 				goto out;
 			break;
 		case Opt_target_lun:
-			ret = match_int(args, &arg);
+			ret = match_u64(args, &tmp_ll);
 			if (ret)
 				goto out;
-			target_lun = (u64)arg;
+			target_lun = (u64)tmp_ll;
 			break;
 		default:
 			break;
@@ -1854,7 +1884,7 @@ static ssize_t target_dev_enable_show(struct config_item *item, char *page)
 {
 	struct se_device *dev = to_device(item);
 
-	return snprintf(page, PAGE_SIZE, "%d\n", !!(dev->dev_flags & DF_CONFIGURED));
+	return snprintf(page, PAGE_SIZE, "%d\n", target_dev_configured(dev));
 }
 
 static ssize_t target_dev_enable_store(struct config_item *item,
@@ -2169,7 +2199,11 @@ static void target_core_dev_release(struct config_item *item)
 	target_free_device(dev);
 }
 
-static struct configfs_item_operations target_core_dev_item_ops = {
+/*
+ * Used in target_core_fabric_configfs.c to verify valid se_device symlink
+ * within target_fabric_port_link()
+ */
+struct configfs_item_operations target_core_dev_item_ops = {
 	.release		= target_core_dev_release,
 };
 
@@ -2375,7 +2409,7 @@ static ssize_t target_tg_pt_gp_alua_access_state_store(struct config_item *item,
 			" tg_pt_gp ID: %hu\n", tg_pt_gp->tg_pt_gp_valid_id);
 		return -EINVAL;
 	}
-	if (!(dev->dev_flags & DF_CONFIGURED)) {
+	if (!target_dev_configured(dev)) {
 		pr_err("Unable to set alua_access_state while device is"
 		       " not configured\n");
 		return -ENODEV;
@@ -2478,7 +2512,7 @@ static ssize_t target_tg_pt_gp_alua_support_##_name##_store(		\
 	int ret;							\
 									\
 	if (!t->tg_pt_gp_valid_id) {					\
-		pr_err("Unable to do set ##_name ALUA state on non"	\
+		pr_err("Unable to do set " #_name " ALUA state on non"	\
 		       " valid tg_pt_gp ID: %hu\n",			\
 		       t->tg_pt_gp_valid_id);				\
 		return -EINVAL;						\
@@ -2610,13 +2644,13 @@ static ssize_t target_tg_pt_gp_tg_pt_gp_id_store(struct config_item *item,
 
 	ret = kstrtoul(page, 0, &tg_pt_gp_id);
 	if (ret < 0) {
-		pr_err("kstrtoul() returned %d for"
-			" tg_pt_gp_id\n", ret);
+		pr_err("ALUA tg_pt_gp_id: invalid value '%s' for tg_pt_gp_id\n",
+		       page);
 		return ret;
 	}
 	if (tg_pt_gp_id > 0x0000ffff) {
-		pr_err("ALUA tg_pt_gp_id: %lu exceeds maximum:"
-			" 0x0000ffff\n", tg_pt_gp_id);
+		pr_err("ALUA tg_pt_gp_id: %lu exceeds maximum: 0x0000ffff\n",
+		       tg_pt_gp_id);
 		return -EINVAL;
 	}
 

@@ -40,7 +40,6 @@
 #include <linux/crc16.h>
 #include <linux/dax.h>
 #include <linux/cleancache.h>
-#include <linux/nospec.h>
 #include <asm/uaccess.h>
 
 #include <linux/kthread.h>
@@ -868,6 +867,7 @@ static void ext4_put_super(struct super_block *sb)
 	if (sbi->s_chksum_driver)
 		crypto_free_shash(sbi->s_chksum_driver);
 	kfree(sbi->s_blockgroup_lock);
+	fs_put_dax(sbi->s_daxdev);
 	kfree(sbi);
 }
 
@@ -907,7 +907,6 @@ static struct inode *ext4_alloc_inode(struct super_block *sb)
 	spin_lock_init(&ei->i_completed_io_lock);
 	ei->i_sync_tid = 0;
 	ei->i_datasync_tid = 0;
-	atomic_set(&ei->i_ioend_count, 0);
 	atomic_set(&ei->i_unwritten, 0);
 	INIT_WORK(&ei->i_rsv_conversion_work, ext4_end_io_rsv_work);
 
@@ -2109,6 +2108,7 @@ static int ext4_check_descriptors(struct super_block *sb,
 	struct ext4_sb_info *sbi = EXT4_SB(sb);
 	ext4_fsblk_t first_block = le32_to_cpu(sbi->s_es->s_first_data_block);
 	ext4_fsblk_t last_block;
+	ext4_fsblk_t last_bg_block = sb_block + ext4_bg_num_gdb(sb, 0);
 	ext4_fsblk_t block_bitmap;
 	ext4_fsblk_t inode_bitmap;
 	ext4_fsblk_t inode_table;
@@ -2138,6 +2138,16 @@ static int ext4_check_descriptors(struct super_block *sb,
 			ext4_msg(sb, KERN_ERR, "ext4_check_descriptors: "
 				 "Block bitmap for group %u overlaps "
 				 "superblock", i);
+			if (!(sb->s_flags & MS_RDONLY))
+				return 0;
+		}
+		if (block_bitmap >= sb_block + 1 &&
+		    block_bitmap <= last_bg_block) {
+			ext4_msg(sb, KERN_ERR, "ext4_check_descriptors: "
+				 "Block bitmap for group %u overlaps "
+				 "block group descriptors", i);
+			if (!(sb->s_flags & MS_RDONLY))
+				return 0;
 		}
 		if (block_bitmap < first_block || block_bitmap > last_block) {
 			ext4_msg(sb, KERN_ERR, "ext4_check_descriptors: "
@@ -2150,6 +2160,16 @@ static int ext4_check_descriptors(struct super_block *sb,
 			ext4_msg(sb, KERN_ERR, "ext4_check_descriptors: "
 				 "Inode bitmap for group %u overlaps "
 				 "superblock", i);
+			if (!(sb->s_flags & MS_RDONLY))
+				return 0;
+		}
+		if (inode_bitmap >= sb_block + 1 &&
+		    inode_bitmap <= last_bg_block) {
+			ext4_msg(sb, KERN_ERR, "ext4_check_descriptors: "
+				 "Inode bitmap for group %u overlaps "
+				 "block group descriptors", i);
+			if (!(sb->s_flags & MS_RDONLY))
+				return 0;
 		}
 		if (inode_bitmap < first_block || inode_bitmap > last_block) {
 			ext4_msg(sb, KERN_ERR, "ext4_check_descriptors: "
@@ -2162,6 +2182,16 @@ static int ext4_check_descriptors(struct super_block *sb,
 			ext4_msg(sb, KERN_ERR, "ext4_check_descriptors: "
 				 "Inode table for group %u overlaps "
 				 "superblock", i);
+			if (!(sb->s_flags & MS_RDONLY))
+				return 0;
+		}
+		if (inode_table >= sb_block + 1 &&
+		    inode_table <= last_bg_block) {
+			ext4_msg(sb, KERN_ERR, "ext4_check_descriptors: "
+				 "Inode table for group %u overlaps "
+				 "block group descriptors", i);
+			if (!(sb->s_flags & MS_RDONLY))
+				return 0;
 		}
 		if (inode_table < first_block ||
 		    inode_table + sbi->s_itb_per_group - 1 > last_block) {
@@ -3146,6 +3176,9 @@ static ext4_group_t ext4_has_uninit_itable(struct super_block *sb)
 	ext4_group_t group, ngroups = EXT4_SB(sb)->s_groups_count;
 	struct ext4_group_desc *gdp = NULL;
 
+	if (!ext4_has_group_desc_csum(sb))
+		return ngroups;
+
 	for (group = 0; group < ngroups; group++) {
 		gdp = ext4_get_group_desc(sb, group, NULL);
 		if (!gdp)
@@ -3479,6 +3512,7 @@ static int ext4_reserve_clusters(struct ext4_sb_info *sbi, ext4_fsblk_t count)
 
 static int ext4_fill_super(struct super_block *sb, void *data, int silent)
 {
+	struct dax_device *dax_dev = fs_dax_get_by_bdev(sb->s_bdev);
 	char *orig_data = kstrdup(data, GFP_KERNEL);
 	struct buffer_head *bh;
 	struct ext4_super_block *es = NULL;
@@ -3505,6 +3539,7 @@ static int ext4_fill_super(struct super_block *sb, void *data, int silent)
 	if ((data && !orig_data) || !sbi)
 		goto out_free_base;
 
+	sbi->s_daxdev = dax_dev;
 	sbi->s_blockgroup_lock =
 		kzalloc(sizeof(struct blockgroup_lock), GFP_KERNEL);
 	if (!sbi->s_blockgroup_lock)
@@ -3763,6 +3798,13 @@ static int ext4_fill_super(struct super_block *sb, void *data, int silent)
 			 le32_to_cpu(es->s_log_block_size));
 		goto failed_mount;
 	}
+	if (le32_to_cpu(es->s_log_cluster_size) >
+	    (EXT4_MAX_CLUSTER_LOG_SIZE - EXT4_MIN_BLOCK_LOG_SIZE)) {
+		ext4_msg(sb, KERN_ERR,
+			 "Invalid log cluster size: %u",
+			 le32_to_cpu(es->s_log_cluster_size));
+		goto failed_mount;
+	}
 
 	if (le16_to_cpu(sbi->s_es->s_reserved_gdt_blocks) > (blocksize / 4)) {
 		ext4_msg(sb, KERN_ERR,
@@ -3778,11 +3820,13 @@ static int ext4_fill_super(struct super_block *sb, void *data, int silent)
 					EXT4_FEATURE_INCOMPAT_INLINE_DATA)) {
 			ext4_msg(sb, KERN_ERR, "Cannot use DAX on a filesystem"
 					" that may contain inline data");
-			goto failed_mount;
+			sbi->s_mount_opt &= ~EXT4_MOUNT_DAX;
 		}
-		err = bdev_dax_supported(sb, blocksize);
-		if (err)
-			goto failed_mount;
+		if (!bdev_dax_supported(sb->s_bdev, blocksize)) {
+			ext4_msg(sb, KERN_ERR,
+				"DAX unsupported by block device. Turning off DAX.");
+			sbi->s_mount_opt &= ~EXT4_MOUNT_DAX;
+		}
 		if (!printed) {
 			mark_tech_preview("ext4 direct access (dax)", NULL);
 			printed = true;
@@ -3827,6 +3871,11 @@ static int ext4_fill_super(struct super_block *sb, void *data, int silent)
 	} else {
 		sbi->s_inode_size = le16_to_cpu(es->s_inode_size);
 		sbi->s_first_ino = le32_to_cpu(es->s_first_ino);
+		if (sbi->s_first_ino < EXT4_GOOD_OLD_FIRST_INO) {
+			ext4_msg(sb, KERN_ERR, "invalid first ino: %u",
+				 sbi->s_first_ino);
+			goto failed_mount;
+		}
 		if ((sbi->s_inode_size < EXT4_GOOD_OLD_INODE_SIZE) ||
 		    (!is_power_of_2(sbi->s_inode_size)) ||
 		    (sbi->s_inode_size > blocksize)) {
@@ -3904,13 +3953,6 @@ static int ext4_fill_super(struct super_block *sb, void *data, int silent)
 				 "block size (%d)", clustersize, blocksize);
 			goto failed_mount;
 		}
-		if (le32_to_cpu(es->s_log_cluster_size) >
-		    (EXT4_MAX_CLUSTER_LOG_SIZE - EXT4_MIN_BLOCK_LOG_SIZE)) {
-			ext4_msg(sb, KERN_ERR,
-				 "Invalid log cluster size: %u",
-				 le32_to_cpu(es->s_log_cluster_size));
-			goto failed_mount;
-		}
 		sbi->s_cluster_bits = le32_to_cpu(es->s_log_cluster_size) -
 			le32_to_cpu(es->s_log_block_size);
 		sbi->s_clusters_per_group =
@@ -3931,10 +3973,10 @@ static int ext4_fill_super(struct super_block *sb, void *data, int silent)
 		}
 	} else {
 		if (clustersize != blocksize) {
-			ext4_warning(sb, "fragment/cluster size (%d) != "
-				     "block size (%d)", clustersize,
-				     blocksize);
-			clustersize = blocksize;
+			ext4_msg(sb, KERN_ERR,
+				 "fragment/cluster size (%d) != "
+				 "block size (%d)", clustersize, blocksize);
+			goto failed_mount;
 		}
 		if (sbi->s_blocks_per_group > blocksize * 8) {
 			ext4_msg(sb, KERN_ERR,
@@ -3988,6 +4030,13 @@ static int ext4_fill_super(struct super_block *sb, void *data, int silent)
 			 ext4_blocks_count(es));
 		goto failed_mount;
 	}
+	if ((es->s_first_data_block == 0) && (es->s_log_block_size == 0) &&
+	    (sbi->s_cluster_ratio == 1)) {
+		ext4_msg(sb, KERN_WARNING, "bad geometry: first data "
+			 "block is 0 with a 1k block and cluster size");
+		goto failed_mount;
+	}
+
 	blocks_count = (ext4_blocks_count(es) -
 			le32_to_cpu(es->s_first_data_block) +
 			EXT4_BLOCKS_PER_GROUP(sb) - 1);
@@ -4023,6 +4072,14 @@ static int ext4_fill_super(struct super_block *sb, void *data, int silent)
 		ret = -ENOMEM;
 		goto failed_mount;
 	}
+	if (((u64)sbi->s_groups_count * sbi->s_inodes_per_group) !=
+	    le32_to_cpu(es->s_inodes_count)) {
+		ext4_msg(sb, KERN_ERR, "inodes count not valid: %u vs %llu",
+			 le32_to_cpu(es->s_inodes_count),
+			 ((u64)sbi->s_groups_count * sbi->s_inodes_per_group));
+		ret = -EINVAL;
+		goto failed_mount;
+	}
 
 	if (ext4_proc_root)
 		sbi->s_proc = proc_mkdir(sb->s_id, ext4_proc_root);
@@ -4043,12 +4100,12 @@ static int ext4_fill_super(struct super_block *sb, void *data, int silent)
 			goto failed_mount2;
 		}
 	}
+	sbi->s_gdb_count = db_count;
 	if (!ext4_check_descriptors(sb, logical_sb_block, &first_not_zeroed)) {
 		ext4_msg(sb, KERN_ERR, "group descriptors corrupted!");
 		goto failed_mount2;
 	}
 
-	sbi->s_gdb_count = db_count;
 	get_random_bytes(&sbi->s_next_generation, sizeof(u32));
 	spin_lock_init(&sbi->s_next_gen_lock);
 
@@ -4420,6 +4477,7 @@ out_fail:
 out_free_base:
 	kfree(sbi);
 	kfree(orig_data);
+	fs_put_dax(dax_dev);
 	return err ? err : ret;
 }
 
@@ -4686,20 +4744,6 @@ static int ext4_commit_super(struct super_block *sb, int sync)
 
 	if (!sbh || block_device_ejected(sb))
 		return error;
-	if (buffer_write_io_error(sbh)) {
-		/*
-		 * Oh, dear.  A previous attempt to write the
-		 * superblock failed.  This could happen because the
-		 * USB device was yanked out.  Or it could happen to
-		 * be a transient write error and maybe the block will
-		 * be remapped.  Nothing we can do but to retry the
-		 * write and hope for the best.
-		 */
-		ext4_msg(sb, KERN_ERR, "previous I/O error to "
-		       "superblock detected");
-		clear_buffer_write_io_error(sbh);
-		set_buffer_uptodate(sbh);
-	}
 	/*
 	 * If the file system is mounted read-only, don't update the
 	 * superblock write time.  This avoids updating the superblock
@@ -4730,7 +4774,23 @@ static int ext4_commit_super(struct super_block *sb, int sync)
 				&EXT4_SB(sb)->s_freeinodes_counter));
 	BUFFER_TRACE(sbh, "marking dirty");
 	ext4_superblock_csum_set(sb);
+	lock_buffer(sbh);
+	if (buffer_write_io_error(sbh)) {
+		/*
+		 * Oh, dear.  A previous attempt to write the
+		 * superblock failed.  This could happen because the
+		 * USB device was yanked out.  Or it could happen to
+		 * be a transient write error and maybe the block will
+		 * be remapped.  Nothing we can do but to retry the
+		 * write and hope for the best.
+		 */
+		ext4_msg(sb, KERN_ERR, "previous I/O error to "
+		       "superblock detected");
+		clear_buffer_write_io_error(sbh);
+		set_buffer_uptodate(sbh);
+	}
 	mark_buffer_dirty(sbh);
+	unlock_buffer(sbh);
 	if (sync) {
 		error = sync_dirty_buffer(sbh);
 		if (error)
@@ -5362,7 +5422,6 @@ static int ext4_quota_on(struct super_block *sb, int type, int format_id,
 	if (path->dentry->d_sb != sb)
 		return -EXDEV;
 	/* Journaling quota? */
-	type = array_index_nospec(type, MAXQUOTAS);
 	if (EXT4_SB(sb)->s_qf_names[type]) {
 		/* Quotafile not in fs root? */
 		if (path->dentry->d_parent != sb->s_root)
@@ -5407,7 +5466,6 @@ static int ext4_quota_enable(struct super_block *sb, int type, int format_id,
 
 	BUG_ON(!EXT4_HAS_RO_COMPAT_FEATURE(sb, EXT4_FEATURE_RO_COMPAT_QUOTA));
 
-	type = array_index_nospec(type, MAXQUOTAS);
 	if (!qf_inums[type])
 		return -EPERM;
 
@@ -5471,11 +5529,9 @@ static int ext4_quota_on_sysfile(struct super_block *sb, int type,
 
 static int ext4_quota_off(struct super_block *sb, int type)
 {
-	struct inode *inode;
+	struct inode *inode = sb_dqopt(sb)->files[type];
 	handle_t *handle;
 
-	type = array_index_nospec(type, MAXQUOTAS);
-	inode = sb_dqopt(sb)->files[type];
 	/* Force all delayed allocation blocks to be allocated.
 	 * Caller already holds s_umount sem */
 	if (test_opt(sb, DELALLOC))
@@ -5516,18 +5572,14 @@ static int ext4_quota_off_sysfile(struct super_block *sb, int type)
 static ssize_t ext4_quota_read(struct super_block *sb, int type, char *data,
 			       size_t len, loff_t off)
 {
-	struct inode *inode;
+	struct inode *inode = sb_dqopt(sb)->files[type];
 	ext4_lblk_t blk = off >> EXT4_BLOCK_SIZE_BITS(sb);
 	int err = 0;
 	int offset = off & (sb->s_blocksize - 1);
 	int tocopy;
 	size_t toread;
 	struct buffer_head *bh;
-	loff_t i_size;
-
-	type = array_index_nospec(type, MAXQUOTAS);
-	inode = sb_dqopt(sb)->files[type];
-	i_size = i_size_read(inode);
+	loff_t i_size = i_size_read(inode);
 
 	if (off > i_size)
 		return 0;
@@ -5558,15 +5610,12 @@ static ssize_t ext4_quota_read(struct super_block *sb, int type, char *data,
 static ssize_t ext4_quota_write(struct super_block *sb, int type,
 				const char *data, size_t len, loff_t off)
 {
-	struct inode *inode;
+	struct inode *inode = sb_dqopt(sb)->files[type];
 	ext4_lblk_t blk = off >> EXT4_BLOCK_SIZE_BITS(sb);
 	int err = 0;
 	int offset = off & (sb->s_blocksize - 1);
 	struct buffer_head *bh;
 	handle_t *handle = journal_current_handle();
-
-	type = array_index_nospec(type, MAXQUOTAS);
-	inode = sb_dqopt(sb)->files[type];
 
 	if (EXT4_SB(sb)->s_journal && !handle) {
 		ext4_msg(sb, KERN_WARNING, "Quota write (off=%llu, len=%llu)"
@@ -5773,6 +5822,9 @@ static int __init ext4_init_fs(void)
 	err = init_inodecache();
 	if (err)
 		goto out1;
+	err = register_fo_extend(&ext4_file_operations);
+	if (err)
+		goto out_inodecache;
 	register_as_ext3();
 	register_as_ext2();
 	err = register_filesystem(&ext4_fs_type);
@@ -5783,6 +5835,8 @@ static int __init ext4_init_fs(void)
 out:
 	unregister_as_ext2();
 	unregister_as_ext3();
+	unregister_fo_extend(&ext4_file_operations);
+out_inodecache:
 	destroy_inodecache();
 out1:
 	ext4_exit_xattr();
@@ -5810,6 +5864,7 @@ static void __exit ext4_exit_fs(void)
 	unregister_as_ext2();
 	unregister_as_ext3();
 	unregister_filesystem(&ext4_fs_type);
+	unregister_fo_extend(&ext4_file_operations);
 	destroy_inodecache();
 	ext4_exit_xattr();
 	ext4_exit_mballoc();

@@ -1,7 +1,7 @@
 /*
  * Linux driver for VMware's vmxnet3 ethernet NIC.
  *
- * Copyright (C) 2008-2015, VMware, Inc. All Rights Reserved.
+ * Copyright (C) 2008-2016, VMware, Inc. All Rights Reserved.
  *
  * This program is free software; you can redistribute it and/or modify it
  * under the terms of the GNU General Public License as published by the
@@ -20,7 +20,7 @@
  * The full GNU General Public License is included in this distribution in
  * the file called "COPYING".
  *
- * Maintained by: Shreyas Bhatewara <pv-drivers@vmware.com>
+ * Maintained by: pv-drivers@vmware.com
  *
  */
 
@@ -76,7 +76,9 @@ enum {
 	VMXNET3_CMD_UPDATE_IML,
 	VMXNET3_CMD_UPDATE_PMCFG,
 	VMXNET3_CMD_UPDATE_FEATURE,
+	VMXNET3_CMD_RESERVED1,
 	VMXNET3_CMD_LOAD_PLUGIN,
+	VMXNET3_CMD_RESERVED2,
 
 	VMXNET3_CMD_FIRST_GET = 0xF00D0000,
 	VMXNET3_CMD_GET_QUEUE_STATUS = VMXNET3_CMD_FIRST_GET,
@@ -87,7 +89,9 @@ enum {
 	VMXNET3_CMD_GET_DID_LO,
 	VMXNET3_CMD_GET_DID_HI,
 	VMXNET3_CMD_GET_DEV_EXTRA_INFO,
-	VMXNET3_CMD_GET_CONF_INTR
+	VMXNET3_CMD_GET_CONF_INTR,
+	VMXNET3_CMD_GET_RESERVED1,
+	VMXNET3_CMD_GET_TXDATA_DESC_SIZE
 };
 
 /*
@@ -168,6 +172,8 @@ struct Vmxnet3_TxDesc {
 struct Vmxnet3_TxDataDesc {
 	u8		data[VMXNET3_HDR_COPY_SIZE];
 };
+
+typedef u8 Vmxnet3_RxDataDesc;
 
 #define VMXNET3_TCD_GEN_SHIFT	31
 #define VMXNET3_TCD_GEN_SIZE	1
@@ -373,12 +379,25 @@ union Vmxnet3_GenericDesc {
 #define VMXNET3_RING_SIZE_ALIGN 32
 #define VMXNET3_RING_SIZE_MASK  (VMXNET3_RING_SIZE_ALIGN - 1)
 
+/* Tx Data Ring buffer size must be a multiple of 64 */
+#define VMXNET3_TXDATA_DESC_SIZE_ALIGN 64
+#define VMXNET3_TXDATA_DESC_SIZE_MASK  (VMXNET3_TXDATA_DESC_SIZE_ALIGN - 1)
+
+/* Rx Data Ring buffer size must be a multiple of 64 */
+#define VMXNET3_RXDATA_DESC_SIZE_ALIGN 64
+#define VMXNET3_RXDATA_DESC_SIZE_MASK  (VMXNET3_RXDATA_DESC_SIZE_ALIGN - 1)
+
 /* Max ring size */
 #define VMXNET3_TX_RING_MAX_SIZE   4096
 #define VMXNET3_TC_RING_MAX_SIZE   4096
 #define VMXNET3_RX_RING_MAX_SIZE   4096
 #define VMXNET3_RX_RING2_MAX_SIZE  4096
 #define VMXNET3_RC_RING_MAX_SIZE   8192
+
+#define VMXNET3_TXDATA_DESC_MIN_SIZE 128
+#define VMXNET3_TXDATA_DESC_MAX_SIZE 2048
+
+#define VMXNET3_RXDATA_DESC_MAX_SIZE 2048
 
 /* a list of reasons for queue stop */
 
@@ -466,7 +485,9 @@ struct Vmxnet3_TxQueueConf {
 	__le32		compRingSize; /* # of comp desc */
 	__le32		ddLen;        /* size of driver data */
 	u8		intrIdx;
-	u8		_pad[7];
+	u8		_pad1[1];
+	__le16		txDataRingDescSize;
+	u8		_pad2[4];
 };
 
 
@@ -474,12 +495,14 @@ struct Vmxnet3_RxQueueConf {
 	__le64		rxRingBasePA[2];
 	__le64		compRingBasePA;
 	__le64		ddPA;            /* driver data */
-	__le64		reserved;
+	__le64		rxDataRingBasePA;
 	__le32		rxRingSize[2];   /* # of rx desc */
 	__le32		compRingSize;    /* # of rx comp desc */
 	__le32		ddLen;           /* size of driver data */
 	u8		intrIdx;
-	u8		_pad[7];
+	u8		_pad1[1];
+	__le16		rxDataRingDescSize;  /* size of rx data ring buffer */
+	u8		_pad2[4];
 };
 
 

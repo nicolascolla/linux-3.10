@@ -107,6 +107,32 @@ void cifs_dump_mids(struct TCP_Server_Info *server)
 }
 
 #ifdef CONFIG_PROC_FS
+static void cifs_debug_tcon(struct seq_file *m, struct cifs_tcon *tcon)
+{
+	__u32 dev_type = le32_to_cpu(tcon->fsDevInfo.DeviceType);
+
+	seq_printf(m, "%s Mounts: %d ", tcon->treeName, tcon->tc_count);
+	if (tcon->nativeFileSystem)
+		seq_printf(m, "Type: %s ", tcon->nativeFileSystem);
+	seq_printf(m, "DevInfo: 0x%x Attributes: 0x%x\n\tPathComponentMax: %d Status: %d",
+		   le32_to_cpu(tcon->fsDevInfo.DeviceCharacteristics),
+		   le32_to_cpu(tcon->fsAttrInfo.Attributes),
+		   le32_to_cpu(tcon->fsAttrInfo.MaxPathNameComponentLength),
+		   tcon->tidStatus);
+	if (dev_type == FILE_DEVICE_DISK)
+		seq_puts(m, " type: DISK ");
+	else if (dev_type == FILE_DEVICE_CD_ROM)
+		seq_puts(m, " type: CDROM ");
+	else
+		seq_printf(m, " type: %d ", dev_type);
+	if (tcon->ses->server->ops->dump_share_caps)
+		tcon->ses->server->ops->dump_share_caps(m, tcon);
+
+	if (tcon->need_reconnect)
+		seq_puts(m, "\tDISCONNECTED ");
+	seq_putc(m, '\n');
+}
+
 static int cifs_debug_data_proc_show(struct seq_file *m, void *v)
 {
 	struct list_head *tmp1, *tmp2, *tmp3;
@@ -115,7 +141,6 @@ static int cifs_debug_data_proc_show(struct seq_file *m, void *v)
 	struct cifs_ses *ses;
 	struct cifs_tcon *tcon;
 	int i, j;
-	__u32 dev_type;
 
 	seq_puts(m,
 		    "Display Internal CIFS Data Structures for Debugging\n"
@@ -160,8 +185,13 @@ static int cifs_debug_data_proc_show(struct seq_file *m, void *v)
 			if ((ses->serverDomain == NULL) ||
 				(ses->serverOS == NULL) ||
 				(ses->serverNOS == NULL)) {
-				seq_printf(m, "\n%d) entry for %s not fully "
-					   "displayed\n\t", i, ses->serverName);
+				seq_printf(m, "\n%d) Name: %s Uses: %d Capability: 0x%x\tSession Status: %d\t",
+					i, ses->serverName, ses->ses_count,
+					ses->capabilities, ses->status);
+				if (ses->session_flags & SMB2_SESSION_FLAG_IS_GUEST)
+					seq_printf(m, "Guest\t");
+				else if (ses->session_flags & SMB2_SESSION_FLAG_IS_NULL)
+					seq_printf(m, "Anonymous\t");
 			} else {
 				seq_printf(m,
 				    "\n%d) Name: %s  Domain: %s Uses: %d OS:"
@@ -184,35 +214,19 @@ static int cifs_debug_data_proc_show(struct seq_file *m, void *v)
 
 			seq_puts(m, "\n\tShares:");
 			j = 0;
+
+			seq_printf(m, "\n\t%d) IPC: ", j);
+			if (ses->tcon_ipc)
+				cifs_debug_tcon(m, ses->tcon_ipc);
+			else
+				seq_puts(m, "none\n");
+
 			list_for_each(tmp3, &ses->tcon_list) {
 				tcon = list_entry(tmp3, struct cifs_tcon,
 						  tcon_list);
 				++j;
-				dev_type = le32_to_cpu(tcon->fsDevInfo.DeviceType);
-				seq_printf(m, "\n\t%d) %s Mounts: %d ", j,
-					   tcon->treeName, tcon->tc_count);
-				if (tcon->nativeFileSystem) {
-					seq_printf(m, "Type: %s ",
-						   tcon->nativeFileSystem);
-				}
-				seq_printf(m, "DevInfo: 0x%x Attributes: 0x%x"
-					"\n\tPathComponentMax: %d Status: %d",
-					le32_to_cpu(tcon->fsDevInfo.DeviceCharacteristics),
-					le32_to_cpu(tcon->fsAttrInfo.Attributes),
-					le32_to_cpu(tcon->fsAttrInfo.MaxPathNameComponentLength),
-					tcon->tidStatus);
-				if (dev_type == FILE_DEVICE_DISK)
-					seq_puts(m, " type: DISK ");
-				else if (dev_type == FILE_DEVICE_CD_ROM)
-					seq_puts(m, " type: CDROM ");
-				else
-					seq_printf(m, " type: %d ", dev_type);
-				if (server->ops->dump_share_caps)
-					server->ops->dump_share_caps(m, tcon);
-
-				if (tcon->need_reconnect)
-					seq_puts(m, "\tDISCONNECTED ");
-				seq_putc(m, '\n');
+				seq_printf(m, "\n\t%d) ", j);
+				cifs_debug_tcon(m, tcon);
 			}
 
 			seq_puts(m, "\n\tMIDs:\n");
@@ -388,15 +402,15 @@ cifs_proc_init(void)
 	proc_create("DebugData", 0, proc_fs_cifs, &cifs_debug_data_proc_fops);
 
 #ifdef CONFIG_CIFS_STATS
-	proc_create("Stats", 0, proc_fs_cifs, &cifs_stats_proc_fops);
+	proc_create("Stats", 0644, proc_fs_cifs, &cifs_stats_proc_fops);
 #endif /* STATS */
-	proc_create("cifsFYI", 0, proc_fs_cifs, &cifsFYI_proc_fops);
-	proc_create("traceSMB", 0, proc_fs_cifs, &traceSMB_proc_fops);
-	proc_create("LinuxExtensionsEnabled", 0, proc_fs_cifs,
+	proc_create("cifsFYI", 0644, proc_fs_cifs, &cifsFYI_proc_fops);
+	proc_create("traceSMB", 0644, proc_fs_cifs, &traceSMB_proc_fops);
+	proc_create("LinuxExtensionsEnabled", 0644, proc_fs_cifs,
 		    &cifs_linux_ext_proc_fops);
-	proc_create("SecurityFlags", 0, proc_fs_cifs,
+	proc_create("SecurityFlags", 0644, proc_fs_cifs,
 		    &cifs_security_flags_proc_fops);
-	proc_create("LookupCacheEnabled", 0, proc_fs_cifs,
+	proc_create("LookupCacheEnabled", 0644, proc_fs_cifs,
 		    &cifs_lookup_cache_proc_fops);
 }
 
@@ -443,6 +457,8 @@ static ssize_t cifsFYI_proc_write(struct file *file, const char __user *buffer,
 		cifsFYI = bv;
 	else if ((c[0] > '1') && (c[0] <= '9'))
 		cifsFYI = (int) (c[0] - '0'); /* see cifs_debug.h for meanings */
+	else
+		return -EINVAL;
 
 	return count;
 }

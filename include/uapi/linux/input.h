@@ -716,7 +716,7 @@ struct input_keymap_entry {
 #define KEY_BUTTONCONFIG		0x240	/* AL Button Configuration */
 #define KEY_CONTROLPANEL		0x243
 #define KEY_VOICECOMMAND		0x246	/* Listening Voice Command */
-#define KEY_BRIGHTNESS_MIN		0x251	/* Set Brightness to Minimum */
+#define KEY_BRIGHTNESS_MIN		0x250	/* Set Brightness to Minimum */
 
 #define KEY_ONSCREEN_KEYBOARD		0x278
 
@@ -940,6 +940,7 @@ struct input_keymap_entry {
 #define BUS_GSC			0x1A
 #define BUS_ATARI		0x1B
 #define BUS_SPI			0x1C
+#define BUS_RMI			0x1D
 #define BUS_INTEL_ISHTP		0x1F
 
 /*
@@ -947,7 +948,8 @@ struct input_keymap_entry {
  */
 #define MT_TOOL_FINGER		0
 #define MT_TOOL_PEN		1
-#define MT_TOOL_MAX		1
+#define MT_TOOL_PALM		2
+#define MT_TOOL_MAX		2
 
 /*
  * Values describing the status of a force-feedback effect

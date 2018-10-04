@@ -34,7 +34,6 @@
 #include <linux/init.h>
 #include <linux/slab.h>
 #include <linux/leds.h>
-#include <linux/nospec.h>
 
 #include <linux/kbd_kern.h>
 #include <linux/kbd_diacr.h>
@@ -2004,7 +2003,7 @@ int vt_do_kdgkb_ioctl(int cmd, struct kbsentry __user *user_kdgkb, int perm)
 	int sz;
 	int delta;
 	char *first_free, *fj, *fnw;
-	int i, j, k, idx;
+	int i, j, k;
 	int ret;
 
 	if (!capable(CAP_SYS_TTY_CONFIG))
@@ -2050,10 +2049,10 @@ int vt_do_kdgkb_ioctl(int cmd, struct kbsentry __user *user_kdgkb, int perm)
 
 		q = func_table[i];
 		first_free = funcbufptr + (funcbufsize - funcbufleft);
-		for (j = i+1; j < MAX_NR_FUNC && !func_table[array_index_nospec(j, MAX_NR_FUNC)]; j++)
+		for (j = i+1; j < MAX_NR_FUNC && !func_table[j]; j++)
 			;
 		if (j < MAX_NR_FUNC)
-			fj = func_table[array_index_nospec(j, MAX_NR_FUNC)];
+			fj = func_table[j];
 		else
 			fj = first_free;
 
@@ -2061,11 +2060,9 @@ int vt_do_kdgkb_ioctl(int cmd, struct kbsentry __user *user_kdgkb, int perm)
 		if (delta <= funcbufleft) { 	/* it fits in current buf */
 		    if (j < MAX_NR_FUNC) {
 			memmove(fj + delta, fj, first_free - fj);
-			for (k = j; k < MAX_NR_FUNC; k++) {
-			    idx = array_index_nospec(k, MAX_NR_FUNC);
-			    if (func_table[idx])
-				func_table[idx] += delta;
-			}
+			for (k = j; k < MAX_NR_FUNC; k++)
+			    if (func_table[k])
+				func_table[k] += delta;
 		    }
 		    if (!q)
 		      func_table[i] = fj;
@@ -2090,11 +2087,9 @@ int vt_do_kdgkb_ioctl(int cmd, struct kbsentry __user *user_kdgkb, int perm)
 
 		    if (first_free > fj) {
 			memmove(fnw + (fj - funcbufptr) + delta, fj, first_free - fj);
-			for (k = j; k < MAX_NR_FUNC; k++) {
-			  idx = array_index_nospec(k, MAX_NR_FUNC);
-			  if (func_table[idx])
-			    func_table[idx] = fnw + (func_table[idx] - funcbufptr) + delta;
-			}
+			for (k = j; k < MAX_NR_FUNC; k++)
+			  if (func_table[k])
+			    func_table[k] = fnw + (func_table[k] - funcbufptr) + delta;
 		    }
 		    if (funcbufptr != func_buf)
 		      kfree(funcbufptr);

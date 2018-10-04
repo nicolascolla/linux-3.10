@@ -595,6 +595,11 @@ struct qeth_cmd_buffer {
 	void (*callback) (struct qeth_channel *, struct qeth_cmd_buffer *);
 };
 
+static inline struct qeth_ipa_cmd *__ipa_cmd(struct qeth_cmd_buffer *iob)
+{
+	return (struct qeth_ipa_cmd *)(iob->data + IPA_PDU_HEADER_SIZE);
+}
+
 /**
  * definition of a qeth channel, used for read and write
  */
@@ -851,6 +856,17 @@ static inline struct qeth_card *CARD_FROM_CDEV(struct ccw_device *cdev)
 	struct qeth_card *card = dev_get_drvdata(&((struct ccwgroup_device *)
 		dev_get_drvdata(&cdev->dev))->dev);
 	return card;
+}
+
+static inline void qeth_scrub_qdio_buffer(struct qdio_buffer *buf,
+                                          unsigned int elements)
+{
+        unsigned int i;
+
+        for (i = 0; i < elements; i++)
+                memset(&buf->element[i], 0, sizeof(struct qdio_buffer_element));
+        buf->element[14].sflags = 0;
+        buf->element[15].sflags = 0;
 }
 
 static inline int qeth_get_micros(void)

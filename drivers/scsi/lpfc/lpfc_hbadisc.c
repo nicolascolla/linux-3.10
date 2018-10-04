@@ -1,8 +1,8 @@
 /*******************************************************************
  * This file is part of the Emulex Linux Device Driver for         *
  * Fibre Channel Host Bus Adapters.                                *
- * Copyright (C) 2017 Broadcom. All Rights Reserved. The term      *
- * “Broadcom” refers to Broadcom Limited and/or its subsidiaries.  *
+ * Copyright (C) 2017-2018 Broadcom. All Rights Reserved. The term *
+ * “Broadcom” refers to Broadcom Inc. and/or its subsidiaries.     *
  * Copyright (C) 2004-2016 Emulex.  All rights reserved.           *
  * EMULEX and SLI are trademarks of Emulex.                        *
  * www.broadcom.com                                                *
@@ -639,8 +639,6 @@ lpfc_work_done(struct lpfc_hba *phba)
 			lpfc_handle_rrq_active(phba);
 		if (phba->hba_flag & FCP_XRI_ABORT_EVENT)
 			lpfc_sli4_fcp_xri_abort_event_proc(phba);
-		if (phba->hba_flag & NVME_XRI_ABORT_EVENT)
-			lpfc_sli4_nvme_xri_abort_event_proc(phba);
 		if (phba->hba_flag & ELS_XRI_ABORT_EVENT)
 			lpfc_sli4_els_xri_abort_event_proc(phba);
 		if (phba->hba_flag & ASYNC_EVENT)
@@ -697,8 +695,9 @@ lpfc_work_done(struct lpfc_hba *phba)
 		      phba->hba_flag & HBA_SP_QUEUE_EVT)) {
 		if (pring->flag & LPFC_STOP_IOCB_EVENT) {
 			pring->flag |= LPFC_DEFERRED_RING_EVENT;
-			/* Set the lpfc data pending flag */
-			set_bit(LPFC_DATA_READY, &phba->data_flags);
+			/* Preserve legacy behavior. */
+			if (!(phba->hba_flag & HBA_SP_QUEUE_EVT))
+				set_bit(LPFC_DATA_READY, &phba->data_flags);
 		} else {
 			if (phba->link_state >= LPFC_LINK_UP ||
 			    phba->link_flag & LS_MDS_LOOPBACK) {
@@ -708,8 +707,7 @@ lpfc_work_done(struct lpfc_hba *phba)
 								HA_RXMASK));
 			}
 		}
-		if ((phba->sli_rev == LPFC_SLI_REV4) &&
-				 (!list_empty(&pring->txq)))
+		if (phba->sli_rev == LPFC_SLI_REV4)
 			lpfc_drain_txq(phba);
 		/*
 		 * Turn on Ring interrupts
@@ -959,6 +957,7 @@ lpfc_linkup_cleanup_nodes(struct lpfc_vport *vport)
 	struct lpfc_nodelist *ndlp;
 
 	list_for_each_entry(ndlp, &vport->fc_nodes, nlp_listp) {
+		ndlp->nlp_fc4_type &= ~(NLP_FC4_FCP | NLP_FC4_NVME);
 		if (!NLP_CHK_NODE_ACT(ndlp))
 			continue;
 		if (ndlp->nlp_state == NLP_STE_UNUSED_NODE)
@@ -3083,6 +3082,7 @@ lpfc_mbx_process_link_up(struct lpfc_hba *phba, struct lpfc_mbx_read_top *la)
 		case LPFC_LINK_SPEED_10GHZ:
 		case LPFC_LINK_SPEED_16GHZ:
 		case LPFC_LINK_SPEED_32GHZ:
+		case LPFC_LINK_SPEED_64GHZ:
 			break;
 		default:
 			phba->fc_linkspeed = LPFC_LINK_SPEED_UNKNOWN;
@@ -3978,7 +3978,6 @@ out:
 		lpfc_ns_cmd(vport, SLI_CTNS_RSNN_NN, 0, 0);
 		lpfc_ns_cmd(vport, SLI_CTNS_RSPN_ID, 0, 0);
 		lpfc_ns_cmd(vport, SLI_CTNS_RFT_ID, 0, 0);
-		lpfc_ns_cmd(vport, SLI_CTNS_RFF_ID, 0, 0);
 
 		if ((phba->cfg_enable_fc4_type == LPFC_ENABLE_BOTH) ||
 		    (phba->cfg_enable_fc4_type == LPFC_ENABLE_FCP))
@@ -4177,12 +4176,14 @@ lpfc_nlp_state_cleanup(struct lpfc_vport *vport, struct lpfc_nodelist *ndlp,
 
 		if (ndlp->nlp_fc4_type & NLP_FC4_NVME) {
 			vport->phba->nport_event_cnt++;
-			if (vport->phba->nvmet_support == 0)
-				/* Start devloss */
-				lpfc_nvme_unregister_port(vport, ndlp);
-			else
+			if (vport->phba->nvmet_support == 0) {
+				/* Start devloss if target. */
+				if (ndlp->nlp_type & NLP_NVME_TARGET)
+					lpfc_nvme_unregister_port(vport, ndlp);
+			} else {
 				/* NVMET has no upcall. */
 				lpfc_nlp_put(ndlp);
+			}
 		}
 	}
 
@@ -4206,11 +4207,13 @@ lpfc_nlp_state_cleanup(struct lpfc_vport *vport, struct lpfc_nodelist *ndlp,
 		    ndlp->nlp_fc4_type & NLP_FC4_NVME) {
 			if (vport->phba->nvmet_support == 0) {
 				/* Register this rport with the transport.
-				 * Initiators take the NDLP ref count in
-				 * the register.
+				 * Only NVME Target Rports are registered with
+				 * the transport.
 				 */
-				vport->phba->nport_event_cnt++;
-				lpfc_nvme_register_port(vport, ndlp);
+				if (ndlp->nlp_type & NLP_NVME_TARGET) {
+					vport->phba->nport_event_cnt++;
+					lpfc_nvme_register_port(vport, ndlp);
+				}
 			} else {
 				/* Just take an NDLP ref count since the
 				 * target does not register rports.

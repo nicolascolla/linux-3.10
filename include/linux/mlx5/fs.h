@@ -95,6 +95,10 @@ struct mlx5_flow_destination {
 struct mlx5_flow_namespace *
 mlx5_get_flow_namespace(struct mlx5_core_dev *dev,
 			enum mlx5_flow_namespace_type type);
+struct mlx5_flow_namespace *
+mlx5_get_flow_vport_acl_namespace(struct mlx5_core_dev *dev,
+				  enum mlx5_flow_namespace_type type,
+				  int vport);
 
 struct mlx5_flow_table *
 mlx5_create_auto_grouped_flow_table(struct mlx5_flow_namespace *ns,
@@ -135,11 +139,19 @@ struct mlx5_flow_group *
 mlx5_create_flow_group(struct mlx5_flow_table *ft, u32 *in);
 void mlx5_destroy_flow_group(struct mlx5_flow_group *fg);
 
+struct mlx5_fs_vlan {
+        u16 ethtype;
+        u16 vid;
+        u8  prio;
+};
+
 struct mlx5_flow_act {
 	u32 action;
+	bool has_flow_tag;
 	u32 flow_tag;
 	u32 encap_id;
 	u32 modify_id;
+	struct mlx5_fs_vlan vlan;
 };
 
 #define MLX5_DECLARE_FLOW_ACT(name) \

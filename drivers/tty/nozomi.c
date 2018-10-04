@@ -56,7 +56,6 @@
 #include <linux/kfifo.h>
 #include <linux/uaccess.h>
 #include <linux/slab.h>
-#include <linux/nospec.h>
 #include <asm/byteorder.h>
 
 #include <linux/delay.h>
@@ -418,8 +417,7 @@ static const struct tty_port_operations noz_tty_port_ops;
  */
 static inline struct nozomi *get_dc_by_tty(const struct tty_struct *tty)
 {
-	int idx = array_index_nospec(tty->index / MAX_PORT, NOZOMI_MAX_CARDS);
-	return tty ? ndevs[idx] : NULL;
+	return tty ? ndevs[tty->index / MAX_PORT] : NULL;
 }
 
 static inline struct port *get_port_by_tty(const struct tty_struct *tty)

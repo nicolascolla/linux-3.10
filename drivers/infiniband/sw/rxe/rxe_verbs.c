@@ -271,13 +271,12 @@ static int rxe_init_av(struct rxe_dev *rxe, struct rdma_ah_attr *attr,
 		return err;
 	}
 
-	err = rxe_av_from_attr(rxe, rdma_ah_get_port_num(attr), av, attr);
-	if (!err)
-		err = rxe_av_fill_ip_info(rxe, av, attr, &sgid_attr, &sgid);
+	rxe_av_from_attr(rdma_ah_get_port_num(attr), av, attr);
+	rxe_av_fill_ip_info(av, attr, &sgid_attr, &sgid);
 
 	if (sgid_attr.ndev)
 		dev_put(sgid_attr.ndev);
-	return err;
+	return 0;
 }
 
 static struct ib_ah *rxe_create_ah(struct ib_pd *ibpd,
@@ -335,12 +334,11 @@ static int rxe_modify_ah(struct ib_ah *ibah, struct rdma_ah_attr *attr)
 
 static int rxe_query_ah(struct ib_ah *ibah, struct rdma_ah_attr *attr)
 {
-	struct rxe_dev *rxe = to_rdev(ibah->device);
 	struct rxe_ah *ah = to_rah(ibah);
 
 	memset(attr, 0, sizeof(*attr));
 	attr->type = ibah->type;
-	rxe_av_to_attr(rxe, &ah->av, attr);
+	rxe_av_to_attr(&ah->av, attr);
 	return 0;
 }
 
@@ -409,6 +407,13 @@ static struct ib_srq *rxe_create_srq(struct ib_pd *ibpd,
 	struct rxe_pd *pd = to_rpd(ibpd);
 	struct rxe_srq *srq;
 	struct ib_ucontext *context = udata ? ibpd->uobject->context : NULL;
+	struct rxe_create_srq_resp __user *uresp = NULL;
+
+	if (udata) {
+		if (udata->outlen < sizeof(*uresp))
+			return ERR_PTR(-EINVAL);
+		uresp = udata->outbuf;
+	}
 
 	err = rxe_srq_chk_attr(rxe, NULL, &init->attr, IB_SRQ_INIT_MASK);
 	if (err)
@@ -424,7 +429,7 @@ static struct ib_srq *rxe_create_srq(struct ib_pd *ibpd,
 	rxe_add_ref(pd);
 	srq->pd = pd;
 
-	err = rxe_srq_from_init(rxe, srq, init, context, udata);
+	err = rxe_srq_from_init(rxe, srq, init, context, uresp);
 	if (err)
 		goto err2;
 
@@ -445,12 +450,22 @@ static int rxe_modify_srq(struct ib_srq *ibsrq, struct ib_srq_attr *attr,
 	int err;
 	struct rxe_srq *srq = to_rsrq(ibsrq);
 	struct rxe_dev *rxe = to_rdev(ibsrq->device);
+	struct rxe_modify_srq_cmd ucmd = {};
+
+	if (udata) {
+		if (udata->inlen < sizeof(ucmd))
+			return -EINVAL;
+
+		err = ib_copy_from_udata(&ucmd, udata, sizeof(ucmd));
+		if (err)
+			return err;
+	}
 
 	err = rxe_srq_chk_attr(rxe, srq, attr, mask);
 	if (err)
 		goto err1;
 
-	err = rxe_srq_from_attr(rxe, srq, attr, mask, udata);
+	err = rxe_srq_from_attr(rxe, srq, attr, mask, &ucmd);
 	if (err)
 		goto err1;
 
@@ -519,6 +534,13 @@ static struct ib_qp *rxe_create_qp(struct ib_pd *ibpd,
 	struct rxe_dev *rxe = to_rdev(ibpd->device);
 	struct rxe_pd *pd = to_rpd(ibpd);
 	struct rxe_qp *qp;
+	struct rxe_create_qp_resp __user *uresp = NULL;
+
+	if (udata) {
+		if (udata->outlen < sizeof(*uresp))
+			return ERR_PTR(-EINVAL);
+		uresp = udata->outbuf;
+	}
 
 	err = rxe_qp_chk_init(rxe, init);
 	if (err)
@@ -540,7 +562,7 @@ static struct ib_qp *rxe_create_qp(struct ib_pd *ibpd,
 
 	rxe_add_index(qp);
 
-	err = rxe_qp_from_init(rxe, qp, pd, init, udata, ibpd);
+	err = rxe_qp_from_init(rxe, qp, pd, init, uresp, ibpd);
 	if (err)
 		goto err3;
 
@@ -644,6 +666,7 @@ static void init_send_wr(struct rxe_qp *qp, struct rxe_send_wr *wr,
 		switch (wr->opcode) {
 		case IB_WR_RDMA_WRITE_WITH_IMM:
 			wr->ex.imm_data = ibwr->ex.imm_data;
+			/* fall through */
 		case IB_WR_RDMA_READ:
 		case IB_WR_RDMA_WRITE:
 			wr->wr.rdma.remote_addr = rdma_wr(ibwr)->remote_addr;
@@ -712,9 +735,8 @@ static int init_send_wqe(struct rxe_qp *qp, struct ib_send_wr *ibwr,
 		memcpy(wqe->dma.sge, ibwr->sg_list,
 		       num_sge * sizeof(struct ib_sge));
 
-	wqe->iova		= (mask & WR_ATOMIC_MASK) ?
-					atomic_wr(ibwr)->remote_addr :
-					rdma_wr(ibwr)->remote_addr;
+	wqe->iova = mask & WR_ATOMIC_MASK ? atomic_wr(ibwr)->remote_addr :
+		mask & WR_READ_OR_WRITE_MASK ? rdma_wr(ibwr)->remote_addr : 0;
 	wqe->mask		= mask;
 	wqe->dma.length		= length;
 	wqe->dma.resid		= length;
@@ -813,6 +835,8 @@ static int rxe_post_send_kernel(struct rxe_qp *qp, struct ib_send_wr *wr,
 			(queue_count(qp->sq.queue) > 1);
 
 	rxe_run_task(&qp->req.task, must_sched);
+	if (unlikely(qp->req.state == QP_STATE_ERROR))
+		rxe_run_task(&qp->comp.task, 1);
 
 	return err;
 }
@@ -888,11 +912,18 @@ static struct ib_cq *rxe_create_cq(struct ib_device *dev,
 	int err;
 	struct rxe_dev *rxe = to_rdev(dev);
 	struct rxe_cq *cq;
+	struct rxe_create_cq_resp __user *uresp = NULL;
+
+	if (udata) {
+		if (udata->outlen < sizeof(*uresp))
+			return ERR_PTR(-EINVAL);
+		uresp = udata->outbuf;
+	}
 
 	if (attr->flags)
 		return ERR_PTR(-EINVAL);
 
-	err = rxe_cq_chk_attr(rxe, NULL, attr->cqe, attr->comp_vector, udata);
+	err = rxe_cq_chk_attr(rxe, NULL, attr->cqe, attr->comp_vector);
 	if (err)
 		goto err1;
 
@@ -903,7 +934,7 @@ static struct ib_cq *rxe_create_cq(struct ib_device *dev,
 	}
 
 	err = rxe_cq_from_init(rxe, cq, attr->cqe, attr->comp_vector,
-			       context, udata);
+			       context, uresp);
 	if (err)
 		goto err2;
 
@@ -930,12 +961,19 @@ static int rxe_resize_cq(struct ib_cq *ibcq, int cqe, struct ib_udata *udata)
 	int err;
 	struct rxe_cq *cq = to_rcq(ibcq);
 	struct rxe_dev *rxe = to_rdev(ibcq->device);
+	struct rxe_resize_cq_resp __user *uresp = NULL;
 
-	err = rxe_cq_chk_attr(rxe, cq, cqe, 0, udata);
+	if (udata) {
+		if (udata->outlen < sizeof(*uresp))
+			return -EINVAL;
+		uresp = udata->outbuf;
+	}
+
+	err = rxe_cq_chk_attr(rxe, cq, cqe, 0);
 	if (err)
 		goto err1;
 
-	err = rxe_cq_resize_queue(cq, cqe, udata);
+	err = rxe_cq_resize_queue(cq, cqe, uresp);
 	if (err)
 		goto err1;
 
@@ -1191,6 +1229,7 @@ int rxe_register_device(struct rxe_dev *rxe)
 	int err;
 	int i;
 	struct ib_device *dev = &rxe->ib_dev;
+	struct crypto_shash *tfm;
 
 	strlcpy(dev->name, "rxe%d", IB_DEVICE_NAME_MAX);
 	strlcpy(dev->node_desc, "rxe", sizeof(dev->node_desc));
@@ -1205,7 +1244,7 @@ int rxe_register_device(struct rxe_dev *rxe)
 			    rxe->ndev->dev_addr);
 	dev->dev.device_rh->dma_ops = &dma_virt_ops;
 	dma_coerce_mask_and_coherent(&dev->dev,
-				     dma_get_required_mask(dev->dev.parent));
+				     dma_get_required_mask(&dev->dev));
 
 	dev->uverbs_abi_ver = RXE_UVERBS_ABI_VERSION;
 	dev->uverbs_cmd_mask = BIT_ULL(IB_USER_VERBS_CMD_GET_CONTEXT)
@@ -1288,12 +1327,13 @@ int rxe_register_device(struct rxe_dev *rxe)
 	dev->get_hw_stats = rxe_ib_get_hw_stats;
 	dev->alloc_hw_stats = rxe_ib_alloc_hw_stats;
 
-	rxe->tfm = crypto_alloc_shash("crc32", 0, 0);
-	if (IS_ERR(rxe->tfm)) {
+	tfm = crypto_alloc_shash("crc32", 0, 0);
+	if (IS_ERR(tfm)) {
 		pr_err("failed to allocate crc algorithm err:%ld\n",
-		       PTR_ERR(rxe->tfm));
-		return PTR_ERR(rxe->tfm);
+		       PTR_ERR(tfm));
+		return PTR_ERR(tfm);
 	}
+	rxe->tfm = tfm;
 
 	err = ib_register_device(dev, NULL);
 	if (err) {

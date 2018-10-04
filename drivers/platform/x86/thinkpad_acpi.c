@@ -61,7 +61,6 @@
 #include <linux/freezer.h>
 #include <linux/delay.h>
 #include <linux/slab.h>
-#include <linux/nospec.h>
 
 #include <linux/nvram.h>
 #include <linux/proc_fs.h>
@@ -134,6 +133,7 @@ enum {
 /* ACPI HIDs */
 #define TPACPI_ACPI_IBM_HKEY_HID	"IBM0068"
 #define TPACPI_ACPI_LENOVO_HKEY_HID	"LEN0068"
+#define TPACPI_ACPI_LENOVO_HKEY_V2_HID	"LEN0268"
 #define TPACPI_ACPI_EC_HID		"PNP0C09"
 
 /* Input IDs */
@@ -216,6 +216,10 @@ enum tpacpi_hkey_event_t {
 
 	/* AC-related events */
 	TP_HKEY_EV_AC_CHANGED		= 0x6040, /* AC status changed */
+
+	/* Further user-interface events */
+	TP_HKEY_EV_PALM_DETECTED	= 0x60b0, /* palm hoveres keyboard */
+	TP_HKEY_EV_PALM_UNDETECTED	= 0x60b1, /* palm removed */
 
 	/* Misc */
 	TP_HKEY_EV_RFKILL_CHANGED	= 0x7000, /* rfkill switch changed */
@@ -313,8 +317,7 @@ static struct {
 	enum {
 		TP_HOTKEY_TABLET_NONE = 0,
 		TP_HOTKEY_TABLET_USES_MHKG,
-		/* X1 Yoga 2016, seen on BIOS N1FET44W */
-		TP_HOTKEY_TABLET_USES_CMMD,
+		TP_HOTKEY_TABLET_USES_GMMS,
 	} hotkey_tablet;
 	u32 light:1;
 	u32 light_status:1;
@@ -1920,7 +1923,9 @@ enum {	/* hot key scan codes (derived from ACPI DSDT) */
 	TP_ACPI_HOTKEYSCAN_UNK7,
 	TP_ACPI_HOTKEYSCAN_UNK8,
 
-	TP_ACPI_HOTKEYSCAN_MUTE2,
+	/* Adaptive keyboard keycodes */
+	TP_ACPI_HOTKEYSCAN_ADAPTIVE_START,
+	TP_ACPI_HOTKEYSCAN_MUTE2        = TP_ACPI_HOTKEYSCAN_ADAPTIVE_START,
 	TP_ACPI_HOTKEYSCAN_BRIGHTNESS_ZERO,
 	TP_ACPI_HOTKEYSCAN_CLIPPING_TOOL,
 	TP_ACPI_HOTKEYSCAN_CLOUD,
@@ -1940,6 +1945,15 @@ enum {	/* hot key scan codes (derived from ACPI DSDT) */
 	TP_ACPI_HOTKEYSCAN_MIC_CANCELLATION,
 	TP_ACPI_HOTKEYSCAN_CAMERA_MODE,
 	TP_ACPI_HOTKEYSCAN_ROTATE_DISPLAY,
+
+	/* Lenovo extended keymap, starting at 0x1300 */
+	TP_ACPI_HOTKEYSCAN_EXTENDED_START,
+	/* first new observed key (star, favorites) is 0x1311 */
+	TP_ACPI_HOTKEYSCAN_STAR = 69,
+	TP_ACPI_HOTKEYSCAN_CLIPPING_TOOL2,
+	TP_ACPI_HOTKEYSCAN_UNK25,
+	TP_ACPI_HOTKEYSCAN_BLUETOOTH,
+	TP_ACPI_HOTKEYSCAN_KEYBOARD,
 
 	/* Hotkey keymap size */
 	TPACPI_HOTKEY_MAP_LEN
@@ -2067,8 +2081,28 @@ static void hotkey_poll_setup(const bool may_warn);
 
 /* HKEY.MHKG() return bits */
 #define TP_HOTKEY_TABLET_MASK (1 << 3)
-/* ThinkPad X1 Yoga (2016) */
-#define TP_EC_CMMD_TABLET_MODE 0x6
+enum {
+	TP_ACPI_MULTI_MODE_INVALID	= 0,
+	TP_ACPI_MULTI_MODE_UNKNOWN	= 1 << 0,
+	TP_ACPI_MULTI_MODE_LAPTOP	= 1 << 1,
+	TP_ACPI_MULTI_MODE_TABLET	= 1 << 2,
+	TP_ACPI_MULTI_MODE_FLAT		= 1 << 3,
+	TP_ACPI_MULTI_MODE_STAND	= 1 << 4,
+	TP_ACPI_MULTI_MODE_TENT		= 1 << 5,
+	TP_ACPI_MULTI_MODE_STAND_TENT	= 1 << 6,
+};
+
+enum {
+	/* The following modes are considered tablet mode for the purpose of
+	 * reporting the status to userspace. i.e. in all these modes it makes
+	 * sense to disable the laptop input devices such as touchpad and
+	 * keyboard.
+	 */
+	TP_ACPI_MULTI_MODE_TABLET_LIKE	= TP_ACPI_MULTI_MODE_TABLET |
+					  TP_ACPI_MULTI_MODE_STAND |
+					  TP_ACPI_MULTI_MODE_TENT |
+					  TP_ACPI_MULTI_MODE_STAND_TENT,
+};
 
 static int hotkey_get_wlsw(void)
 {
@@ -2089,6 +2123,88 @@ static int hotkey_get_wlsw(void)
 	return (status) ? TPACPI_RFK_RADIO_ON : TPACPI_RFK_RADIO_OFF;
 }
 
+static int hotkey_gmms_get_tablet_mode(int s, int *has_tablet_mode)
+{
+	int type = (s >> 16) & 0xffff;
+	int value = s & 0xffff;
+	int mode = TP_ACPI_MULTI_MODE_INVALID;
+	int valid_modes = 0;
+
+	if (has_tablet_mode)
+		*has_tablet_mode = 0;
+
+	switch (type) {
+	case 1:
+		valid_modes = TP_ACPI_MULTI_MODE_LAPTOP |
+			      TP_ACPI_MULTI_MODE_TABLET |
+			      TP_ACPI_MULTI_MODE_STAND_TENT;
+		break;
+	case 2:
+		valid_modes = TP_ACPI_MULTI_MODE_LAPTOP |
+			      TP_ACPI_MULTI_MODE_FLAT |
+			      TP_ACPI_MULTI_MODE_TABLET |
+			      TP_ACPI_MULTI_MODE_STAND |
+			      TP_ACPI_MULTI_MODE_TENT;
+		break;
+	case 3:
+		valid_modes = TP_ACPI_MULTI_MODE_LAPTOP |
+			      TP_ACPI_MULTI_MODE_FLAT;
+		break;
+	case 4:
+	case 5:
+		/* In mode 4, FLAT is not specified as a valid mode. However,
+		 * it can be seen at least on the X1 Yoga 2nd Generation.
+		 */
+		valid_modes = TP_ACPI_MULTI_MODE_LAPTOP |
+			      TP_ACPI_MULTI_MODE_FLAT |
+			      TP_ACPI_MULTI_MODE_TABLET |
+			      TP_ACPI_MULTI_MODE_STAND |
+			      TP_ACPI_MULTI_MODE_TENT;
+		break;
+	default:
+		pr_err("Unknown multi mode status type %d with value 0x%04X, please report this to %s\n",
+		       type, value, TPACPI_MAIL);
+		return 0;
+	}
+
+	if (has_tablet_mode && (valid_modes & TP_ACPI_MULTI_MODE_TABLET_LIKE))
+		*has_tablet_mode = 1;
+
+	switch (value) {
+	case 1:
+		mode = TP_ACPI_MULTI_MODE_LAPTOP;
+		break;
+	case 2:
+		mode = TP_ACPI_MULTI_MODE_FLAT;
+		break;
+	case 3:
+		mode = TP_ACPI_MULTI_MODE_TABLET;
+		break;
+	case 4:
+		if (type == 1)
+			mode = TP_ACPI_MULTI_MODE_STAND_TENT;
+		else
+			mode = TP_ACPI_MULTI_MODE_STAND;
+		break;
+	case 5:
+		mode = TP_ACPI_MULTI_MODE_TENT;
+		break;
+	default:
+		if (type == 5 && value == 0xffff) {
+			pr_warn("Multi mode status is undetected, assuming laptop\n");
+			return 0;
+		}
+	}
+
+	if (!(mode & valid_modes)) {
+		pr_err("Unknown/reserved multi mode value 0x%04X for type %d, please report this to %s\n",
+		       value, type, TPACPI_MAIL);
+		return 0;
+	}
+
+	return !!(mode & TP_ACPI_MULTI_MODE_TABLET_LIKE);
+}
+
 static int hotkey_get_tablet_mode(int *status)
 {
 	int s;
@@ -2100,11 +2216,11 @@ static int hotkey_get_tablet_mode(int *status)
 
 		*status = ((s & TP_HOTKEY_TABLET_MASK) != 0);
 		break;
-	case TP_HOTKEY_TABLET_USES_CMMD:
-		if (!acpi_evalf(ec_handle, &s, "CMMD", "d"))
+	case TP_HOTKEY_TABLET_USES_GMMS:
+		if (!acpi_evalf(hkey_handle, &s, "GMMS", "dd", 0))
 			return -EIO;
 
-		*status = (s == TP_EC_CMMD_TABLET_MODE);
+		*status = hotkey_gmms_get_tablet_mode(s, NULL);
 		break;
 	default:
 		break;
@@ -3175,16 +3291,19 @@ static int hotkey_init_tablet_mode(void)
 	int in_tablet_mode = 0, res;
 	char *type = NULL;
 
-	if (acpi_evalf(hkey_handle, &res, "MHKG", "qd")) {
+	if (acpi_evalf(hkey_handle, &res, "GMMS", "qdd", 0)) {
+		int has_tablet_mode;
+
+		in_tablet_mode = hotkey_gmms_get_tablet_mode(res,
+							     &has_tablet_mode);
+		if (has_tablet_mode)
+			tp_features.hotkey_tablet = TP_HOTKEY_TABLET_USES_GMMS;
+		type = "GMMS";
+	} else if (acpi_evalf(hkey_handle, &res, "MHKG", "qd")) {
 		/* For X41t, X60t, X61t Tablets... */
 		tp_features.hotkey_tablet = TP_HOTKEY_TABLET_USES_MHKG;
 		in_tablet_mode = !!(res & TP_HOTKEY_TABLET_MASK);
 		type = "MHKG";
-	} else if (acpi_evalf(ec_handle, &res, "CMMD", "qd")) {
-		/* For X1 Yoga (2016) */
-		tp_features.hotkey_tablet = TP_HOTKEY_TABLET_USES_CMMD;
-		in_tablet_mode = res == TP_EC_CMMD_TABLET_MODE;
-		type = "CMMD";
 	}
 
 	if (!tp_features.hotkey_tablet)
@@ -3280,6 +3399,15 @@ static int __init hotkey_init(struct ibm_init_struct *iibm)
 		KEY_UNKNOWN, KEY_UNKNOWN, KEY_UNKNOWN, KEY_UNKNOWN,
 		KEY_UNKNOWN, KEY_UNKNOWN, KEY_UNKNOWN, KEY_UNKNOWN,
 		KEY_UNKNOWN, KEY_UNKNOWN, KEY_UNKNOWN,
+
+		/* No assignment, used for newer Lenovo models */
+		KEY_UNKNOWN, KEY_UNKNOWN, KEY_UNKNOWN, KEY_UNKNOWN,
+		KEY_UNKNOWN, KEY_UNKNOWN, KEY_UNKNOWN, KEY_UNKNOWN,
+		KEY_UNKNOWN, KEY_UNKNOWN, KEY_UNKNOWN, KEY_UNKNOWN,
+		KEY_UNKNOWN, KEY_UNKNOWN, KEY_UNKNOWN, KEY_UNKNOWN,
+		KEY_UNKNOWN, KEY_UNKNOWN, KEY_UNKNOWN, KEY_UNKNOWN,
+		KEY_UNKNOWN, KEY_UNKNOWN
+
 		},
 
 	/* Generic keymap for Lenovo ThinkPads */
@@ -3365,6 +3493,29 @@ static int __init hotkey_init(struct ibm_init_struct *iibm)
 		KEY_RESERVED,        /* Microphone cancellation */
 		KEY_RESERVED,        /* Camera mode */
 		KEY_RESERVED,        /* Rotate display, 0x116 */
+
+		/*
+		 * These are found in 2017 models (e.g. T470s, X270).
+		 * The lowest known value is 0x311, which according to
+		 * the manual should launch a user defined favorite
+		 * application.
+		 *
+		 * The offset for these is TP_ACPI_HOTKEYSCAN_EXTENDED_START,
+		 * corresponding to 0x34.
+		 */
+
+		/* (assignments unknown, please report if found) */
+		KEY_UNKNOWN, KEY_UNKNOWN, KEY_UNKNOWN, KEY_UNKNOWN,
+		KEY_UNKNOWN, KEY_UNKNOWN, KEY_UNKNOWN, KEY_UNKNOWN,
+		KEY_UNKNOWN, KEY_UNKNOWN, KEY_UNKNOWN, KEY_UNKNOWN,
+		KEY_UNKNOWN, KEY_UNKNOWN, KEY_UNKNOWN, KEY_UNKNOWN,
+		KEY_UNKNOWN,
+
+		KEY_FAVORITES,       /* Favorite app, 0x311 */
+		KEY_RESERVED,        /* Clipping tool */
+		KEY_RESERVED,
+		KEY_BLUETOOTH,       /* Bluetooth */
+		KEY_KEYBOARD         /* Keyboard, 0x315 */
 		},
 	};
 
@@ -3692,7 +3843,6 @@ const int adaptive_keyboard_modes[] = {
 #define DFR_CHANGE_ROW			0x101
 #define DFR_SHOW_QUICKVIEW_ROW		0x102
 #define FIRST_ADAPTIVE_KEY		0x103
-#define ADAPTIVE_KEY_OFFSET		0x020
 
 /* press Fn key a while second, it will switch to Function Mode. Then
  * release Fn key, previous mode be restored.
@@ -3782,13 +3932,15 @@ static bool adaptive_keyboard_hotkey_notify_hotkey(unsigned int scancode)
 
 	default:
 		if (scancode < FIRST_ADAPTIVE_KEY ||
-		    scancode >= FIRST_ADAPTIVE_KEY + TPACPI_HOTKEY_MAP_LEN -
-				ADAPTIVE_KEY_OFFSET) {
+		    scancode >= FIRST_ADAPTIVE_KEY +
+		    TP_ACPI_HOTKEYSCAN_EXTENDED_START -
+		    TP_ACPI_HOTKEYSCAN_ADAPTIVE_START) {
 			pr_info("Unhandled adaptive keyboard key: 0x%x\n",
 					scancode);
 			return false;
 		}
-		keycode = hotkey_keycode_map[scancode - FIRST_ADAPTIVE_KEY + ADAPTIVE_KEY_OFFSET];
+		keycode = hotkey_keycode_map[scancode - FIRST_ADAPTIVE_KEY +
+					     TP_ACPI_HOTKEYSCAN_ADAPTIVE_START];
 		if (keycode != KEY_RESERVED) {
 			mutex_lock(&tpacpi_inputdev_send_mutex);
 
@@ -3813,19 +3965,44 @@ static bool hotkey_notify_hotkey(const u32 hkey,
 	*send_acpi_ev = true;
 	*ignore_acpi_ev = false;
 
-	/* HKEY event 0x1001 is scancode 0x00 */
-	if (scancode > 0 && scancode <= TPACPI_HOTKEY_MAP_LEN) {
-		scancode--;
-		if (!(hotkey_source_mask & (1 << scancode))) {
-			tpacpi_input_send_key_masked(scancode);
-			*send_acpi_ev = false;
-		} else {
-			*ignore_acpi_ev = true;
+	/*
+	 * Original events are in the 0x10XX range, the adaptive keyboard
+	 * found in 2014 X1 Carbon emits events are of 0x11XX. In 2017
+	 * models, additional keys are emitted through 0x13XX.
+	 */
+	switch ((hkey >> 8) & 0xf) {
+	case 0:
+		if (scancode > 0 &&
+		    scancode <= TP_ACPI_HOTKEYSCAN_ADAPTIVE_START) {
+			/* HKEY event 0x1001 is scancode 0x00 */
+			scancode--;
+			if (!(hotkey_source_mask & (1 << scancode))) {
+				tpacpi_input_send_key_masked(scancode);
+				*send_acpi_ev = false;
+			} else {
+				*ignore_acpi_ev = true;
+			}
+			return true;
 		}
-		return true;
-	} else {
+		break;
+
+	case 1:
 		return adaptive_keyboard_hotkey_notify_hotkey(scancode);
+
+	case 3:
+		/* Extended keycodes start at 0x300 and our offset into the map
+		 * TP_ACPI_HOTKEYSCAN_EXTENDED_START. The calculated scancode
+		 * will be positive, but might not be in the correct range.
+		 */
+		scancode -= (0x300 - TP_ACPI_HOTKEYSCAN_EXTENDED_START);
+		if (scancode >= TP_ACPI_HOTKEYSCAN_EXTENDED_START &&
+		    scancode < TPACPI_HOTKEY_MAP_LEN) {
+			tpacpi_input_send_key(scancode);
+			return true;
+		}
+		break;
 	}
+
 	return false;
 }
 
@@ -3986,6 +4163,12 @@ static bool hotkey_notify_6xxx(const u32 hkey,
 		hotkey_tablet_mode_notify_change();
 		*send_acpi_ev = false;
 		break;
+
+	case TP_HKEY_EV_PALM_DETECTED:
+	case TP_HKEY_EV_PALM_UNDETECTED:
+		/* palm detected hovering the keyboard, forward to user-space
+		 * via netlink for consumption */
+		return true;
 
 	default:
 		pr_warn("unknown possible thermal alarm or keyboard event received\n");
@@ -4238,6 +4421,7 @@ errexit:
 static const struct acpi_device_id ibm_htk_device_ids[] = {
 	{TPACPI_ACPI_IBM_HKEY_HID, 0},
 	{TPACPI_ACPI_LENOVO_HKEY_HID, 0},
+	{TPACPI_ACPI_LENOVO_HKEY_V2_HID, 0},
 	{"", 0},
 };
 
@@ -5456,7 +5640,7 @@ static int led_get_status(const unsigned int led)
 	/* not reached */
 }
 
-static int led_set_status(unsigned int led,
+static int led_set_status(const unsigned int led,
 			  const enum led_status_t ledstatus)
 {
 	/* off, on, blink. Index is led_status_t */
@@ -5504,10 +5688,8 @@ static int led_set_status(unsigned int led,
 		rc = -ENXIO;
 	}
 
-	if (!rc) {
-		led = array_index_nospec(led, TPACPI_LED_NUMLEDS);
+	if (!rc)
 		tpacpi_led_state_cache[led] = ledstatus;
-	}
 
 	return rc;
 }

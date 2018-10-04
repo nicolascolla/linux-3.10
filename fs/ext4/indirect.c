@@ -560,10 +560,16 @@ int ext4_ind_map_blocks(handle_t *handle, struct inode *inode,
 		unsigned epb = inode->i_sb->s_blocksize / sizeof(u32);
 		int i;
 
-		/* Count number blocks in a subtree under 'partial' */
-		count = 1;
-		for (i = 0; partial + i != chain + depth - 1; i++)
-			count *= epb;
+		/*
+		 * Count number blocks in a subtree under 'partial'. At each
+		 * level we count number of complete empty subtrees beyond
+		 * current offset and then descend into the subtree only
+		 * partially beyond current offset.
+		 */
+		count = 0;
+		for (i = partial - chain + 1; i < depth; i++)
+			count = count * epb + (epb - offsets[i] - 1);
+		count++;
 		/* Fill in size of a hole we found */
 		map->m_pblk = 0;
 		map->m_len = min_t(unsigned int, map->m_len, count);
@@ -691,7 +697,7 @@ ssize_t ext4_ind_direct_IO(int rw, struct kiocb *iocb,
 				goto out;
 			}
 			orphan = 1;
-			ei->i_disksize = inode->i_size;
+			ext4_update_i_disksize(inode, inode->i_size);
 			ext4_journal_stop(handle);
 		}
 	}
@@ -750,9 +756,10 @@ locked:
 			ext4_orphan_del(handle, inode);
 		if (ret > 0) {
 			loff_t end = offset + ret;
-			if (end > inode->i_size) {
-				ei->i_disksize = end;
-				i_size_write(inode, end);
+			if (end > inode->i_size || end > ei->i_disksize) {
+				ext4_update_i_disksize(inode, end);
+				if (end > inode->i_size)
+					i_size_write(inode, end);
 				/*
 				 * We're going to return a positive `ret'
 				 * here due to non-zero-length I/O, so there's

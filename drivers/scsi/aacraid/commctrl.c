@@ -43,7 +43,6 @@
 #include <linux/kthread.h>
 #include <linux/semaphore.h>
 #include <linux/uaccess.h>
-#include <linux/nospec.h>
 #include <scsi/scsi_host.h>
 
 #include "aacraid.h"
@@ -101,7 +100,8 @@ static int ioctl_send_fib(struct aac_dev * dev, void __user *arg)
 			goto cleanup;
 		}
 
-		kfib = pci_alloc_consistent(dev->pdev, size, &daddr);
+		kfib = dma_alloc_coherent(&dev->pdev->dev, size, &daddr,
+					  GFP_KERNEL);
 		if (!kfib) {
 			retval = -ENOMEM;
 			goto cleanup;
@@ -161,7 +161,8 @@ static int ioctl_send_fib(struct aac_dev * dev, void __user *arg)
 		retval = -EFAULT;
 cleanup:
 	if (hw_fib) {
-		pci_free_consistent(dev->pdev, size, kfib, fibptr->hw_fib_pa);
+		dma_free_coherent(&dev->pdev->dev, size, kfib,
+				  fibptr->hw_fib_pa);
 		fibptr->hw_fib_pa = hw_fib_pa;
 		fibptr->hw_fib_va = hw_fib;
 	}
@@ -583,10 +584,8 @@ static int aac_send_raw_srb(struct aac_dev* dev, void __user * arg)
 
 	chn = user_srbcmd->channel;
 	if (chn < AAC_MAX_BUSES && user_srbcmd->id < AAC_MAX_TARGETS &&
-		dev->hba_map[array_index_nospec(chn, AAC_MAX_BUSES)][array_index_nospec(user_srbcmd->id, AAC_MAX_TARGETS)].devtype ==
+		dev->hba_map[chn][user_srbcmd->id].devtype ==
 		AAC_DEVTYPE_NATIVE_RAW) {
-		u32 id = array_index_nospec(user_srbcmd->id, AAC_MAX_TARGETS);
-		chn = array_index_nospec(chn, AAC_MAX_BUSES);
 		is_native_device = 1;
 		hbacmd = (struct aac_hba_cmd_req *)srbfib->hw_fib_va;
 		memset(hbacmd, 0, 96);	/* sizeof(*hbacmd) is not necessary */
@@ -605,7 +604,7 @@ static int aac_send_raw_srb(struct aac_dev* dev, void __user * arg)
 			break;
 		}
 		hbacmd->lun[1] = cpu_to_le32(user_srbcmd->lun);
-		hbacmd->it_nexus = dev->hba_map[chn][id].rmw_nexus;
+		hbacmd->it_nexus = dev->hba_map[chn][user_srbcmd->id].rmw_nexus;
 
 		/*
 		 * we fill in reply_qid later in aac_src_deliver_message
@@ -669,7 +668,7 @@ static int aac_send_raw_srb(struct aac_dev* dev, void __user * arg)
 				goto cleanup;
 			}
 
-			p = kmalloc(sg_count[i], GFP_KERNEL|__GFP_DMA);
+			p = kmalloc(sg_count[i], GFP_KERNEL);
 			if (!p) {
 				rcode = -ENOMEM;
 				goto cleanup;
@@ -703,11 +702,9 @@ static int aac_send_raw_srb(struct aac_dev* dev, void __user * arg)
 			byte_count += sg_count[i];
 		}
 
-		if (usg32->count > 0) {	/* embedded sglist */
-			u32 idx = array_index_nospec(usg32->count - 1,
-						     HBA_MAX_SG_SEPARATE + 2);
-			hbacmd->sge[idx].flags = cpu_to_le32(0x40000000);
-		}
+		if (usg32->count > 0)	/* embedded sglist */
+			hbacmd->sge[usg32->count-1].flags =
+				cpu_to_le32(0x40000000);
 		hbacmd->data_length = cpu_to_le32(byte_count);
 
 		status = aac_hba_send(HBA_IU_TYPE_SCSI_CMD_REQ, srbfib,
@@ -735,8 +732,8 @@ static int aac_send_raw_srb(struct aac_dev* dev, void __user * arg)
 					rcode = -EINVAL;
 					goto cleanup;
 				}
-				/* Does this really need to be GFP_DMA? */
-				p = kmalloc(sg_count[i], GFP_KERNEL|__GFP_DMA);
+
+				p = kmalloc(sg_count[i], GFP_KERNEL);
 				if(!p) {
 					dprintk((KERN_DEBUG"aacraid: Could not allocate SG buffer - size = %d buffer number %d of %d\n",
 					  sg_count[i], i, upsg->count));
@@ -791,8 +788,8 @@ static int aac_send_raw_srb(struct aac_dev* dev, void __user * arg)
 					rcode = -EINVAL;
 					goto cleanup;
 				}
-				/* Does this really need to be GFP_DMA? */
-				p = kmalloc(sg_count[i], GFP_KERNEL|__GFP_DMA);
+
+				p = kmalloc(sg_count[i], GFP_KERNEL);
 				if(!p) {
 					dprintk((KERN_DEBUG "aacraid: Could not allocate SG buffer - size = %d buffer number %d of %d\n",
 						sg_count[i], i, usg->count));
@@ -848,8 +845,7 @@ static int aac_send_raw_srb(struct aac_dev* dev, void __user * arg)
 					rcode = -EINVAL;
 					goto cleanup;
 				}
-				/* Does this really need to be GFP_DMA? */
-				p = kmalloc(sg_count[i], GFP_KERNEL|__GFP_DMA);
+				p = kmalloc(sg_count[i], GFP_KERNEL|GFP_DMA32);
 				if (!p) {
 					dprintk((KERN_DEBUG"aacraid: Could not allocate SG buffer - size = %d buffer number %d of %d\n",
 						sg_count[i], i, usg->count));
@@ -890,7 +886,7 @@ static int aac_send_raw_srb(struct aac_dev* dev, void __user * arg)
 					rcode = -EINVAL;
 					goto cleanup;
 				}
-				p = kmalloc(sg_count[i], GFP_KERNEL);
+				p = kmalloc(sg_count[i], GFP_KERNEL|GFP_DMA32);
 				if (!p) {
 					dprintk((KERN_DEBUG"aacraid: Could not allocate SG buffer - size = %d buffer number %d of %d\n",
 					  sg_count[i], i, upsg->count));
@@ -953,12 +949,15 @@ static int aac_send_raw_srb(struct aac_dev* dev, void __user * arg)
 			&((struct aac_native_hba *)srbfib->hw_fib_va)->resp.err;
 		struct aac_srb_reply reply;
 
+		memset(&reply, 0, sizeof(reply));
 		reply.status = ST_OK;
 		if (srbfib->flags & FIB_CONTEXT_FLAG_FASTRESP) {
 			/* fast response */
 			reply.srb_status = SRB_STATUS_SUCCESS;
 			reply.scsi_status = 0;
 			reply.data_xfer_length = byte_count;
+			reply.sense_data_size = 0;
+			memset(reply.sense_data, 0, AAC_SENSE_BUFFERSIZE);
 		} else {
 			reply.srb_status = err->service_response;
 			reply.scsi_status = err->status;
@@ -1022,6 +1021,7 @@ static int aac_get_hba_info(struct aac_dev *dev, void __user *arg)
 {
 	struct aac_hba_info hbainfo;
 
+	memset(&hbainfo, 0, sizeof(hbainfo));
 	hbainfo.adapter_number		= (u8) dev->id;
 	hbainfo.system_io_bus_number	= dev->pdev->bus->number;
 	hbainfo.device_number		= (dev->pdev->devfn >> 3);
@@ -1052,9 +1052,13 @@ static int aac_send_reset_adapter(struct aac_dev *dev, void __user *arg)
 	if (copy_from_user((void *)&reset, arg, sizeof(struct aac_reset_iop)))
 		return -EFAULT;
 
-	retval = aac_reset_adapter(dev, 0, reset.reset_type);
-	return retval;
+	dev->adapter_shutdown = 1;
 
+	mutex_unlock(&dev->ioctl_mutex);
+	retval = aac_reset_adapter(dev, 0, reset.reset_type);
+	mutex_lock(&dev->ioctl_mutex);
+
+	return retval;
 }
 
 int aac_do_ioctl(struct aac_dev * dev, int cmd, void __user *arg)

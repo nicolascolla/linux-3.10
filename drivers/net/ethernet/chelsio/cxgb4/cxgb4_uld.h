@@ -40,7 +40,6 @@
 #include <linux/skbuff.h>
 #include <linux/inetdevice.h>
 #include <linux/atomic.h>
-#include <linux/nospec.h>
 #include "cxgb4.h"
 
 #define MAX_ULD_QSETS 16
@@ -143,11 +142,7 @@ static inline void *lookup_tid(const struct tid_info *t, unsigned int tid)
 
 static inline void *lookup_atid(const struct tid_info *t, unsigned int atid)
 {
-	if (atid >= t->natids)
-		return NULL;
-	atid = array_index_nospec(atid, t->natids);
-
-	return t->atid_tab[atid].data;
+	return atid < t->natids ? t->atid_tab[atid].data : NULL;
 }
 
 static inline void *lookup_stid(const struct tid_info *t, unsigned int stid)
@@ -217,14 +212,19 @@ struct filter_ctx {
 
 struct ch_filter_specification;
 
+int cxgb4_get_free_ftid(struct net_device *dev, int family);
 int __cxgb4_set_filter(struct net_device *dev, int filter_id,
 		       struct ch_filter_specification *fs,
 		       struct filter_ctx *ctx);
 int __cxgb4_del_filter(struct net_device *dev, int filter_id,
+		       struct ch_filter_specification *fs,
 		       struct filter_ctx *ctx);
 int cxgb4_set_filter(struct net_device *dev, int filter_id,
 		     struct ch_filter_specification *fs);
-int cxgb4_del_filter(struct net_device *dev, int filter_id);
+int cxgb4_del_filter(struct net_device *dev, int filter_id,
+		     struct ch_filter_specification *fs);
+int cxgb4_get_filter_counters(struct net_device *dev, unsigned int fidx,
+			      u64 *hitcnt, u64 *bytecnt, bool hash);
 
 static inline void set_wr_txq(struct sk_buff *skb, int prio, int queue)
 {
@@ -257,7 +257,8 @@ enum cxgb4_state {
 	CXGB4_STATE_UP,
 	CXGB4_STATE_START_RECOVERY,
 	CXGB4_STATE_DOWN,
-	CXGB4_STATE_DETACH
+	CXGB4_STATE_DETACH,
+	CXGB4_STATE_FATAL_ERROR
 };
 
 enum cxgb4_control {
@@ -283,6 +284,7 @@ struct cxgb4_virt_res {                      /* virtualized HW resources */
 	struct cxgb4_range iscsi;
 	struct cxgb4_range stag;
 	struct cxgb4_range rq;
+	struct cxgb4_range srq;
 	struct cxgb4_range pbl;
 	struct cxgb4_range qp;
 	struct cxgb4_range cq;
@@ -297,6 +299,7 @@ struct chcr_stats_debug {
 	atomic_t complete;
 	atomic_t error;
 	atomic_t fallback;
+	atomic_t ipsec_cnt;
 };
 
 #define OCQ_WIN_OFFSET(pdev, vres) \
@@ -322,6 +325,7 @@ struct cxgb4_lld_info {
 	unsigned char wr_cred;               /* WR 16-byte credits */
 	unsigned char adapter_type;          /* type of adapter */
 	unsigned char fw_api_ver;            /* FW API version */
+	unsigned char crypto;                /* crypto support */
 	unsigned int fw_vers;                /* FW version */
 	unsigned int iscsi_iolen;            /* iSCSI max I/O length */
 	unsigned int cclk_ps;                /* Core clock period in psec */
@@ -350,10 +354,12 @@ struct cxgb4_lld_info {
 	void **iscsi_ppm;		     /* iscsi page pod manager */
 	int nodeid;			     /* device numa node id */
 	bool fr_nsmr_tpte_wr_support;	     /* FW supports FR_NSMR_TPTE_WR */
+	bool write_w_imm_support;         /* FW supports WRITE_WITH_IMMEDIATE */
+	bool write_cmpl_support;             /* FW supports WRITE_CMPL WR */
 };
 
 struct cxgb4_uld_info {
-	const char *name;
+	char name[IFNAMSIZ];
 	void *handle;
 	unsigned int nrxq;
 	unsigned int rxq_size;
@@ -370,6 +376,7 @@ struct cxgb4_uld_info {
 			      struct t4_lro_mgr *lro_mgr,
 			      struct napi_struct *napi);
 	void (*lro_flush)(struct t4_lro_mgr *);
+	int (*tx_handler)(struct sk_buff *skb, struct net_device *dev);
 };
 
 int cxgb4_register_uld(enum cxgb4_uld type, const struct cxgb4_uld_info *p);

@@ -18,7 +18,6 @@
  */
 
 #include <linux/suspend.h>
-#include <linux/nospec.h>
 
 #include "main.h"
 #include "wmm.h"
@@ -1265,12 +1264,8 @@ static u16
 mwifiex_netdev_select_wmm_queue(struct net_device *dev, struct sk_buff *skb,
 				void *accel_priv, select_queue_fallback_t fallback)
 {
-	u32 priority;
-
 	skb->priority = cfg80211_classify8021d(skb, NULL);
-	priority = array_index_nospec(skb->priority,
-				      ARRAY_SIZE(mwifiex_1d_to_wmm_queue));
-	return mwifiex_1d_to_wmm_queue[priority];
+	return mwifiex_1d_to_wmm_queue[skb->priority];
 }
 
 /* Network device handlers */

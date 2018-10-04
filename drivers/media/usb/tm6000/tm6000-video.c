@@ -33,7 +33,6 @@
 #include <linux/random.h>
 #include <linux/usb.h>
 #include <linux/videodev2.h>
-#include <linux/nospec.h>
 #include <media/v4l2-ioctl.h>
 #include <media/v4l2-event.h>
 #include <media/tuner.h>
@@ -897,14 +896,11 @@ static int vidioc_querycap(struct file *file, void  *priv,
 static int vidioc_enum_fmt_vid_cap(struct file *file, void  *priv,
 					struct v4l2_fmtdesc *f)
 {
-	u32 index;
-
 	if (f->index >= ARRAY_SIZE(format))
 		return -EINVAL;
-	index = array_index_nospec(f->index, ARRAY_SIZE(format));
 
-	strlcpy(f->description, format[index].name, sizeof(f->description));
-	f->pixelformat = format[index].fourcc;
+	strlcpy(f->description, format[f->index].name, sizeof(f->description));
+	f->pixelformat = format[f->index].fourcc;
 	return 0;
 }
 
@@ -1097,7 +1093,6 @@ static int vidioc_enum_input(struct file *file, void *priv,
 	n = i->index;
 	if (n >= 3)
 		return -EINVAL;
-	n = array_index_nospec(n, 3);
 
 	if (!dev->vinput[n].type)
 		return -EINVAL;
@@ -1134,8 +1129,6 @@ static int vidioc_s_input(struct file *file, void *priv, unsigned int i)
 
 	if (i >= 3)
 		return -EINVAL;
-	i = array_index_nospec(i, 3);
-
 	if (!dev->vinput[i].type)
 		return -EINVAL;
 

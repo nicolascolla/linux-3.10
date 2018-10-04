@@ -21,6 +21,7 @@
 #include "cxgb4.h"
 #include "t4_regs.h"
 #include "t4fw_api.h"
+#include "cxgb4_cudbg.h"
 
 #define EEPROM_MAGIC 0x38E2F10C
 
@@ -176,6 +177,10 @@ static char loopback_stats_strings[][ETH_GSTRING_LEN] = {
 	"bg3_frames_trunc       ",
 };
 
+static const char cxgb4_priv_flags_strings[][ETH_GSTRING_LEN] = {
+	[PRIV_FLAG_PORT_TX_VM_BIT] = "port_tx_vm_wr",
+};
+
 static int get_sset_count(struct net_device *dev, int sset)
 {
 	switch (sset) {
@@ -184,6 +189,8 @@ static int get_sset_count(struct net_device *dev, int sset)
 		       ARRAY_SIZE(adapter_stats_strings) +
 		       ARRAY_SIZE(channel_stats_strings) +
 		       ARRAY_SIZE(loopback_stats_strings);
+	case ETH_SS_PRIV_FLAGS:
+		return ARRAY_SIZE(cxgb4_priv_flags_strings);
 	default:
 		return -EOPNOTSUPP;
 	}
@@ -234,6 +241,7 @@ static void get_drvinfo(struct net_device *dev, struct ethtool_drvinfo *info)
 			 FW_HDR_FW_VER_MINOR_G(exprom_vers),
 			 FW_HDR_FW_VER_MICRO_G(exprom_vers),
 			 FW_HDR_FW_VER_BUILD_G(exprom_vers));
+	info->n_priv_flags = ARRAY_SIZE(cxgb4_priv_flags_strings);
 }
 
 static void get_strings(struct net_device *dev, u32 stringset, u8 *data)
@@ -249,6 +257,9 @@ static void get_strings(struct net_device *dev, u32 stringset, u8 *data)
 		data += sizeof(channel_stats_strings);
 		memcpy(data, loopback_stats_strings,
 		       sizeof(loopback_stats_strings));
+	} else if (stringset == ETH_SS_PRIV_FLAGS) {
+		memcpy(data, cxgb4_priv_flags_strings,
+		       sizeof(cxgb4_priv_flags_strings));
 	}
 }
 
@@ -335,10 +346,10 @@ static void collect_adapter_stats(struct adapter *adap, struct adapter_stats *s)
 	memset(s, 0, sizeof(*s));
 
 	spin_lock(&adap->stats_lock);
-	t4_tp_get_tcp_stats(adap, &v4, &v6);
-	t4_tp_get_rdma_stats(adap, &rdma_stats);
-	t4_get_usm_stats(adap, &usm_stats);
-	t4_tp_get_err_stats(adap, &err_stats);
+	t4_tp_get_tcp_stats(adap, &v4, &v6, false);
+	t4_tp_get_rdma_stats(adap, &rdma_stats, false);
+	t4_get_usm_stats(adap, &usm_stats, false);
+	t4_tp_get_err_stats(adap, &err_stats, false);
 	spin_unlock(&adap->stats_lock);
 
 	s->db_drop = adap->db_stats.db_drop;
@@ -388,9 +399,9 @@ static void collect_channel_stats(struct adapter *adap, struct channel_stats *s,
 	memset(s, 0, sizeof(*s));
 
 	spin_lock(&adap->stats_lock);
-	t4_tp_get_cpl_stats(adap, &cpl_stats);
-	t4_tp_get_err_stats(adap, &err_stats);
-	t4_get_fcoe_stats(adap, i, &fcoe_stats);
+	t4_tp_get_cpl_stats(adap, &cpl_stats, false);
+	t4_tp_get_err_stats(adap, &err_stats, false);
+	t4_get_fcoe_stats(adap, i, &fcoe_stats, false);
 	spin_unlock(&adap->stats_lock);
 
 	s->cpl_req = cpl_stats.req[i];
@@ -516,7 +527,8 @@ static int from_fw_port_mod_type(enum fw_port_type port_type,
 		else
 			return PORT_OTHER;
 	} else if (port_type == FW_PORT_TYPE_KR4_100G ||
-		   port_type == FW_PORT_TYPE_KR_SFP28) {
+		   port_type == FW_PORT_TYPE_KR_SFP28 ||
+		   port_type == FW_PORT_TYPE_KR_XLAUI) {
 		return PORT_NONE;
 	}
 
@@ -595,22 +607,22 @@ static void fw_caps_to_lmm(enum fw_port_type port_type,
 
 	case FW_PORT_TYPE_KR:
 		SET_LMM(Backplane);
-		SET_LMM(10000baseKR_Full);
+		FW_CAPS_TO_LMM(SPEED_10G, 10000baseKR_Full);
 		break;
 
 	case FW_PORT_TYPE_BP_AP:
 		SET_LMM(Backplane);
-		SET_LMM(10000baseR_FEC);
-		SET_LMM(10000baseKR_Full);
-		SET_LMM(1000baseKX_Full);
+		FW_CAPS_TO_LMM(SPEED_1G, 1000baseKX_Full);
+		FW_CAPS_TO_LMM(SPEED_10G, 10000baseR_FEC);
+		FW_CAPS_TO_LMM(SPEED_10G, 10000baseKR_Full);
 		break;
 
 	case FW_PORT_TYPE_BP4_AP:
 		SET_LMM(Backplane);
-		SET_LMM(10000baseR_FEC);
-		SET_LMM(10000baseKR_Full);
-		SET_LMM(1000baseKX_Full);
-		SET_LMM(10000baseKX4_Full);
+		FW_CAPS_TO_LMM(SPEED_1G, 1000baseKX_Full);
+		FW_CAPS_TO_LMM(SPEED_10G, 10000baseR_FEC);
+		FW_CAPS_TO_LMM(SPEED_10G, 10000baseKR_Full);
+		FW_CAPS_TO_LMM(SPEED_10G, 10000baseKX4_Full);
 		break;
 
 	case FW_PORT_TYPE_FIBER_XFI:
@@ -626,7 +638,9 @@ static void fw_caps_to_lmm(enum fw_port_type port_type,
 	case FW_PORT_TYPE_BP40_BA:
 	case FW_PORT_TYPE_QSFP:
 		SET_LMM(FIBRE);
-		SET_LMM(40000baseSR4_Full);
+		FW_CAPS_TO_LMM(SPEED_1G, 1000baseT_Full);
+		FW_CAPS_TO_LMM(SPEED_10G, 10000baseT_Full);
+		FW_CAPS_TO_LMM(SPEED_40G, 40000baseSR4_Full);
 		break;
 
 	case FW_PORT_TYPE_CR_QSFP:
@@ -644,14 +658,23 @@ static void fw_caps_to_lmm(enum fw_port_type port_type,
 		FW_CAPS_TO_LMM(SPEED_25G, 25000baseKR_Full);
 		break;
 
+	case FW_PORT_TYPE_KR_XLAUI:
+		SET_LMM(Backplane);
+		FW_CAPS_TO_LMM(SPEED_1G, 1000baseKX_Full);
+		FW_CAPS_TO_LMM(SPEED_10G, 10000baseKR_Full);
+		FW_CAPS_TO_LMM(SPEED_40G, 40000baseKR4_Full);
+		break;
+
 	case FW_PORT_TYPE_CR2_QSFP:
 		SET_LMM(FIBRE);
-		SET_LMM(50000baseSR2_Full);
+		FW_CAPS_TO_LMM(SPEED_50G, 50000baseSR2_Full);
 		break;
 
 	case FW_PORT_TYPE_KR4_100G:
 	case FW_PORT_TYPE_CR4_QSFP:
 		SET_LMM(FIBRE);
+		FW_CAPS_TO_LMM(SPEED_1G,  1000baseT_Full);
+		FW_CAPS_TO_LMM(SPEED_10G, 10000baseSR_Full);
 		FW_CAPS_TO_LMM(SPEED_40G, 40000baseSR4_Full);
 		FW_CAPS_TO_LMM(SPEED_25G, 25000baseCR_Full);
 		FW_CAPS_TO_LMM(SPEED_50G, 50000baseCR2_Full);
@@ -738,13 +761,10 @@ static int get_link_ksettings(struct net_device *dev,
 	fw_caps_to_lmm(pi->port_type, pi->link_cfg.lpacaps,
 		       link_ksettings->link_modes.lp_advertising);
 
-	if (netif_carrier_ok(dev)) {
-		base->speed = pi->link_cfg.speed;
-		base->duplex = DUPLEX_FULL;
-	} else {
-		base->speed = SPEED_UNKNOWN;
-		base->duplex = DUPLEX_UNKNOWN;
-	}
+	base->speed = (netif_carrier_ok(dev)
+		       ? pi->link_cfg.speed
+		       : SPEED_UNKNOWN);
+	base->duplex = DUPLEX_FULL;
 
 	if (pi->link_cfg.fc & PAUSE_RX) {
 		if (pi->link_cfg.fc & PAUSE_TX) {
@@ -787,24 +807,20 @@ static int set_link_ksettings(struct net_device *dev,
 	if (base->duplex != DUPLEX_FULL)
 		return -EINVAL;
 
-	if (!(lc->pcaps & FW_PORT_CAP32_ANEG)) {
-		/* PHY offers a single speed.  See if that's what's
-		 * being requested.
-		 */
-		if (base->autoneg == AUTONEG_DISABLE &&
-		    (lc->pcaps & speed_to_fw_caps(base->speed)))
-			return 0;
-		return -EINVAL;
-	}
-
 	old_lc = *lc;
-	if (base->autoneg == AUTONEG_DISABLE) {
+	if (!(lc->pcaps & FW_PORT_CAP32_ANEG) ||
+	    base->autoneg == AUTONEG_DISABLE) {
 		fw_caps = speed_to_fw_caps(base->speed);
 
-		if (!(lc->pcaps & fw_caps))
+		/* Must only specify a single speed which must be supported
+		 * as part of the Physical Port Capabilities.
+		 */
+		if ((fw_caps & (fw_caps - 1)) != 0 ||
+		    !(lc->pcaps & fw_caps))
 			return -EINVAL;
+
 		lc->speed_caps = fw_caps;
-		lc->acaps = 0;
+		lc->acaps = fw_caps;
 	} else {
 		fw_caps =
 			 lmm_to_fw_caps(link_ksettings->link_modes.advertising);
@@ -1063,40 +1079,11 @@ static int get_coalesce(struct net_device *dev, struct ethtool_coalesce *c)
 	return 0;
 }
 
-/**
- *	eeprom_ptov - translate a physical EEPROM address to virtual
- *	@phys_addr: the physical EEPROM address
- *	@fn: the PCI function number
- *	@sz: size of function-specific area
- *
- *	Translate a physical EEPROM address to virtual.  The first 1K is
- *	accessed through virtual addresses starting at 31K, the rest is
- *	accessed through virtual addresses starting at 0.
- *
- *	The mapping is as follows:
- *	[0..1K) -> [31K..32K)
- *	[1K..1K+A) -> [31K-A..31K)
- *	[1K+A..ES) -> [0..ES-A-1K)
- *
- *	where A = @fn * @sz, and ES = EEPROM size.
- */
-static int eeprom_ptov(unsigned int phys_addr, unsigned int fn, unsigned int sz)
-{
-	fn *= sz;
-	if (phys_addr < 1024)
-		return phys_addr + (31 << 10);
-	if (phys_addr < 1024 + fn)
-		return 31744 - fn + phys_addr - 1024;
-	if (phys_addr < EEPROMSIZE)
-		return phys_addr - 1024 - fn;
-	return -EINVAL;
-}
-
 /* The next two routines implement eeprom read/write from physical addresses.
  */
 static int eeprom_rd_phys(struct adapter *adap, unsigned int phys_addr, u32 *v)
 {
-	int vaddr = eeprom_ptov(phys_addr, adap->pf, EEPROMPFSIZE);
+	int vaddr = t4_eeprom_ptov(phys_addr, adap->pf, EEPROMPFSIZE);
 
 	if (vaddr >= 0)
 		vaddr = pci_read_vpd(adap->pdev, vaddr, sizeof(u32), v);
@@ -1105,7 +1092,7 @@ static int eeprom_rd_phys(struct adapter *adap, unsigned int phys_addr, u32 *v)
 
 static int eeprom_wr_phys(struct adapter *adap, unsigned int phys_addr, u32 v)
 {
-	int vaddr = eeprom_ptov(phys_addr, adap->pf, EEPROMPFSIZE);
+	int vaddr = t4_eeprom_ptov(phys_addr, adap->pf, EEPROMPFSIZE);
 
 	if (vaddr >= 0)
 		vaddr = pci_write_vpd(adap->pdev, vaddr, sizeof(u32), &v);
@@ -1163,12 +1150,10 @@ static int set_eeprom(struct net_device *dev, struct ethtool_eeprom *eeprom,
 		if (!buf)
 			return -ENOMEM;
 		err = eeprom_rd_phys(adapter, aligned_offset, (u32 *)buf);
-		if (!err && aligned_len > 4) {
-			barrier_nospec();
+		if (!err && aligned_len > 4)
 			err = eeprom_rd_phys(adapter,
 					     aligned_offset + aligned_len - 4,
 					     (u32 *)&buf[aligned_len - 4]);
-		}
 		if (err)
 			goto out;
 		memcpy(buf + (eeprom->offset & 3), data, eeprom->len);
@@ -1376,6 +1361,181 @@ static int get_rxnfc(struct net_device *dev, struct ethtool_rxnfc *info,
 	return -EOPNOTSUPP;
 }
 
+static int set_dump(struct net_device *dev, struct ethtool_dump *eth_dump)
+{
+	struct adapter *adapter = netdev2adap(dev);
+	u32 len = 0;
+
+	len = sizeof(struct cudbg_hdr) +
+	      sizeof(struct cudbg_entity_hdr) * CUDBG_MAX_ENTITY;
+	len += cxgb4_get_dump_length(adapter, eth_dump->flag);
+
+	adapter->eth_dump.flag = eth_dump->flag;
+	adapter->eth_dump.len = len;
+	return 0;
+}
+
+static int get_dump_flag(struct net_device *dev, struct ethtool_dump *eth_dump)
+{
+	struct adapter *adapter = netdev2adap(dev);
+
+	eth_dump->flag = adapter->eth_dump.flag;
+	eth_dump->len = adapter->eth_dump.len;
+	eth_dump->version = adapter->eth_dump.version;
+	return 0;
+}
+
+static int get_dump_data(struct net_device *dev, struct ethtool_dump *eth_dump,
+			 void *buf)
+{
+	struct adapter *adapter = netdev2adap(dev);
+	u32 len = 0;
+	int ret = 0;
+
+	if (adapter->eth_dump.flag == CXGB4_ETH_DUMP_NONE)
+		return -ENOENT;
+
+	len = sizeof(struct cudbg_hdr) +
+	      sizeof(struct cudbg_entity_hdr) * CUDBG_MAX_ENTITY;
+	len += cxgb4_get_dump_length(adapter, adapter->eth_dump.flag);
+	if (eth_dump->len < len)
+		return -ENOMEM;
+
+	ret = cxgb4_cudbg_collect(adapter, buf, &len, adapter->eth_dump.flag);
+	if (ret)
+		return ret;
+
+	eth_dump->flag = adapter->eth_dump.flag;
+	eth_dump->len = len;
+	eth_dump->version = adapter->eth_dump.version;
+	return 0;
+}
+
+static int cxgb4_get_module_info(struct net_device *dev,
+				 struct ethtool_modinfo *modinfo)
+{
+	struct port_info *pi = netdev_priv(dev);
+	u8 sff8472_comp, sff_diag_type, sff_rev;
+	struct adapter *adapter = pi->adapter;
+	int ret;
+
+	if (!t4_is_inserted_mod_type(pi->mod_type))
+		return -EINVAL;
+
+	switch (pi->port_type) {
+	case FW_PORT_TYPE_SFP:
+	case FW_PORT_TYPE_QSA:
+	case FW_PORT_TYPE_SFP28:
+		ret = t4_i2c_rd(adapter, adapter->mbox, pi->tx_chan,
+				I2C_DEV_ADDR_A0, SFF_8472_COMP_ADDR,
+				SFF_8472_COMP_LEN, &sff8472_comp);
+		if (ret)
+			return ret;
+		ret = t4_i2c_rd(adapter, adapter->mbox, pi->tx_chan,
+				I2C_DEV_ADDR_A0, SFP_DIAG_TYPE_ADDR,
+				SFP_DIAG_TYPE_LEN, &sff_diag_type);
+		if (ret)
+			return ret;
+
+		if (!sff8472_comp || (sff_diag_type & 4)) {
+			modinfo->type = ETH_MODULE_SFF_8079;
+			modinfo->eeprom_len = ETH_MODULE_SFF_8079_LEN;
+		} else {
+			modinfo->type = ETH_MODULE_SFF_8472;
+			modinfo->eeprom_len = ETH_MODULE_SFF_8472_LEN;
+		}
+		break;
+
+	case FW_PORT_TYPE_QSFP:
+	case FW_PORT_TYPE_QSFP_10G:
+	case FW_PORT_TYPE_CR_QSFP:
+	case FW_PORT_TYPE_CR2_QSFP:
+	case FW_PORT_TYPE_CR4_QSFP:
+		ret = t4_i2c_rd(adapter, adapter->mbox, pi->tx_chan,
+				I2C_DEV_ADDR_A0, SFF_REV_ADDR,
+				SFF_REV_LEN, &sff_rev);
+		/* For QSFP type ports, revision value >= 3
+		 * means the SFP is 8636 compliant.
+		 */
+		if (ret)
+			return ret;
+		if (sff_rev >= 0x3) {
+			modinfo->type = ETH_MODULE_SFF_8636;
+			modinfo->eeprom_len = ETH_MODULE_SFF_8636_LEN;
+		} else {
+			modinfo->type = ETH_MODULE_SFF_8436;
+			modinfo->eeprom_len = ETH_MODULE_SFF_8436_LEN;
+		}
+		break;
+
+	default:
+		return -EINVAL;
+	}
+
+	return 0;
+}
+
+static int cxgb4_get_module_eeprom(struct net_device *dev,
+				   struct ethtool_eeprom *eprom, u8 *data)
+{
+	int ret = 0, offset = eprom->offset, len = eprom->len;
+	struct port_info *pi = netdev_priv(dev);
+	struct adapter *adapter = pi->adapter;
+
+	memset(data, 0, eprom->len);
+	if (offset + len <= I2C_PAGE_SIZE)
+		return t4_i2c_rd(adapter, adapter->mbox, pi->tx_chan,
+				 I2C_DEV_ADDR_A0, offset, len, data);
+
+	/* offset + len spans 0xa0 and 0xa1 pages */
+	if (offset <= I2C_PAGE_SIZE) {
+		/* read 0xa0 page */
+		len = I2C_PAGE_SIZE - offset;
+		ret =  t4_i2c_rd(adapter, adapter->mbox, pi->tx_chan,
+				 I2C_DEV_ADDR_A0, offset, len, data);
+		if (ret)
+			return ret;
+		offset = I2C_PAGE_SIZE;
+		/* Remaining bytes to be read from second page =
+		 * Total length - bytes read from first page
+		 */
+		len = eprom->len - len;
+	}
+	/* Read additional optical diagnostics from page 0xa2 if supported */
+	return t4_i2c_rd(adapter, adapter->mbox, pi->tx_chan, I2C_DEV_ADDR_A2,
+			 offset, len, &data[eprom->len - len]);
+}
+
+static u32 cxgb4_get_priv_flags(struct net_device *netdev)
+{
+	struct port_info *pi = netdev_priv(netdev);
+	struct adapter *adapter = pi->adapter;
+
+	return (adapter->eth_flags | pi->eth_flags);
+}
+
+/**
+ *	set_flags - set/unset specified flags if passed in new_flags
+ *	@cur_flags: pointer to current flags
+ *	@new_flags: new incoming flags
+ *	@flags: set of flags to set/unset
+ */
+static inline void set_flags(u32 *cur_flags, u32 new_flags, u32 flags)
+{
+	*cur_flags = (*cur_flags & ~flags) | (new_flags & flags);
+}
+
+static int cxgb4_set_priv_flags(struct net_device *netdev, u32 flags)
+{
+	struct port_info *pi = netdev_priv(netdev);
+	struct adapter *adapter = pi->adapter;
+
+	set_flags(&adapter->eth_flags, flags, PRIV_FLAGS_ADAP);
+	set_flags(&pi->eth_flags, flags, PRIV_FLAGS_PORT);
+
+	return 0;
+}
+
 static const struct ethtool_ops cxgb_ethtool_ops = {
 	.get_link_ksettings = get_link_ksettings,
 	.set_link_ksettings = set_link_ksettings,
@@ -1406,7 +1566,14 @@ static const struct ethtool_ops cxgb_ethtool_ops = {
 	.get_rxfh	   = get_rss_table,
 	.set_rxfh	   = set_rss_table,
 	.flash_device      = set_flash,
-	.get_ts_info       = get_ts_info
+	.get_ts_info       = get_ts_info,
+	.set_dump          = set_dump,
+	.get_dump_flag     = get_dump_flag,
+	.get_dump_data     = get_dump_data,
+	.get_module_info   = cxgb4_get_module_info,
+	.get_module_eeprom = cxgb4_get_module_eeprom,
+	.get_priv_flags    = cxgb4_get_priv_flags,
+	.set_priv_flags    = cxgb4_set_priv_flags,
 };
 
 void cxgb4_set_ethtool_ops(struct net_device *netdev)

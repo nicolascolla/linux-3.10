@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0+
 /*
  * usblp.c
  *
@@ -31,22 +32,6 @@
  *      none  - Maintained in Linux kernel after v0.13
  */
 
-/*
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License as published by
- * the Free Software Foundation; either version 2 of the License, or
- * (at your option) any later version.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License
- * along with this program; if not, write to the Free Software
- * Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA 02111-1307 USA
- */
-
 #include <linux/module.h>
 #include <linux/kernel.h>
 #include <linux/sched.h>
@@ -55,7 +40,6 @@
 #include <linux/slab.h>
 #include <linux/lp.h>
 #include <linux/mutex.h>
-#include <linux/nospec.h>
 #undef DEBUG
 #include <linux/usb.h>
 #include <linux/usb/ch9.h>
@@ -295,7 +279,7 @@ static int usblp_ctrl_msg(struct usblp *usblp, int request, int type, int dir, i
 
 /*
  * See the description for usblp_select_alts() below for the usage
- * explanation.  Look into your /proc/bus/usb/devices and dmesg in
+ * explanation.  Look into your /sys/kernel/debug/usb/devices and dmesg in
  * case of any trouble.
  */
 static int proto_bias = -1;
@@ -1082,7 +1066,7 @@ static struct usb_class_driver usblp_class = {
 	.minor_base =	USBLP_MINOR_BASE,
 };
 
-static ssize_t usblp_show_ieee1284_id(struct device *dev, struct device_attribute *attr, char *buf)
+static ssize_t ieee1284_id_show(struct device *dev, struct device_attribute *attr, char *buf)
 {
 	struct usb_interface *intf = to_usb_interface(dev);
 	struct usblp *usblp = usb_get_intfdata(intf);
@@ -1094,7 +1078,7 @@ static ssize_t usblp_show_ieee1284_id(struct device *dev, struct device_attribut
 	return sprintf(buf, "%s", usblp->device_id_string+2);
 }
 
-static DEVICE_ATTR(ieee1284_id, S_IRUGO, usblp_show_ieee1284_id, NULL);
+static DEVICE_ATTR_RO(ieee1284_id);
 
 static int usblp_probe(struct usb_interface *intf,
 		       const struct usb_device_id *id)
@@ -1240,8 +1224,9 @@ static int usblp_select_alts(struct usblp *usblp)
 {
 	struct usb_interface *if_alt;
 	struct usb_host_interface *ifd;
-	struct usb_endpoint_descriptor *epd, *epwrite, *epread;
-	int p, i, e;
+	struct usb_endpoint_descriptor *epwrite, *epread;
+	int p, i;
+	int res;
 
 	if_alt = usblp->intf;
 
@@ -1261,31 +1246,21 @@ static int usblp_select_alts(struct usblp *usblp)
 		    ifd->desc.bInterfaceProtocol > USBLP_LAST_PROTOCOL)
 			continue;
 
-		/* Look for bulk OUT and IN endpoints. */
-		epwrite = epread = NULL;
-		for (e = 0; e < ifd->desc.bNumEndpoints; e++) {
-			epd = &ifd->endpoint[e].desc;
-
-			if (usb_endpoint_is_bulk_out(epd))
-				if (!epwrite)
-					epwrite = epd;
-
-			if (usb_endpoint_is_bulk_in(epd))
-				if (!epread)
-					epread = epd;
+		/* Look for the expected bulk endpoints. */
+		if (ifd->desc.bInterfaceProtocol > 1) {
+			res = usb_find_common_endpoints(ifd,
+					&epread, &epwrite, NULL, NULL);
+		} else {
+			epread = NULL;
+			res = usb_find_bulk_out_endpoint(ifd, &epwrite);
 		}
 
 		/* Ignore buggy hardware without the right endpoints. */
-		if (!epwrite || (ifd->desc.bInterfaceProtocol > 1 && !epread))
+		if (res)
 			continue;
 
-		/*
-		 * Turn off reads for USB_CLASS_PRINTER/1/1 (unidirectional)
-		 * interfaces and buggy bidirectional printers.
-		 */
-		if (ifd->desc.bInterfaceProtocol == 1) {
-			epread = NULL;
-		} else if (usblp->quirks & USBLP_QUIRK_BIDIR) {
+		/* Turn off reads for buggy bidirectional printers. */
+		if (usblp->quirks & USBLP_QUIRK_BIDIR) {
 			printk(KERN_INFO "usblp%d: Disabling reads from "
 			    "problematic bidirectional printer\n",
 			    usblp->minor);
@@ -1322,7 +1297,6 @@ static int usblp_set_protocol(struct usblp *usblp, int protocol)
 
 	if (protocol < USBLP_FIRST_PROTOCOL || protocol > USBLP_LAST_PROTOCOL)
 		return -EINVAL;
-	protocol = array_index_nospec(protocol, USBLP_LAST_PROTOCOL + 1);
 
 	alts = usblp->protocol[protocol].alt_setting;
 	if (alts < 0)

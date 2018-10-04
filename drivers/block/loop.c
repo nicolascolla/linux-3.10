@@ -76,7 +76,6 @@
 #include <linux/sysfs.h>
 #include <linux/miscdevice.h>
 #include <linux/falloc.h>
-#include <linux/nospec.h>
 
 #include <asm/uaccess.h>
 
@@ -1112,8 +1111,6 @@ loop_set_status(struct loop_device *lo, const struct loop_info64 *info)
 
 		if (type >= MAX_LO_CRYPT)
 			return -EINVAL;
-		type = array_index_nospec(type, MAX_LO_CRYPT);
-
 		xfer = xfer_funcs[type];
 		if (xfer == NULL)
 			return -EINVAL;
@@ -1536,9 +1533,8 @@ out:
 	return err;
 }
 
-static void lo_release(struct gendisk *disk, fmode_t mode)
+static void __lo_release(struct loop_device *lo)
 {
-	struct loop_device *lo = disk->private_data;
 	int err;
 
 	if (atomic_dec_return(&lo->lo_refcnt))
@@ -1562,6 +1558,13 @@ static void lo_release(struct gendisk *disk, fmode_t mode)
 	}
 
 	mutex_unlock(&lo->lo_ctl_mutex);
+}
+
+static void lo_release(struct gendisk *disk, fmode_t mode)
+{
+	mutex_lock(&loop_index_mutex);
+	__lo_release(disk->private_data);
+	mutex_unlock(&loop_index_mutex);
 }
 
 static const struct block_device_operations lo_fops = {

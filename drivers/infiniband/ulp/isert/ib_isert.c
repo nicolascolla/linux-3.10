@@ -789,10 +789,11 @@ isert_cma_handler(struct rdma_cm_id *cma_id, struct rdma_cm_event *event)
 		 * the rdma cm id
 		 */
 		return 1;
-	case RDMA_CM_EVENT_REJECTED:       /* FALLTHRU */
+	case RDMA_CM_EVENT_REJECTED:
 		isert_info("Connection rejected: %s\n",
 			   rdma_reject_msg(cma_id, event->status));
-	case RDMA_CM_EVENT_UNREACHABLE:    /* FALLTHRU */
+		/* fall through */
+	case RDMA_CM_EVENT_UNREACHABLE:
 	case RDMA_CM_EVENT_CONNECT_ERROR:
 		ret = isert_connect_error(cma_id);
 		break;
@@ -885,15 +886,9 @@ isert_login_post_send(struct isert_conn *isert_conn, struct iser_tx_desc *tx_des
 }
 
 static void
-isert_create_send_desc(struct isert_conn *isert_conn,
-		       struct isert_cmd *isert_cmd,
-		       struct iser_tx_desc *tx_desc)
+__isert_create_send_desc(struct isert_device *device,
+			 struct iser_tx_desc *tx_desc)
 {
-	struct isert_device *device = isert_conn->device;
-	struct ib_device *ib_dev = device->ib_device;
-
-	ib_dma_sync_single_for_cpu(ib_dev, tx_desc->dma_addr,
-				   ISER_HEADERS_LEN, DMA_TO_DEVICE);
 
 	memset(&tx_desc->iser_header, 0, sizeof(struct iser_ctrl));
 	tx_desc->iser_header.flags = ISCSI_CTRL;
@@ -904,6 +899,20 @@ isert_create_send_desc(struct isert_conn *isert_conn,
 		tx_desc->tx_sg[0].lkey = device->pd->local_dma_lkey;
 		isert_dbg("tx_desc %p lkey mismatch, fixing\n", tx_desc);
 	}
+}
+
+static void
+isert_create_send_desc(struct isert_conn *isert_conn,
+		       struct isert_cmd *isert_cmd,
+		       struct iser_tx_desc *tx_desc)
+{
+	struct isert_device *device = isert_conn->device;
+	struct ib_device *ib_dev = device->ib_device;
+
+	ib_dma_sync_single_for_cpu(ib_dev, tx_desc->dma_addr,
+				   ISER_HEADERS_LEN, DMA_TO_DEVICE);
+
+	__isert_create_send_desc(device, tx_desc);
 }
 
 static int
@@ -993,7 +1002,7 @@ isert_put_login_tx(struct iscsi_conn *conn, struct iscsi_login *login,
 	struct iser_tx_desc *tx_desc = &isert_conn->login_tx_desc;
 	int ret;
 
-	isert_create_send_desc(isert_conn, NULL, tx_desc);
+	__isert_create_send_desc(device, tx_desc);
 
 	memcpy(&tx_desc->iscsi_header, &login->rsp[0],
 	       sizeof(struct iscsi_hdr));
@@ -1570,9 +1579,7 @@ isert_put_cmd(struct isert_cmd *isert_cmd, bool comp_err)
 			transport_generic_free_cmd(&cmd->se_cmd, 0);
 			break;
 		}
-		/*
-		 * Fall-through
-		 */
+		/* fall through */
 	default:
 		iscsit_release_cmd(cmd);
 		break;
@@ -1750,8 +1757,9 @@ isert_do_control_comp(struct work_struct *work)
 	switch (cmd->i_state) {
 	case ISTATE_SEND_TASKMGTRSP:
 		iscsit_tmr_post_handler(cmd, cmd->conn);
-	case ISTATE_SEND_REJECT:   /* FALLTHRU */
-	case ISTATE_SEND_TEXTRSP:  /* FALLTHRU */
+		/* fall through */
+	case ISTATE_SEND_REJECT:
+	case ISTATE_SEND_TEXTRSP:
 		cmd->i_state = ISTATE_SENT_STATUS;
 		isert_completion_put(&isert_cmd->tx_desc, isert_cmd,
 				     ib_dev, false);

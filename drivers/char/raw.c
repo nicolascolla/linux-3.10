@@ -22,7 +22,6 @@
 #include <linux/gfp.h>
 #include <linux/compat.h>
 #include <linux/vmalloc.h>
-#include <linux/nospec.h>
 
 #include <asm/uaccess.h>
 
@@ -53,7 +52,7 @@ MODULE_PARM_DESC(max_raw_minors, "Maximum number of raw devices (1-65536)");
  */
 static int raw_open(struct inode *inode, struct file *filp)
 {
-	const int minor = array_index_nospec(iminor(inode), max_raw_minors);
+	const int minor = iminor(inode);
 	struct block_device *bdev;
 	int err;
 
@@ -134,7 +133,6 @@ static int bind_set(int number, u64 major, u64 minor)
 
 	if (number <= 0 || number >= max_raw_minors)
 		return -EINVAL;
-	number = array_index_nospec(number, max_raw_minors);
 
 	if (MAJOR(dev) != major || MINOR(dev) != minor)
 		return -EINVAL;
@@ -192,9 +190,8 @@ static int bind_get(int number, dev_t *dev)
 	struct raw_device_data *rawdev;
 	struct block_device *bdev;
 
-	if (number <= 0 || number >= max_raw_minors)
+	if (number <= 0 || number >= MAX_RAW_MINORS)
 		return -EINVAL;
-	number = array_index_nospec(number, max_raw_minors);
 
 	rawdev = &raw_devices[number];
 

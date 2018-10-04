@@ -18,7 +18,6 @@
 #include <linux/etherdevice.h>
 #include <linux/module.h>
 #include <linux/inetdevice.h>
-#include <linux/nospec.h>
 #include <net/cfg80211.h>
 #include <net/rtnetlink.h>
 #include <net/addrconf.h>
@@ -63,7 +62,6 @@ struct brcmf_if *brcmf_get_ifp(struct brcmf_pub *drvr, int ifidx)
 		brcmf_err("ifidx %d out of range\n", ifidx);
 		return NULL;
 	}
-	ifidx = array_index_nospec(ifidx, BRCMF_MAX_IFS);
 
 	ifp = NULL;
 	bsscfgidx = drvr->if2bss[ifidx];

@@ -22,7 +22,6 @@
 #include <linux/spinlock.h>
 #include <linux/rcupdate.h>
 #include <linux/workqueue.h>
-#include <linux/nospec.h>
 
 int sysctl_nr_open __read_mostly = 1024*1024;
 int sysctl_nr_open_min = BITS_PER_LONG;
@@ -669,8 +668,6 @@ int __close_fd(struct files_struct *files, unsigned fd)
 	fdt = files_fdtable(files);
 	if (fd >= fdt->max_fds)
 		goto out_unlock;
-	fd = array_index_nospec(fd, fdt->max_fds);
-
 	file = fdt->fd[fd];
 	if (!file)
 		goto out_unlock;

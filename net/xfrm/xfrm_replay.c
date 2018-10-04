@@ -19,7 +19,6 @@
  */
 
 #include <linux/export.h>
-#include <linux/nospec.h>
 #include <net/xfrm.h>
 
 u32 xfrm_replay_seqhi(struct xfrm_state *x, __be32 net_seq)
@@ -224,8 +223,7 @@ static int xfrm_replay_check_bmp(struct xfrm_state *x,
 	else
 		bitnr = replay_esn->replay_window - (diff - pos);
 
-	nr = array_index_nospec(bitnr >> 5,
-				xfrm_replay_state_esn_len(replay_esn));
+	nr = bitnr >> 5;
 	bitnr = bitnr & 0x1F;
 	if (replay_esn->bmp[nr] & (1U << bitnr))
 		goto err_replay;
@@ -279,8 +277,7 @@ static void xfrm_replay_advance_bmp(struct xfrm_state *x, __be32 net_seq)
 			bitnr = replay_esn->replay_window - (diff - pos);
 	}
 
-	nr = array_index_nospec(bitnr >> 5,
-				xfrm_replay_state_esn_len(replay_esn));
+	nr = bitnr >> 5;
 	bitnr = bitnr & 0x1F;
 	replay_esn->bmp[nr] |= (1U << bitnr);
 
@@ -479,8 +476,7 @@ static int xfrm_replay_check_esn(struct xfrm_state *x,
 	else
 		bitnr = replay_esn->replay_window - (diff - pos);
 
-	nr = array_index_nospec(bitnr >> 5,
-				xfrm_replay_state_esn_len(replay_esn));
+	nr = bitnr >> 5;
 	bitnr = bitnr & 0x1F;
 	if (replay_esn->bmp[nr] & (1U << bitnr))
 		goto err_replay;
@@ -554,8 +550,7 @@ static void xfrm_replay_advance_esn(struct xfrm_state *x, __be32 net_seq)
 			bitnr = replay_esn->replay_window - (diff - pos);
 	}
 
-	nr = array_index_nospec(bitnr >> 5,
-				xfrm_replay_state_esn_len(replay_esn));
+	nr = bitnr >> 5;
 	bitnr = bitnr & 0x1F;
 	replay_esn->bmp[nr] |= (1U << bitnr);
 

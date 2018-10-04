@@ -5,6 +5,7 @@
 #include <sys/mman.h>
 #include <sys/stat.h>
 #include <dirent.h>
+#include <fcntl.h>
 #include <inttypes.h>
 #include <signal.h>
 #include <stdio.h>
@@ -21,6 +22,19 @@
 /*
  * XXX We need to find a better place for these things...
  */
+
+bool perf_singlethreaded = true;
+
+void perf_set_singlethreaded(void)
+{
+	perf_singlethreaded = true;
+}
+
+void perf_set_multithreaded(void)
+{
+	perf_singlethreaded = false;
+}
+
 unsigned int page_size;
 int cacheline_size;
 
@@ -168,7 +182,7 @@ out:
 	return err;
 }
 
-int copyfile_offset(int ifd, loff_t off_in, int ofd, loff_t off_out, u64 size)
+static int copyfile_offset(int ifd, loff_t off_in, int ofd, loff_t off_out, u64 size)
 {
 	void *ptr;
 	loff_t pgoff;
@@ -257,6 +271,7 @@ static ssize_t ion(bool is_read, int fd, void *buf, size_t n)
 	size_t left = n;
 
 	while (left) {
+		/* buf must be treated as const if !is_read. */
 		ssize_t ret = is_read ? read(fd, buf, left) :
 					write(fd, buf, left);
 
@@ -284,9 +299,10 @@ ssize_t readn(int fd, void *buf, size_t n)
 /*
  * Write exactly 'n' bytes or return an error.
  */
-ssize_t writen(int fd, void *buf, size_t n)
+ssize_t writen(int fd, const void *buf, size_t n)
 {
-	return ion(false, fd, buf, n);
+	/* ion does not modify buf. */
+	return ion(false, fd, (void *)buf, n);
 }
 
 size_t hex_width(u64 v)
@@ -340,42 +356,6 @@ int perf_event_paranoid(void)
 		return INT_MAX;
 
 	return value;
-}
-
-bool find_process(const char *name)
-{
-	size_t len = strlen(name);
-	DIR *dir;
-	struct dirent *d;
-	int ret = -1;
-
-	dir = opendir(procfs__mountpoint());
-	if (!dir)
-		return false;
-
-	/* Walk through the directory. */
-	while (ret && (d = readdir(dir)) != NULL) {
-		char path[PATH_MAX];
-		char *data;
-		size_t size;
-
-		if ((d->d_type != DT_DIR) ||
-		     !strcmp(".", d->d_name) ||
-		     !strcmp("..", d->d_name))
-			continue;
-
-		scnprintf(path, sizeof(path), "%s/%s/comm",
-			  procfs__mountpoint(), d->d_name);
-
-		if (filename__read_str(path, &data, &size))
-			continue;
-
-		ret = strncmp(name, data, len);
-		free(data);
-	}
-
-	closedir(dir);
-	return ret ? false : true;
 }
 
 const char *perf_tip(const char *dirpath)

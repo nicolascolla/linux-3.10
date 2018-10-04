@@ -83,6 +83,7 @@ int percpu_ref_init(struct percpu_ref *ref, percpu_ref_func_t *release,
 	atomic_long_set(&ref->count, start_count);
 
 	ref->release = release;
+	ref->confirm_switch = NULL;
 	return 0;
 }
 EXPORT_SYMBOL_GPL(percpu_ref_init);
@@ -102,6 +103,8 @@ void percpu_ref_exit(struct percpu_ref *ref)
 	unsigned long __percpu *percpu_count = percpu_count_ptr(ref);
 
 	if (percpu_count) {
+		/* non-NULL confirm_switch indicates switching in progress */
+		WARN_ON_ONCE(ref->confirm_switch);
 		free_percpu(percpu_count);
 		ref->percpu_count_ptr = __PERCPU_REF_ATOMIC_DEAD;
 	}
@@ -194,10 +197,10 @@ static void __percpu_ref_switch_to_percpu(struct percpu_ref *ref)
 	atomic_long_add(PERCPU_COUNT_BIAS, &ref->count);
 
 	/*
-	 * Restore per-cpu operation.  smp_store_release() is paired with
-	 * smp_read_barrier_depends() in __ref_is_percpu() and guarantees
-	 * that the zeroing is visible to all percpu accesses which can see
-	 * the following __PERCPU_REF_ATOMIC clearing.
+	 * Restore per-cpu operation.  smp_store_release() is paired
+	 * with READ_ONCE() in __ref_is_percpu() and guarantees that the
+	 * zeroing is visible to all percpu accesses which can see the
+	 * following __PERCPU_REF_ATOMIC clearing.
 	 */
 	for_each_possible_cpu(cpu)
 		*per_cpu_ptr(percpu_count, cpu) = 0;
@@ -319,6 +322,8 @@ EXPORT_SYMBOL_GPL(percpu_ref_switch_to_percpu);
  * This function normally doesn't block and can be called from any context
  * but it may block if @confirm_kill is specified and @ref is in the
  * process of switching to atomic mode by percpu_ref_switch_to_atomic().
+ *
+ * There are no implied RCU grace periods between kill and release.
  */
 void percpu_ref_kill_and_confirm(struct percpu_ref *ref,
 				 percpu_ref_func_t *confirm_kill)

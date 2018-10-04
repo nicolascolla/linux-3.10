@@ -27,6 +27,7 @@
 #include <linux/mutex.h>
 #include <linux/module.h>
 #include <linux/firmware.h>
+#include <linux/kernel.h>
 #include <sound/core.h>
 #include "hda_codec.h"
 #include "hda_local.h"
@@ -38,6 +39,10 @@
 
 /* Enable this to see controls for tuning purpose. */
 /*#define ENABLE_TUNING_CONTROLS*/
+
+#ifdef ENABLE_TUNING_CONTROLS
+#include <sound/tlv.h>
+#endif
 
 #define FLOAT_ZERO	0x00000000
 #define FLOAT_ONE	0x3f800000
@@ -3075,8 +3080,8 @@ static int equalizer_ctl_put(struct snd_kcontrol *kcontrol,
 	return 1;
 }
 
-static const DECLARE_TLV_DB_SCALE(voice_focus_db_scale, 2000, 100, 0);
-static const DECLARE_TLV_DB_SCALE(eq_db_scale, -2400, 100, 0);
+static const SNDRV_CTL_TLVD_DECLARE_DB_SCALE(voice_focus_db_scale, 2000, 100, 0);
+static const SNDRV_CTL_TLVD_DECLARE_DB_SCALE(eq_db_scale, -2400, 100, 0);
 
 static int add_tuning_control(struct hda_codec *codec,
 				hda_nid_t pnid, hda_nid_t nid,
@@ -3613,8 +3618,7 @@ static int ca0132_vnode_switch_set(struct snd_kcontrol *kcontrol,
 static int ca0132_voicefx_info(struct snd_kcontrol *kcontrol,
 				 struct snd_ctl_elem_info *uinfo)
 {
-	unsigned int items = sizeof(ca0132_voicefx_presets)
-				/ sizeof(struct ct_voicefx_preset);
+	unsigned int items = ARRAY_SIZE(ca0132_voicefx_presets);
 
 	uinfo->type = SNDRV_CTL_ELEM_TYPE_ENUMERATED;
 	uinfo->count = 1;
@@ -3643,10 +3647,8 @@ static int ca0132_voicefx_put(struct snd_kcontrol *kcontrol,
 	struct ca0132_spec *spec = codec->spec;
 	int i, err = 0;
 	int sel = ucontrol->value.enumerated.item[0];
-	unsigned int items = sizeof(ca0132_voicefx_presets)
-				/ sizeof(struct ct_voicefx_preset);
 
-	if (sel >= items)
+	if (sel >= ARRAY_SIZE(ca0132_voicefx_presets))
 		return 0;
 
 	codec_dbg(codec, "ca0132_voicefx_put: sel=%d, preset=%s\n",

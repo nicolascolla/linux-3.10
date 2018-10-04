@@ -102,7 +102,6 @@
 #include <linux/uaccess.h>
 #include <linux/kdb.h>
 #include <linux/ctype.h>
-#include <linux/nospec.h>
 
 #define MAX_NR_CON_DRIVER 16
 
@@ -729,8 +728,7 @@ void redraw_screen(struct vc_data *vc, int is_switch)
 
 int vc_cons_allocated(unsigned int i)
 {
-	return (i < MAX_NR_CONSOLES &&
-		vc_cons[array_index_nospec(i, MAX_NR_CONSOLES)].d);
+	return (i < MAX_NR_CONSOLES && vc_cons[i].d);
 }
 
 static void visual_init(struct vc_data *vc, int num, int init)
@@ -746,6 +744,8 @@ static void visual_init(struct vc_data *vc, int num, int init)
 	__module_get(vc->vc_sw->owner);
 	vc->vc_num = num;
 	vc->vc_display_fg = &master_display_fg;
+	if (vc->vc_uni_pagedir_loc)
+		con_free_unimap(vc);
 	vc->vc_uni_pagedir_loc = &vc->vc_uni_pagedir;
 	vc->vc_uni_pagedir = 0;
 	vc->vc_hi_font_mask = 0;
@@ -766,8 +766,6 @@ int vc_allocate(unsigned int currcons)	/* return 0 on success */
 
 	if (currcons >= MAX_NR_CONSOLES)
 		return -ENXIO;
-	currcons = array_index_nospec(currcons, MAX_NR_CONSOLES);
-
 	if (!vc_cons[currcons].d) {
 	    struct vc_data *vc;
 	    struct vt_notifier_param param;
@@ -2113,7 +2111,6 @@ static int do_con_write(struct tty_struct *tty, const unsigned char *buf, int co
 		console_unlock();
 		return 0;
 	}
-	vc->vc_num = array_index_nospec(currcons, MAX_NR_CONSOLES);
 
 	himask = vc->vc_hi_font_mask;
 	charmask = himask ? 0x1ff : 0xff;
@@ -2774,7 +2771,6 @@ static int con_install(struct tty_driver *driver, struct tty_struct *tty)
 	ret = vc_allocate(currcons);
 	if (ret)
 		goto unlock;
-	currcons = array_index_nospec(currcons, MAX_NR_CONSOLES);
 
 	vc = vc_cons[currcons].d;
 
@@ -4121,7 +4117,7 @@ static int con_font_set(struct vc_data *vc, struct console_font_op *op)
 		return -ENOSPC;
 	font.charcount = op->charcount;
 	font.height = op->height;
-	font.width = array_index_nospec(op->width, 33);
+	font.width = op->width;
 	font.data = memdup_user(op->data, size);
 	if (IS_ERR(font.data))
 		return PTR_ERR(font.data);
@@ -4184,10 +4180,8 @@ static int con_font_copy(struct vc_data *vc, struct console_font_op *op)
 		rc = -ENOTTY;
 	else if (con == vc->vc_num)	/* nothing to do */
 		rc = 0;
-	else {
-		con = array_index_nospec(con, MAX_NR_CONSOLES);
+	else
 		rc = vc->vc_sw->con_font_copy(vc, con);
-	}
 	console_unlock();
 	return rc;
 }

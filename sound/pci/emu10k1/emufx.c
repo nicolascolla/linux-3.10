@@ -36,7 +36,6 @@
 #include <linux/init.h>
 #include <linux/mutex.h>
 #include <linux/moduleparam.h>
-#include <linux/nospec.h>
 
 #include <sound/core.h>
 #include <sound/tlv.h>
@@ -422,14 +421,10 @@ int snd_emu10k1_fx8010_register_irq_handler(struct snd_emu10k1 *emu,
 					    snd_fx8010_irq_handler_t *handler,
 					    unsigned char gpr_running,
 					    void *private_data,
-					    struct snd_emu10k1_fx8010_irq **r_irq)
+					    struct snd_emu10k1_fx8010_irq *irq)
 {
-	struct snd_emu10k1_fx8010_irq *irq;
 	unsigned long flags;
 	
-	irq = kmalloc(sizeof(*irq), GFP_ATOMIC);
-	if (irq == NULL)
-		return -ENOMEM;
 	irq->handler = handler;
 	irq->gpr_running = gpr_running;
 	irq->private_data = private_data;
@@ -444,8 +439,6 @@ int snd_emu10k1_fx8010_register_irq_handler(struct snd_emu10k1 *emu,
 		emu->fx8010.irq_handlers = irq;
 	}
 	spin_unlock_irqrestore(&emu->fx8010.irq_lock, flags);
-	if (r_irq)
-		*r_irq = irq;
 	return 0;
 }
 
@@ -469,7 +462,6 @@ int snd_emu10k1_fx8010_unregister_irq_handler(struct snd_emu10k1 *emu,
 			tmp->next = tmp->next->next;
 	}
 	spin_unlock_irqrestore(&emu->fx8010.irq_lock, flags);
-	kfree(irq);
 	return 0;
 }
 
@@ -1032,15 +1024,12 @@ static int snd_emu10k1_ipcm_poke(struct snd_emu10k1 *emu,
 	unsigned int i;
 	int err = 0;
 	struct snd_emu10k1_fx8010_pcm *pcm;
-	unsigned int substream;
 
 	if (ipcm->substream >= EMU10K1_FX8010_PCM_COUNT)
 		return -EINVAL;
-	substream = array_index_nospec(ipcm->substream, EMU10K1_FX8010_PCM_COUNT);
-
 	if (ipcm->channels > 32)
 		return -EINVAL;
-	pcm = &emu->fx8010.pcm[substream];
+	pcm = &emu->fx8010.pcm[ipcm->substream];
 	mutex_lock(&emu->fx8010.lock);
 	spin_lock_irq(&emu->reg_lock);
 	if (pcm->opened) {
@@ -1081,13 +1070,10 @@ static int snd_emu10k1_ipcm_peek(struct snd_emu10k1 *emu,
 	unsigned int i;
 	int err = 0;
 	struct snd_emu10k1_fx8010_pcm *pcm;
-	unsigned int substream;
 
 	if (ipcm->substream >= EMU10K1_FX8010_PCM_COUNT)
 		return -EINVAL;
-	substream = array_index_nospec(ipcm->substream, EMU10K1_FX8010_PCM_COUNT);
-
-	pcm = &emu->fx8010.pcm[substream];
+	pcm = &emu->fx8010.pcm[ipcm->substream];
 	mutex_lock(&emu->fx8010.lock);
 	spin_lock_irq(&emu->reg_lock);
 	ipcm->channels = pcm->channels;

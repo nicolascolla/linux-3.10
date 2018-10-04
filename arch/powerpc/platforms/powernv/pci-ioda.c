@@ -2436,7 +2436,7 @@ static void pnv_pci_ioda_setup_opal_tce_kill(struct pnv_phb *phb)
 
 static __be64 *pnv_pci_ioda2_table_do_alloc_pages(int nid, unsigned shift,
 		unsigned levels, unsigned long limit,
-		unsigned long *current_offset)
+		unsigned long *current_offset, unsigned long *total_allocated)
 {
 	struct page *tce_mem = NULL;
 	__be64 *addr, *tmp;
@@ -2452,6 +2452,7 @@ static __be64 *pnv_pci_ioda2_table_do_alloc_pages(int nid, unsigned shift,
 	}
 	addr = page_address(tce_mem);
 	memset(addr, 0, allocated);
+	*total_allocated += allocated;
 
 	--levels;
 	if (!levels) {
@@ -2461,7 +2462,7 @@ static __be64 *pnv_pci_ioda2_table_do_alloc_pages(int nid, unsigned shift,
 
 	for (i = 0; i < entries; ++i) {
 		tmp = pnv_pci_ioda2_table_do_alloc_pages(nid, shift,
-				levels, limit, current_offset);
+				levels, limit, current_offset, total_allocated);
 		if (!tmp)
 			break;
 
@@ -2483,7 +2484,7 @@ static long pnv_pci_ioda2_table_alloc_pages(int nid, __u64 bus_offset,
 		struct iommu_table *tbl)
 {
 	void *addr;
-	unsigned long offset = 0, level_shift;
+	unsigned long offset = 0, level_shift, total_allocated = 0;
 	const unsigned window_shift = ilog2(window_size);
 	unsigned entries_shift = window_shift - page_shift;
 	unsigned table_shift = max_t(unsigned, entries_shift + 3, PAGE_SHIFT);
@@ -2502,7 +2503,7 @@ static long pnv_pci_ioda2_table_alloc_pages(int nid, __u64 bus_offset,
 
 	/* Allocate TCE table */
 	addr = pnv_pci_ioda2_table_do_alloc_pages(nid, level_shift,
-			levels, tce_table_size, &offset);
+			levels, tce_table_size, &offset, &total_allocated);
 
 	/* addr==NULL means that the first level allocation failed */
 	if (!addr)
@@ -2524,7 +2525,7 @@ static long pnv_pci_ioda2_table_alloc_pages(int nid, __u64 bus_offset,
 			page_shift);
 	tbl->it_level_size = 1ULL << (level_shift - 3);
 	tbl->it_indirect_levels = levels - 1;
-	tbl->it_allocated_size = offset;
+	tbl->it_allocated_size = total_allocated;
 
 	pr_devel("Created TCE table: ws=%08llx ts=%lx @%08llx\n",
 			window_size, tce_table_size, bus_offset);
@@ -3223,6 +3224,41 @@ static void pnv_npu_ioda_fixup(void)
 	}
 }
 
+static void pnv_pci_enable_bridge(struct pci_bus *bus)
+{
+	struct pci_dev *dev = bus->self;
+	struct pci_bus *child;
+
+	/* Empty bus ? bail */
+	if (list_empty(&bus->devices))
+		return;
+
+	/*
+	 * If there's a bridge associated with that bus enable it. This works
+	 * around races in the generic code if the enabling is done during
+	 * parallel probing. This can be removed once those races have been
+	 * fixed.
+	 */
+	if (dev) {
+		int rc = pci_enable_device(dev);
+		if (rc)
+			pci_err(dev, "Error enabling bridge (%d)\n", rc);
+		pci_set_master(dev);
+	}
+
+	/* Perform the same to child busses */
+	list_for_each_entry(child, &bus->children, node)
+		pnv_pci_enable_bridge(child);
+}
+
+static void pnv_pci_enable_bridges(void)
+{
+	struct pci_controller *hose;
+
+	list_for_each_entry(hose, &hose_list, list_node)
+		pnv_pci_enable_bridge(hose->bus);
+}
+
 static void pnv_pci_ioda_fixup(void)
 {
 	pnv_pci_ioda_setup_PEs();
@@ -3230,6 +3266,8 @@ static void pnv_pci_ioda_fixup(void)
 	pnv_pci_ioda_setup_DMA();
 
 	pnv_pci_ioda_create_dbgfs();
+
+	pnv_pci_enable_bridges();
 
 #ifdef CONFIG_EEH
 	eeh_init();

@@ -27,7 +27,6 @@
 #include <linux/export.h>
 #include <linux/utsname.h>
 #include <linux/sched.h>
-#include <linux/nospec.h>
 #include <asm/unaligned.h>
 
 #include <net/bluetooth/bluetooth.h>
@@ -1509,13 +1508,12 @@ static int hci_mgmt_cmd(struct hci_mgmt_chan *chan, struct sock *sk,
 	}
 
 	if (opcode >= chan->handler_count ||
-	    chan->handlers[array_index_nospec(opcode, chan->handler_count)].func == NULL) {
+	    chan->handlers[opcode].func == NULL) {
 		BT_DBG("Unknown op %u", opcode);
 		err = mgmt_cmd_status(sk, index, opcode,
 				      MGMT_STATUS_UNKNOWN_COMMAND);
 		goto done;
 	}
-	opcode = array_index_nospec(opcode, chan->handler_count);
 
 	handler = &chan->handlers[opcode];
 
@@ -1618,7 +1616,6 @@ static int hci_logging_frame(struct sock *sk, struct msghdr *msg, int len)
 	if (__le16_to_cpu(hdr->opcode) == 0x0000) {
 		__u8 priority = skb->data[sizeof(*hdr)];
 		__u8 ident_len = skb->data[sizeof(*hdr) + 1];
-		__u8 idx;
 
 		/* Only the priorities 0-7 are valid and with that any other
 		 * value results in an invalid packet.
@@ -1634,12 +1631,8 @@ static int hci_logging_frame(struct sock *sk, struct msghdr *msg, int len)
 		 * must be NUL terminated. Otherwise it is not a valid packet.
 		 */
 		if (priority > 7 || skb->data[len - 1] != 0x00 ||
-		    ident_len > len - sizeof(*hdr) - 3) {
-			err = -EINVAL;
-			goto drop;
-		}
-		idx = array_index_nospec(sizeof(*hdr) + ident_len + 1, len - 2);
-		if (skb->data[idx] != 0x00) {
+		    ident_len > len - sizeof(*hdr) - 3 ||
+		    skb->data[sizeof(*hdr) + ident_len + 1] != 0x00) {
 			err = -EINVAL;
 			goto drop;
 		}

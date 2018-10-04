@@ -1396,9 +1396,14 @@ static struct sctp_chunk *_sctp_make_chunk(const struct sctp_association *asoc,
 	sctp_chunkhdr_t *chunk_hdr;
 	struct sk_buff *skb;
 	struct sock *sk;
+	int chunklen;
+
+	chunklen = SCTP_PAD4(sizeof(*chunk_hdr) + paylen);
+	if (chunklen > SCTP_MAX_CHUNK_LEN)
+		goto nodata;
 
 	/* No need to allocate LL here, as this is only a chunk. */
-	skb = alloc_skb(SCTP_PAD4(sizeof(sctp_chunkhdr_t) + paylen), gfp);
+	skb = alloc_skb(chunklen, gfp);
 	if (!skb)
 		goto nodata;
 
@@ -1566,13 +1571,10 @@ void sctp_chunk_assign_ssn(struct sctp_chunk *chunk)
 		if (lchunk->chunk_hdr->flags & SCTP_DATA_UNORDERED) {
 			ssn = 0;
 		} else {
-			if (lchunk->chunk_hdr->flags & SCTP_DATA_LAST_FRAG) {
-				barrier_nospec();
+			if (lchunk->chunk_hdr->flags & SCTP_DATA_LAST_FRAG)
 				ssn = sctp_ssn_next(stream, sid);
-			} else {
-				barrier_nospec();
+			else
 				ssn = sctp_ssn_peek(stream, sid);
-			}
 		}
 
 		lchunk->subh.data_hdr->ssn = htons(ssn);

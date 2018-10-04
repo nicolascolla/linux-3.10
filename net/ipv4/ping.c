@@ -504,7 +504,6 @@ static int ping_sendmsg(struct kiocb *iocb, struct sock *sk, struct msghdr *msg,
 		return -EFAULT;
 	if (!ping_supported(user_icmph.type, user_icmph.code))
 		return -EINVAL;
-	user_icmph.type = ICMP_ECHO; /* nospec */
 
 	/*
 	 *	Get and verify the address.
@@ -535,7 +534,7 @@ static int ping_sendmsg(struct kiocb *iocb, struct sock *sk, struct msghdr *msg,
 	sock_tx_timestamp(sk, &ipc.tx_flags);
 
 	if (msg->msg_controllen) {
-		err = ip_cmsg_send(sock_net(sk), msg, &ipc);
+		err = ip_cmsg_send(sock_net(sk), msg, &ipc, false);
 		if (err)
 			return err;
 		if (ipc.opt)

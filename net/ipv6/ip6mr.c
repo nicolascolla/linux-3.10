@@ -34,7 +34,6 @@
 #include <linux/init.h>
 #include <linux/slab.h>
 #include <linux/compat.h>
-#include <linux/nospec.h>
 #include <net/protocol.h>
 #include <linux/skbuff.h>
 #include <net/sock.h>
@@ -250,7 +249,7 @@ static int __net_init ip6mr_rules_init(struct net *net)
 	return 0;
 
 err2:
-	kfree(mrt);
+	ip6mr_free_table(mrt);
 err1:
 	fib_rules_unregister(ops);
 	return err;
@@ -766,10 +765,6 @@ static struct net_device *ip6mr_reg_vif(struct net *net, struct mr6_table *mrt)
 	return dev;
 
 failure:
-	/* allow the register to be completed before unregistering. */
-	rtnl_unlock();
-	rtnl_lock();
-
 	unregister_netdevice(dev);
 	return NULL;
 }
@@ -928,6 +923,7 @@ static void ip6mr_update_thresholds(struct mr6_table *mrt, struct mfc6_cache *ca
 				cache->mfc_un.res.maxvif = vifi + 1;
 		}
 	}
+	cache->mfc_un.res.lastuse = jiffies;
 }
 
 static int mif6_add(struct net *net, struct mr6_table *mrt,
@@ -1081,6 +1077,7 @@ static struct mfc6_cache *ip6mr_cache_alloc(void)
 	struct mfc6_cache *c = kmem_cache_zalloc(mrt_cachep, GFP_KERNEL);
 	if (c == NULL)
 		return NULL;
+	c->mfc_un.res.last_assert = jiffies - MFC_ASSERT_THRESH - 1;
 	c->mfc_un.res.minvif = MAXMIFS;
 	return c;
 }
@@ -1459,7 +1456,6 @@ static int ip6mr_mfc_add(struct net *net, struct mr6_table *mrt,
 
 	if (mfc->mf6cc_parent >= MAXMIFS)
 		return -ENFILE;
-	mfc->mf6cc_parent = array_index_nospec(mfc->mf6cc_parent, MAXMIFS);
 
 	memset(ttls, 255, MAXMIFS);
 	for (i = 0; i < MAXMIFS; i++) {
@@ -1696,8 +1692,6 @@ int ip6_mroute_setsockopt(struct sock *sk, int optname, char __user *optval, uns
 			return -EFAULT;
 		if (vif.mif6c_mifi >= MAXMIFS)
 			return -ENFILE;
-		vif.mif6c_mifi = array_index_nospec(vif.mif6c_mifi, MAXMIFS);
-
 		rtnl_lock();
 		ret = mif6_add(net, mrt, &vif, sk == mrt->mroute6_sk);
 		rtnl_unlock();
@@ -1868,7 +1862,6 @@ int ip6mr_ioctl(struct sock *sk, int cmd, void __user *arg)
 	struct mfc6_cache *c;
 	struct net *net = sock_net(sk);
 	struct mr6_table *mrt;
-	mifi_t mifi;
 
 	mrt = ip6mr_get_table(net, raw6_sk(sk)->ip6mr_table ? : RT6_TABLE_DFLT);
 	if (mrt == NULL)
@@ -1880,11 +1873,9 @@ int ip6mr_ioctl(struct sock *sk, int cmd, void __user *arg)
 			return -EFAULT;
 		if (vr.mifi >= mrt->maxvif)
 			return -EINVAL;
-		mifi = array_index_nospec(vr.mifi, mrt->maxvif);
-
 		read_lock(&mrt_lock);
-		vif = &mrt->vif6_table[mifi];
-		if (MIF_EXISTS(mrt, mifi)) {
+		vif = &mrt->vif6_table[vr.mifi];
+		if (MIF_EXISTS(mrt, vr.mifi)) {
 			vr.icount = vif->pkt_in;
 			vr.ocount = vif->pkt_out;
 			vr.ibytes = vif->bytes_in;
@@ -1945,7 +1936,6 @@ int ip6mr_compat_ioctl(struct sock *sk, unsigned int cmd, void __user *arg)
 	struct mfc6_cache *c;
 	struct net *net = sock_net(sk);
 	struct mr6_table *mrt;
-	mifi_t mifi;
 
 	mrt = ip6mr_get_table(net, raw6_sk(sk)->ip6mr_table ? : RT6_TABLE_DFLT);
 	if (mrt == NULL)
@@ -1957,11 +1947,9 @@ int ip6mr_compat_ioctl(struct sock *sk, unsigned int cmd, void __user *arg)
 			return -EFAULT;
 		if (vr.mifi >= mrt->maxvif)
 			return -EINVAL;
-		mifi = array_index_nospec(vr.mifi, mrt->maxvif);
-
 		read_lock(&mrt_lock);
-		vif = &mrt->vif6_table[mifi];
-		if (MIF_EXISTS(mrt, mifi)) {
+		vif = &mrt->vif6_table[vr.mifi];
+		if (MIF_EXISTS(mrt, vr.mifi)) {
 			vr.icount = vif->pkt_in;
 			vr.ocount = vif->pkt_out;
 			vr.ibytes = vif->bytes_in;
@@ -2106,6 +2094,7 @@ static int ip6_mr_forward(struct net *net, struct mr6_table *mrt,
 	vif = cache->mf6c_parent;
 	cache->mfc_un.res.pkt++;
 	cache->mfc_un.res.bytes += skb->len;
+	cache->mfc_un.res.lastuse = jiffies;
 
 	if (ipv6_addr_any(&cache->mf6c_origin) && true_vifi >= 0) {
 		struct mfc6_cache *cache_proxy;
@@ -2249,19 +2238,18 @@ int ip6_mr_input(struct sk_buff *skb)
 static int __ip6mr_fill_mroute(struct mr6_table *mrt, struct sk_buff *skb,
 			       struct mfc6_cache *c, struct rtmsg *rtm)
 {
-	int ct;
-	struct rtnexthop *nhp;
-	struct nlattr *mp_attr;
 	struct rta_mfc_stats mfcs;
-	mifi_t mf6c_parent;
+	struct nlattr *mp_attr;
+	struct rtnexthop *nhp;
+	unsigned long lastuse;
+	int ct;
 
 	/* If cache is unresolved, don't try to parse IIF and OIF */
 	if (c->mf6c_parent >= MAXMIFS)
 		return -ENOENT;
-	mf6c_parent = array_index_nospec(c->mf6c_parent, MAXMIFS);
 
-	if (MIF_EXISTS(mrt, mf6c_parent) &&
-	    nla_put_u32(skb, RTA_IIF, mrt->vif6_table[mf6c_parent].dev->ifindex) < 0)
+	if (MIF_EXISTS(mrt, c->mf6c_parent) &&
+	    nla_put_u32(skb, RTA_IIF, mrt->vif6_table[c->mf6c_parent].dev->ifindex) < 0)
 		return -EMSGSIZE;
 	mp_attr = nla_nest_start(skb, RTA_MULTIPATH);
 	if (mp_attr == NULL)
@@ -2284,18 +2272,23 @@ static int __ip6mr_fill_mroute(struct mr6_table *mrt, struct sk_buff *skb,
 
 	nla_nest_end(skb, mp_attr);
 
+	lastuse = READ_ONCE(c->mfc_un.res.lastuse);
+	lastuse = time_after_eq(jiffies, lastuse) ? jiffies - lastuse : 0;
+
 	mfcs.mfcs_packets = c->mfc_un.res.pkt;
 	mfcs.mfcs_bytes = c->mfc_un.res.bytes;
 	mfcs.mfcs_wrong_if = c->mfc_un.res.wrong_if;
-	if (nla_put_64bit(skb, RTA_MFC_STATS, sizeof(mfcs), &mfcs, RTA_PAD) < 0)
+	if (nla_put_64bit(skb, RTA_MFC_STATS, sizeof(mfcs), &mfcs, RTA_PAD) ||
+	    nla_put_u64_64bit(skb, RTA_EXPIRES, jiffies_to_clock_t(lastuse),
+			      RTA_PAD))
 		return -EMSGSIZE;
 
 	rtm->rtm_type = RTN_MULTICAST;
 	return 1;
 }
 
-int ip6mr_get_route(struct net *net,
-		    struct sk_buff *skb, struct rtmsg *rtm, int nowait)
+int ip6mr_get_route(struct net *net, struct sk_buff *skb, struct rtmsg *rtm,
+		    int nowait, u32 portid)
 {
 	int err;
 	struct mr6_table *mrt;
@@ -2340,6 +2333,7 @@ int ip6mr_get_route(struct net *net,
 			return -ENOMEM;
 		}
 
+		NETLINK_CB(skb2).portid = portid;
 		skb_reset_transport_header(skb2);
 
 		skb_put(skb2, sizeof(struct ipv6hdr));

@@ -60,11 +60,11 @@ static struct team_port *team_port_get_rtnl(const struct net_device *dev)
 static int __set_port_dev_addr(struct net_device *port_dev,
 			       const unsigned char *dev_addr)
 {
-	struct sockaddr addr;
+	struct sockaddr_storage addr;
 
-	memcpy(addr.sa_data, dev_addr, port_dev->addr_len);
-	addr.sa_family = port_dev->type;
-	return dev_set_mac_address(port_dev, &addr);
+	memcpy(addr.__data, dev_addr, port_dev->addr_len);
+	addr.ss_family = port_dev->type;
+	return dev_set_mac_address(port_dev, (struct sockaddr *)&addr);
 }
 
 static int team_port_set_orig_dev_addr(struct team_port *port)
@@ -1061,13 +1061,10 @@ static void team_port_leave(struct team *team, struct team_port *port)
 }
 
 #ifdef CONFIG_NET_POLL_CONTROLLER
-static int team_port_enable_netpoll(struct team *team, struct team_port *port)
+static int __team_port_enable_netpoll(struct team_port *port)
 {
 	struct netpoll *np;
 	int err;
-
-	if (!team->dev->npinfo)
-		return 0;
 
 	np = kzalloc(sizeof(*np), GFP_KERNEL);
 	if (!np)
@@ -1080,6 +1077,14 @@ static int team_port_enable_netpoll(struct team *team, struct team_port *port)
 	}
 	port->np = np;
 	return err;
+}
+
+static int team_port_enable_netpoll(struct team_port *port)
+{
+	if (!port->team->dev->npinfo)
+		return 0;
+
+	return __team_port_enable_netpoll(port);
 }
 
 static void team_port_disable_netpoll(struct team_port *port)
@@ -1096,7 +1101,7 @@ static void team_port_disable_netpoll(struct team_port *port)
 	kfree(np);
 }
 #else
-static int team_port_enable_netpoll(struct team *team, struct team_port *port)
+static int team_port_enable_netpoll(struct team_port *port)
 {
 	return 0;
 }
@@ -1111,6 +1116,7 @@ static int team_upper_dev_link(struct team *team, struct team_port *port)
 	int err;
 
 	lag_upper_info.tx_type = team->mode->lag_tx_type;
+	lag_upper_info.hash_type = NETDEV_LAG_HASH_UNKNOWN;
 	err = netdev_master_upper_dev_link(port->dev, team->dev, NULL,
 					   &lag_upper_info);
 	if (err)
@@ -1197,11 +1203,6 @@ static int team_port_add(struct team *team, struct net_device *port_dev)
 		goto err_dev_open;
 	}
 
-	netif_addr_lock_bh(dev);
-	dev_uc_sync_multiple(port_dev, dev);
-	dev_mc_sync_multiple(port_dev, dev);
-	netif_addr_unlock_bh(dev);
-
 	err = vlan_vids_add_by_dev(port_dev, dev);
 	if (err) {
 		netdev_err(dev, "Failed to add vlan ids to device %s\n",
@@ -1209,7 +1210,7 @@ static int team_port_add(struct team *team, struct net_device *port_dev)
 		goto err_vids_add;
 	}
 
-	err = team_port_enable_netpoll(team, port);
+	err = team_port_enable_netpoll(port);
 	if (err) {
 		netdev_err(dev, "Failed to enable netpoll on device %s\n",
 			   portname);
@@ -1241,6 +1242,11 @@ static int team_port_add(struct team *team, struct net_device *port_dev)
 		goto err_option_port_add;
 	}
 
+	netif_addr_lock_bh(dev);
+	dev_uc_sync_multiple(port_dev, dev);
+	dev_mc_sync_multiple(port_dev, dev);
+	netif_addr_unlock_bh(dev);
+
 	port->index = -1;
 	list_add_tail_rcu(&port->list, &team->port_list);
 	team_port_enable(team, port);
@@ -1265,8 +1271,6 @@ err_enable_netpoll:
 	vlan_vids_del_by_dev(port_dev, dev);
 
 err_vids_add:
-	dev_uc_unsync(port_dev, dev);
-	dev_mc_unsync(port_dev, dev);
 	dev_close(port_dev);
 
 err_dev_open:
@@ -1902,7 +1906,7 @@ static int team_netpoll_setup(struct net_device *dev,
 
 	mutex_lock(&team->lock);
 	list_for_each_entry(port, &team->port_list, list) {
-		err = team_port_enable_netpoll(team, port);
+		err = __team_port_enable_netpoll(port);
 		if (err) {
 			__team_netpoll_cleanup(team);
 			break;
@@ -2399,7 +2403,7 @@ send_done:
 	if (!nlh) {
 		err = __send_and_alloc_skb(&skb, team, portid, send_func);
 		if (err)
-			goto errout;
+			return err;
 		goto send_done;
 	}
 
@@ -2684,7 +2688,7 @@ send_done:
 	if (!nlh) {
 		err = __send_and_alloc_skb(&skb, team, portid, send_func);
 		if (err)
-			goto errout;
+			return err;
 		goto send_done;
 	}
 

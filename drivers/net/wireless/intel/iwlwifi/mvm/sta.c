@@ -64,7 +64,6 @@
  * OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
  *
  *****************************************************************************/
-#include <linux/nospec.h>
 #include <net/mac80211.h>
 
 #include "mvm.h"
@@ -2284,7 +2283,6 @@ int iwl_mvm_sta_rx_agg(struct iwl_mvm *mvm, struct ieee80211_sta *sta,
 		baid_data->tid = tid;
 		baid_data->sta_id = mvm_sta->sta_id;
 
-		tid = array_index_nospec(tid, IWL_MAX_TID_COUNT);
 		mvm_sta->tid_to_baid[tid] = baid;
 		if (timeout)
 			mod_timer(&baid_data->session_timer,
@@ -2303,10 +2301,7 @@ int iwl_mvm_sta_rx_agg(struct iwl_mvm *mvm, struct ieee80211_sta *sta,
 		WARN_ON(rcu_access_pointer(mvm->baid_map[baid]));
 		rcu_assign_pointer(mvm->baid_map[baid], baid_data);
 	} else  {
-		u8 baid;
-
-		tid = array_index_nospec(tid, IWL_MAX_TID_COUNT);
-		baid = mvm_sta->tid_to_baid[tid];
+		u8 baid = mvm_sta->tid_to_baid[tid];
 
 		if (mvm->rx_ba_sessions > 0)
 			/* check that restart flow didn't zero the counter */
@@ -2416,7 +2411,6 @@ int iwl_mvm_sta_tx_agg_start(struct iwl_mvm *mvm, struct ieee80211_vif *vif,
 
 	if (WARN_ON_ONCE(tid >= IWL_MAX_TID_COUNT))
 		return -EINVAL;
-	tid = array_index_nospec(tid, IWL_MAX_TID_COUNT);
 
 	if (mvmsta->tid_data[tid].state != IWL_AGG_QUEUED &&
 	    mvmsta->tid_data[tid].state != IWL_AGG_OFF) {
@@ -2530,7 +2524,7 @@ int iwl_mvm_sta_tx_agg_oper(struct iwl_mvm *mvm, struct ieee80211_vif *vif,
 			    bool amsdu)
 {
 	struct iwl_mvm_sta *mvmsta = iwl_mvm_sta_from_mac80211(sta);
-	struct iwl_mvm_tid_data *tid_data;
+	struct iwl_mvm_tid_data *tid_data = &mvmsta->tid_data[tid];
 	unsigned int wdg_timeout =
 		iwl_mvm_get_wd_timeout(mvm, vif, sta->tdls, false);
 	int queue, ret;
@@ -2547,9 +2541,6 @@ int iwl_mvm_sta_tx_agg_oper(struct iwl_mvm *mvm, struct ieee80211_vif *vif,
 
 	BUILD_BUG_ON((sizeof(mvmsta->agg_tids) * BITS_PER_BYTE)
 		     != IWL_MAX_TID_COUNT);
-
-	tid = array_index_nospec(tid, IWL_MAX_TID_COUNT + 1);
-	tid_data = &mvmsta->tid_data[tid];
 
 	if (!mvm->trans->cfg->gen2)
 		buf_size = min_t(int, buf_size, LINK_QUAL_AGG_FRAME_LIMIT_DEF);
@@ -2677,12 +2668,10 @@ int iwl_mvm_sta_tx_agg_stop(struct iwl_mvm *mvm, struct ieee80211_vif *vif,
 			    struct ieee80211_sta *sta, u16 tid)
 {
 	struct iwl_mvm_sta *mvmsta = iwl_mvm_sta_from_mac80211(sta);
-	struct iwl_mvm_tid_data *tid_data;
+	struct iwl_mvm_tid_data *tid_data = &mvmsta->tid_data[tid];
 	u16 txq_id;
 	int err;
 
-	tid = array_index_nospec(tid, IWL_MAX_TID_COUNT + 1);
-	tid_data = &mvmsta->tid_data[tid];
 	/*
 	 * If mac80211 is cleaning its state, then say that we finished since
 	 * our state has been cleared anyway.
@@ -2751,12 +2740,9 @@ int iwl_mvm_sta_tx_agg_flush(struct iwl_mvm *mvm, struct ieee80211_vif *vif,
 			    struct ieee80211_sta *sta, u16 tid)
 {
 	struct iwl_mvm_sta *mvmsta = iwl_mvm_sta_from_mac80211(sta);
-	struct iwl_mvm_tid_data *tid_data;
+	struct iwl_mvm_tid_data *tid_data = &mvmsta->tid_data[tid];
 	u16 txq_id;
 	enum iwl_mvm_agg_state old_state;
-
-	tid = array_index_nospec(tid, IWL_MAX_TID_COUNT + 1);
-	tid_data = &mvmsta->tid_data[tid];
 
 	/*
 	 * First set the agg state to OFF to avoid calling

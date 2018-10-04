@@ -55,10 +55,9 @@ struct crash_elf_data {
 	struct kimage *image;
 	/*
 	 * Total number of ram ranges we have after various adjustments for
-	 * GART, crash reserved region etc.
+	 * crash reserved region, etc.
 	 */
 	unsigned int max_nr_ranges;
-	unsigned long gart_start, gart_end;
 
 	/* Pointer to elf header */
 	void *ehdr;
@@ -213,25 +212,13 @@ void native_machine_crash_shutdown(struct pt_regs *regs)
 }
 
 #ifdef CONFIG_KEXEC_FILE
-static int get_nr_ram_ranges_callback(u64 start, u64 end, void *arg)
+static int get_nr_ram_ranges_callback(struct resource *res, void *arg)
 {
 	unsigned int *nr_ranges = arg;
 
 	(*nr_ranges)++;
 	return 0;
 }
-
-static int get_gart_ranges_callback(u64 start, u64 end, void *arg)
-{
-	struct crash_elf_data *ced = arg;
-
-	ced->gart_start = start;
-	ced->gart_end = end;
-
-	/* Not expecting more than 1 gart aperture */
-	return 1;
-}
-
 
 /* Gather all the required information to prepare elf headers for ram regions */
 static void fill_up_crash_elf_data(struct crash_elf_data *ced,
@@ -245,22 +232,6 @@ static void fill_up_crash_elf_data(struct crash_elf_data *ced,
 				get_nr_ram_ranges_callback);
 
 	ced->max_nr_ranges = nr_ranges;
-
-	/*
-	 * We don't create ELF headers for GART aperture as an attempt
-	 * to dump this memory in second kernel leads to hang/crash.
-	 * If gart aperture is present, one needs to exclude that region
-	 * and that could lead to need of extra phdr.
-	 */
-	walk_iomem_res("GART", IORESOURCE_MEM, 0, -1,
-				ced, get_gart_ranges_callback);
-
-	/*
-	 * If we have gart region, excluding that could potentially split
-	 * a memory range, resulting in extra header. Account for  that.
-	 */
-	if (ced->gart_end)
-		ced->max_nr_ranges++;
 
 	/* Exclusion of crash region could split memory ranges */
 	ced->max_nr_ranges++;
@@ -368,17 +339,10 @@ static int elf_header_exclude_ranges(struct crash_elf_data *ced,
 	if (ret)
 		return ret;
 
-	/* Exclude GART region */
-	if (ced->gart_end) {
-		ret = exclude_mem_range(cmem, ced->gart_start, ced->gart_end);
-		if (ret)
-			return ret;
-	}
-
 	return ret;
 }
 
-static int prepare_elf64_ram_headers_callback(u64 start, u64 end, void *arg)
+static int prepare_elf64_ram_headers_callback(struct resource *res, void *arg)
 {
 	struct crash_elf_data *ced = arg;
 	Elf64_Ehdr *ehdr;
@@ -391,7 +355,7 @@ static int prepare_elf64_ram_headers_callback(u64 start, u64 end, void *arg)
 	ehdr = ced->ehdr;
 
 	/* Exclude unwanted mem ranges */
-	ret = elf_header_exclude_ranges(ced, start, end);
+	ret = elf_header_exclude_ranges(ced, res->start, res->end);
 	if (ret)
 		return ret;
 
@@ -554,14 +518,14 @@ static int add_e820_entry(struct boot_params *params, struct e820entry *entry)
 	return 0;
 }
 
-static int memmap_entry_callback(u64 start, u64 end, void *arg)
+static int memmap_entry_callback(struct resource *res, void *arg)
 {
 	struct crash_memmap_data *cmd = arg;
 	struct boot_params *params = cmd->params;
 	struct e820entry ei;
 
-	ei.addr = start;
-	ei.size = end - start + 1;
+	ei.addr = res->start;
+	ei.size = resource_size(res);
 	ei.type = cmd->type;
 	add_e820_entry(params, &ei);
 
@@ -655,12 +619,12 @@ out:
 	return ret;
 }
 
-static int determine_backup_region(u64 start, u64 end, void *arg)
+static int determine_backup_region(struct resource *res, void *arg)
 {
 	struct kimage *image = arg;
 
-	image->arch.backup_src_start = start;
-	image->arch.backup_src_sz = end - start + 1;
+	image->arch.backup_src_start = res->start;
+	image->arch.backup_src_sz = resource_size(res);
 
 	/* Expecting only one range for backup region */
 	return 1;

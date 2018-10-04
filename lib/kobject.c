@@ -568,6 +568,7 @@ void kobject_del(struct kobject *kobj)
 	kobject_put(kobj->parent);
 	kobj->parent = NULL;
 }
+EXPORT_SYMBOL(kobject_del);
 
 /**
  * kobject_get - increment refcount for object.
@@ -584,13 +585,17 @@ struct kobject *kobject_get(struct kobject *kobj)
 	}
 	return kobj;
 }
+EXPORT_SYMBOL(kobject_get);
 
-static struct kobject * __must_check kobject_get_unless_zero(struct kobject *kobj)
+struct kobject * __must_check kobject_get_unless_zero(struct kobject *kobj)
 {
+	if (!kobj)
+		return NULL;
 	if (!kref_get_unless_zero(&kobj->kref))
 		kobj = NULL;
 	return kobj;
 }
+EXPORT_SYMBOL(kobject_get_unless_zero);
 
 /*
  * kobject_cleanup - free kobject resources.
@@ -657,6 +662,7 @@ void kobject_put(struct kobject *kobj)
 		kref_put(&kobj->kref, kobject_release);
 	}
 }
+EXPORT_SYMBOL(kobject_put);
 
 static void dynamic_kobj_release(struct kobject *kobj)
 {
@@ -785,6 +791,7 @@ int kset_register(struct kset *k)
 	kobject_uevent(&k->kobj, KOBJ_ADD);
 	return 0;
 }
+EXPORT_SYMBOL(kset_register);
 
 /**
  * kset_unregister - remove a kset.
@@ -797,6 +804,7 @@ void kset_unregister(struct kset *k)
 	kobject_del(&k->kobj);
 	kobject_put(&k->kobj);
 }
+EXPORT_SYMBOL(kset_unregister);
 
 /**
  * kset_find_obj - search for object in kset.
@@ -998,6 +1006,7 @@ void *kobj_ns_grab_current(enum kobj_ns_type type)
 
 	return ns;
 }
+EXPORT_SYMBOL_GPL(kobj_ns_grab_current);
 
 const void *kobj_ns_netlink(enum kobj_ns_type type, struct sock *sk)
 {
@@ -1033,10 +1042,4 @@ void kobj_ns_drop(enum kobj_ns_type type, void *ns)
 		kobj_ns_ops_tbl[type]->drop_ns(ns);
 	spin_unlock(&kobj_ns_type_lock);
 }
-
-EXPORT_SYMBOL(kobject_get);
-EXPORT_SYMBOL(kobject_put);
-EXPORT_SYMBOL(kobject_del);
-
-EXPORT_SYMBOL(kset_register);
-EXPORT_SYMBOL(kset_unregister);
+EXPORT_SYMBOL_GPL(kobj_ns_drop);

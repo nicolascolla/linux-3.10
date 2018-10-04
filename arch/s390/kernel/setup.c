@@ -213,6 +213,8 @@ static void __init conmode_default(void)
 		SET_CONSOLE_SCLP;
 #endif
 	}
+	if (IS_ENABLED(CONFIG_VT) && IS_ENABLED(CONFIG_DUMMY_CONSOLE))
+		conswitchp = &dummy_con;
 }
 
 #ifdef CONFIG_ZFCPDUMP
@@ -401,17 +403,17 @@ static void __init setup_lowcore(void)
 
 static struct resource code_resource = {
 	.name  = "Kernel code",
-	.flags = IORESOURCE_BUSY | IORESOURCE_MEM,
+	.flags = IORESOURCE_BUSY | IORESOURCE_SYSTEM_RAM,
 };
 
 static struct resource data_resource = {
 	.name = "Kernel data",
-	.flags = IORESOURCE_BUSY | IORESOURCE_MEM,
+	.flags = IORESOURCE_BUSY | IORESOURCE_SYSTEM_RAM,
 };
 
 static struct resource bss_resource = {
 	.name = "Kernel bss",
-	.flags = IORESOURCE_BUSY | IORESOURCE_MEM,
+	.flags = IORESOURCE_BUSY | IORESOURCE_SYSTEM_RAM,
 };
 
 static struct resource __initdata *standard_resources[] = {
@@ -440,6 +442,7 @@ static void __init setup_resources(void)
 		switch (memory_chunk[i].type) {
 		case CHUNK_READ_WRITE:
 			res->name = "System RAM";
+			res->flags |= IORESOURCE_SYSRAM;
 			break;
 		case CHUNK_READ_ONLY:
 			res->name = "System ROM";
@@ -992,7 +995,12 @@ static void __init setup_hwcaps(void)
 		strcpy(elf_platform, "zEC12");
 		break;
 	case 0x2964:
+	case 0x2965:
 		strcpy(elf_platform, "z13");
+		break;
+	case 0x3906:
+	case 0x3907:
+		strcpy(elf_platform, "z14");
 		break;
 	}
 

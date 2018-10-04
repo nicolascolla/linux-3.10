@@ -171,7 +171,7 @@ struct t4_cqe {
 			__be32 msn;
 		} rcqe;
 		struct {
-			u32 stag;
+			__be32 stag;
 			u16 nada2;
 			u16 cidx;
 		} scqe;
@@ -277,7 +277,7 @@ struct t4_swsqe {
 	int			signaled;
 	u16			idx;
 	int                     flushed;
-	struct timespec         host_ts;
+	ktime_t			host_time;
 	u64                     sge_ts;
 };
 
@@ -318,7 +318,7 @@ struct t4_sq {
 
 struct t4_swrqe {
 	u64 wr_id;
-	struct timespec host_ts;
+	ktime_t	host_time;
 	u64 sge_ts;
 };
 

@@ -33,7 +33,6 @@
 #include <linux/swap.h>
 #include <linux/aio.h>
 #include <linux/syscalls.h>
-#include <linux/nospec.h>
 #include <uapi/linux/memfd.h>
 
 static struct vfsmount *shm_mnt;
@@ -928,13 +927,13 @@ static int shmem_writepage(struct page *page, struct writeback_control *wbc)
 		list_add_tail(&info->swaplist, &shmem_swaplist);
 
 	if (add_to_swap_cache(page, swap, GFP_ATOMIC) == 0) {
+		spin_lock(&info->lock);
+		shmem_recalc_inode(inode);
+		info->swapped++;
+		spin_unlock(&info->lock);
+
 		swap_shmem_alloc(swap);
 		shmem_delete_from_page_cache(page, swp_to_radix_entry(swap));
-
-		spin_lock(&info->lock);
-		info->swapped++;
-		shmem_recalc_inode(inode);
-		spin_unlock(&info->lock);
 
 		mutex_unlock(&shmem_swaplist_mutex);
 		BUG_ON(page_mapped(page));
@@ -1163,7 +1162,7 @@ repeat:
 	if (sgp != SGP_WRITE && sgp != SGP_FALLOC &&
 	    ((loff_t)index << PAGE_CACHE_SHIFT) >= i_size_read(inode)) {
 		error = -EINVAL;
-		goto failed;
+		goto unlock;
 	}
 
 	/* fallocated page? */
@@ -1316,11 +1315,15 @@ clear:
 	/* Perhaps the file has been truncated since we checked */
 	if (sgp != SGP_WRITE && sgp != SGP_FALLOC &&
 	    ((loff_t)index << PAGE_CACHE_SHIFT) >= i_size_read(inode)) {
+		if (alloced) {
+			ClearPageDirty(page);
+			delete_from_page_cache(page);
+			spin_lock(&info->lock);
+			shmem_recalc_inode(inode);
+			spin_unlock(&info->lock);
+		}
 		error = -EINVAL;
-		if (alloced)
-			goto trunc;
-		else
-			goto failed;
+		goto unlock;
 	}
 	*pagep = page;
 	return 0;
@@ -1328,19 +1331,10 @@ clear:
 	/*
 	 * Error recovery.
 	 */
-trunc:
-	info = SHMEM_I(inode);
-	ClearPageDirty(page);
-	delete_from_page_cache(page);
-	spin_lock(&info->lock);
-	info->alloced--;
-	inode->i_blocks -= BLOCKS_PER_PAGE;
-	spin_unlock(&info->lock);
 decused:
 	shmem_inode_unacct_blocks(inode, 1);
 failed:
-	if (swap.val && error != -EINVAL &&
-	    !shmem_confirm_swap(mapping, index, swap))
+	if (swap.val && !shmem_confirm_swap(mapping, index, swap))
 		error = -EEXIST;
 unlock:
 	if (page) {
@@ -3208,7 +3202,6 @@ SYSCALL_DEFINE2(memfd_create,
 		return -EFAULT;
 	if (len > MFD_NAME_MAX_LEN + 1)
 		return -EINVAL;
-	len = array_index_nospec(len, MFD_NAME_MAX_LEN + 2);
 
 	name = kmalloc(len + MFD_NAME_PREFIX_LEN, GFP_TEMPORARY);
 	if (!name)
@@ -3289,13 +3282,15 @@ int shmem_fill_super(struct super_block *sb, void *data, int silent)
 	 * tmpfs instance, limiting inodes to one per page of lowmem;
 	 * but the internal instance is left unlimited.
 	 */
-	if (!(sb->s_flags & MS_NOUSER)) {
+	if (!(sb->s_flags & MS_KERNMOUNT)) {
 		sbinfo->max_blocks = shmem_default_max_blocks();
 		sbinfo->max_inodes = shmem_default_max_inodes();
 		if (shmem_parse_options(data, sbinfo, false)) {
 			err = -EINVAL;
 			goto failed;
 		}
+	} else {
+		sb->s_flags |= MS_NOUSER;
 	}
 	sb->s_export_op = &shmem_export_ops;
 	sb->s_flags |= MS_NOSEC;
@@ -3515,8 +3510,7 @@ int __init shmem_init(void)
 		goto out2;
 	}
 
-	shm_mnt = vfs_kern_mount(&shmem_fs_type, MS_NOUSER,
-				 shmem_fs_type.name, NULL);
+	shm_mnt = kern_mount(&shmem_fs_type);
 	if (IS_ERR(shm_mnt)) {
 		error = PTR_ERR(shm_mnt);
 		printk(KERN_ERR "Could not kern_mount tmpfs\n");

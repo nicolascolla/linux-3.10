@@ -43,6 +43,7 @@ struct record_opts {
 	bool	     no_samples;
 	bool	     raw_samples;
 	bool	     sample_address;
+	bool	     sample_phys_addr;
 	bool	     sample_weight;
 	bool	     sample_time;
 	bool	     sample_time_set;
@@ -63,6 +64,7 @@ struct record_opts {
 	unsigned int user_freq;
 	u64          branch_stack;
 	u64	     sample_intr_regs;
+	u64	     sample_user_regs;
 	u64	     default_interval;
 	u64	     user_interval;
 	size_t	     auxtrace_snapshot_size;

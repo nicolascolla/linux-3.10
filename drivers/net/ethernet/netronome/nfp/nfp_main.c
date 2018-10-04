@@ -346,6 +346,32 @@ exit_release_fw:
 	return err < 0 ? err : 1;
 }
 
+static void
+nfp_nsp_init_ports(struct pci_dev *pdev, struct nfp_pf *pf,
+		   struct nfp_nsp *nsp)
+{
+	bool needs_reinit = false;
+	int i;
+
+	pf->eth_tbl = __nfp_eth_read_ports(pf->cpp, nsp);
+	if (!pf->eth_tbl)
+		return;
+
+	if (!nfp_nsp_has_mac_reinit(nsp))
+		return;
+
+	for (i = 0; i < pf->eth_tbl->count; i++)
+		needs_reinit |= pf->eth_tbl->ports[i].override_changed;
+	if (!needs_reinit)
+		return;
+
+	kfree(pf->eth_tbl);
+	if (nfp_nsp_mac_reinit(nsp))
+		dev_warn(&pdev->dev, "MAC reinit failed\n");
+
+	pf->eth_tbl = __nfp_eth_read_ports(pf->cpp, nsp);
+}
+
 static int nfp_nsp_init(struct pci_dev *pdev, struct nfp_pf *pf)
 {
 	struct nfp_nsp_identify *nspi;
@@ -367,7 +393,7 @@ static int nfp_nsp_init(struct pci_dev *pdev, struct nfp_pf *pf)
 	if (err < 0)
 		goto exit_close_nsp;
 
-	pf->eth_tbl = __nfp_eth_read_ports(pf->cpp, nsp);
+	nfp_nsp_init_ports(pdev, pf, nsp);
 
 	nspi = __nfp_nsp_identify(nsp);
 	if (nspi) {
@@ -474,13 +500,9 @@ static int nfp_pci_probe(struct pci_dev *pdev,
 	if (err)
 		goto err_hwinfo_free;
 
-	err = devlink_register(devlink, &pdev->dev);
-	if (err)
-		goto err_hwinfo_free;
-
 	err = nfp_nsp_init(pdev, pf);
 	if (err)
-		goto err_devlink_unreg;
+		goto err_hwinfo_free;
 
 	pf->mip = nfp_mip_open(pf->cpp);
 	pf->rtbl = __nfp_rtsym_table_read(pf->cpp, pf->mip);
@@ -497,6 +519,7 @@ static int nfp_pci_probe(struct pci_dev *pdev,
 		dev_err(&pdev->dev,
 			"Error: %d VFs already enabled, but loaded FW can only support %d\n",
 			pf->num_vfs, pf->limit_vfs);
+		err = -EINVAL;
 		goto err_fw_unload;
 	}
 
@@ -515,8 +538,6 @@ err_fw_unload:
 		nfp_fw_unload(pf);
 	kfree(pf->eth_tbl);
 	vfree(pf->dumpspec);
-err_devlink_unreg:
-	devlink_unregister(devlink);
 err_hwinfo_free:
 	kfree(pf->hwinfo);
 	nfp_cpp_free(pf->cpp);
@@ -537,16 +558,11 @@ err_pci_disable:
 static void nfp_pci_remove(struct pci_dev *pdev)
 {
 	struct nfp_pf *pf = pci_get_drvdata(pdev);
-	struct devlink *devlink;
-
-	devlink = priv_to_devlink(pf);
-
-	nfp_net_pci_remove(pf);
 
 	nfp_pcie_sriov_disable(pdev);
 	pci_sriov_set_totalvfs(pf->pdev, 0);
 
-	devlink_unregister(devlink);
+	nfp_net_pci_remove(pf);
 
 	vfree(pf->dumpspec);
 	kfree(pf->rtbl);
@@ -561,7 +577,7 @@ static void nfp_pci_remove(struct pci_dev *pdev)
 
 	kfree(pf->eth_tbl);
 	mutex_destroy(&pf->lock);
-	devlink_free(devlink);
+	devlink_free(priv_to_devlink(pf));
 	pci_release_regions(pdev);
 	pci_disable_device(pdev);
 }
@@ -657,3 +673,4 @@ MODULE_FIRMWARE("netronome/nic_AMDA0099-0001_2x25.nffw");
 MODULE_AUTHOR("Netronome Systems <oss-drivers@netronome.com>");
 MODULE_LICENSE("GPL");
 MODULE_DESCRIPTION("The Netronome Flow Processor (NFP) driver.");
+MODULE_VERSION(UTS_RELEASE);

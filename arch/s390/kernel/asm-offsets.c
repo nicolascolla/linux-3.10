@@ -17,8 +17,8 @@
  * Make sure that the compiler is new enough. We want a compiler that
  * is known to work with the "Q" assembler constraint.
  */
-#if __GNUC__ < 3 || (__GNUC__ == 3 && __GNUC_MINOR__ < 3)
-#error Your compiler is too old; please use version 3.3.3 or newer
+#if __GNUC__ < 4 || (__GNUC__ == 4 && __GNUC_MINOR__ < 3)
+#error Your compiler is too old; please use version 4.3 or newer
 #endif
 
 int main(void)
@@ -146,6 +146,7 @@ int main(void)
 	DEFINE(__LC_MACHINE_FLAGS, offsetof(struct _lowcore, machine_flags));
 	DEFINE(__LC_FTRACE_FUNC, offsetof(struct _lowcore, ftrace_func));
 	DEFINE(__LC_IRB, offsetof(struct _lowcore, irb));
+	DEFINE(__LC_BR_R1, offsetof(struct _lowcore, br_r1_trampoline));
 	DEFINE(__LC_DUMP_REIPL, offsetof(struct _lowcore, ipib));
 	BLANK();
 	DEFINE(__LC_CPU_TIMER_SAVE_AREA, offsetof(struct _lowcore, cpu_timer_save_area));

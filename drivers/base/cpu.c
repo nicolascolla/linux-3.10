@@ -15,7 +15,6 @@
 #include <linux/percpu.h>
 #include <linux/acpi.h>
 #include <linux/tick.h>
-#include <linux/nospec.h>
 
 #include "base.h"
 
@@ -332,10 +331,9 @@ int register_cpu(struct cpu *cpu, int num)
 
 struct device *get_cpu_device(unsigned cpu)
 {
-	if (cpu < nr_cpu_ids && cpu_possible(cpu)) {
-		cpu = array_index_nospec(cpu, nr_cpu_ids);
+	if (cpu < nr_cpu_ids && cpu_possible(cpu))
 		return per_cpu(cpu_sys_devices, cpu);
-	} else
+	else
 		return NULL;
 }
 EXPORT_SYMBOL_GPL(get_cpu_device);

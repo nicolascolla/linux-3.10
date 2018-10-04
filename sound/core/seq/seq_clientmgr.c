@@ -27,7 +27,6 @@
 #include <sound/core.h>
 #include <sound/minors.h>
 #include <linux/kmod.h>
-#include <linux/nospec.h>
 
 #include <sound/seq_kernel.h>
 #include "seq_clientmgr.h"
@@ -126,8 +125,6 @@ struct snd_seq_client *snd_seq_client_use_ptr(int clientid)
 			   clientid);
 		return NULL;
 	}
-	clientid = array_index_nospec(clientid, SNDRV_SEQ_MAX_CLIENTS);
-
 	spin_lock_irqsave(&clients_lock, flags);
 	client = clientptr(clientid);
 	if (client)
@@ -143,9 +140,7 @@ struct snd_seq_client *snd_seq_client_use_ptr(int clientid)
 		static char card_requested[SNDRV_CARDS];
 		if (clientid < SNDRV_SEQ_GLOBAL_CLIENTS) {
 			int idx;
-
-			clientid = array_index_nospec(clientid,
-						      SNDRV_SEQ_GLOBAL_CLIENTS);
+			
 			if (!client_requested[clientid]) {
 				client_requested[clientid] = 1;
 				for (idx = 0; idx < 15; idx++) {
@@ -260,12 +255,12 @@ static int seq_free_client1(struct snd_seq_client *client)
 
 	if (!client)
 		return 0;
-	snd_seq_delete_all_ports(client);
-	snd_seq_queue_client_leave(client->number);
 	spin_lock_irqsave(&clients_lock, flags);
 	clienttablock[client->number] = 1;
 	clienttab[client->number] = NULL;
 	spin_unlock_irqrestore(&clients_lock, flags);
+	snd_seq_delete_all_ports(client);
+	snd_seq_queue_client_leave(client->number);
 	snd_use_lock_sync(&client->use_lock);
 	snd_seq_queue_client_termination(client->number);
 	if (client->pool)
@@ -669,7 +664,7 @@ static int deliver_to_subscribers(struct snd_seq_client *client,
 	if (atomic)
 		read_lock(&grp->list_lock);
 	else
-		down_read(&grp->list_mutex);
+		down_read_nested(&grp->list_mutex, hop);
 	list_for_each_entry(subs, &grp->list_head, src_list) {
 		/* both ports ready? */
 		if (atomic_read(&subs->ref_count) != 2)
@@ -808,6 +803,10 @@ static int snd_seq_deliver_event(struct snd_seq_client *client, struct snd_seq_e
 		return -EMLINK;
 	}
 
+	if (snd_seq_ev_is_variable(event) &&
+	    snd_BUG_ON(atomic && (event->data.ext.len & SNDRV_SEQ_EXT_USRPTR)))
+		return -EINVAL;
+
 	if (event->queue == SNDRV_SEQ_ADDRESS_SUBSCRIBERS ||
 	    event->dest.client == SNDRV_SEQ_ADDRESS_SUBSCRIBERS)
 		result = deliver_to_subscribers(client, event, atomic, hop);
@@ -911,7 +910,8 @@ int snd_seq_dispatch_event(struct snd_seq_event_cell *cell, int atomic, int hop)
 static int snd_seq_client_enqueue_event(struct snd_seq_client *client,
 					struct snd_seq_event *event,
 					struct file *file, int blocking,
-					int atomic, int hop)
+					int atomic, int hop,
+					struct mutex *mutexp)
 {
 	struct snd_seq_event_cell *cell;
 	int err;
@@ -949,7 +949,8 @@ static int snd_seq_client_enqueue_event(struct snd_seq_client *client,
 		return -ENXIO; /* queue is not allocated */
 
 	/* allocate an event cell */
-	err = snd_seq_event_dup(client->pool, event, &cell, !blocking || atomic, file);
+	err = snd_seq_event_dup(client->pool, event, &cell, !blocking || atomic,
+				file, mutexp);
 	if (err < 0)
 		return err;
 
@@ -1018,12 +1019,11 @@ static ssize_t snd_seq_write(struct file *file, const char __user *buf,
 		return -ENXIO;
 
 	/* allocate the pool now if the pool is not allocated yet */ 
+	mutex_lock(&client->ioctl_mutex);
 	if (client->pool->size > 0 && !snd_seq_write_pool_allocated(client)) {
-		mutex_lock(&client->ioctl_mutex);
 		err = snd_seq_pool_init(client->pool);
-		mutex_unlock(&client->ioctl_mutex);
 		if (err < 0)
-			return -ENOMEM;
+			goto out;
 	}
 
 	/* only process whole events */
@@ -1074,7 +1074,7 @@ static ssize_t snd_seq_write(struct file *file, const char __user *buf,
 		/* ok, enqueue it */
 		err = snd_seq_client_enqueue_event(client, &event, file,
 						   !(file->f_flags & O_NONBLOCK),
-						   0, 0);
+						   0, 0, &client->ioctl_mutex);
 		if (err < 0)
 			break;
 
@@ -1085,6 +1085,8 @@ static ssize_t snd_seq_write(struct file *file, const char __user *buf,
 		written += len;
 	}
 
+ out:
+	mutex_unlock(&client->ioctl_mutex);
 	return written ? written : err;
 }
 
@@ -1839,9 +1841,11 @@ static int snd_seq_ioctl_set_client_pool(struct snd_seq_client *client,
 	    (! snd_seq_write_pool_allocated(client) ||
 	     info->output_pool != client->pool->size)) {
 		if (snd_seq_write_pool_allocated(client)) {
+			/* is the pool in use? */
+			if (atomic_read(&client->pool->counter))
+				return -EBUSY;
 			/* remove all existing cells */
 			snd_seq_pool_mark_closing(client->pool);
-			snd_seq_queue_client_leave_cells(client->number);
 			snd_seq_pool_done(client->pool);
 		}
 		client->pool->size = info->output_pool;
@@ -2261,7 +2265,8 @@ static int kernel_client_enqueue(int client, struct snd_seq_event *ev,
 	if (! cptr->accept_output)
 		result = -EPERM;
 	else /* send it */
-		result = snd_seq_client_enqueue_event(cptr, ev, file, blocking, atomic, hop);
+		result = snd_seq_client_enqueue_event(cptr, ev, file, blocking,
+						      atomic, hop, NULL);
 
 	snd_seq_client_unlock(cptr);
 	return result;

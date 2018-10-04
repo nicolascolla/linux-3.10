@@ -1,19 +1,28 @@
 #!/bin/sh
 
 HEADERS='
+include/uapi/drm/drm.h
+include/uapi/drm/i915_drm.h
 include/uapi/linux/fcntl.h
+include/uapi/linux/kvm.h
 include/uapi/linux/perf_event.h
+include/uapi/linux/prctl.h
+include/uapi/linux/sched.h
 include/uapi/linux/stat.h
+include/uapi/linux/vhost.h
+include/uapi/sound/asound.h
 include/linux/hash.h
 include/uapi/linux/hw_breakpoint.h
 arch/x86/include/asm/cpufeatures.h
 arch/arm/include/uapi/asm/perf_regs.h
 arch/arm64/include/uapi/asm/perf_regs.h
 arch/powerpc/include/uapi/asm/perf_regs.h
+arch/s390/include/uapi/asm/perf_regs.h
 arch/x86/include/uapi/asm/perf_regs.h
 arch/x86/include/uapi/asm/kvm.h
 arch/x86/include/uapi/asm/kvm_perf.h
 arch/x86/include/uapi/asm/svm.h
+arch/x86/include/uapi/asm/unistd.h
 arch/x86/include/uapi/asm/vmx.h
 arch/powerpc/include/uapi/asm/kvm.h
 arch/s390/include/uapi/asm/kvm.h
@@ -26,12 +35,13 @@ include/asm-generic/bitops/__fls.h
 include/asm-generic/bitops/fls.h
 include/asm-generic/bitops/fls64.h
 include/linux/coresight-pmu.h
+include/uapi/asm-generic/ioctls.h
 include/uapi/asm-generic/mman-common.h
 '
 
 check () {
   file=$1
-  opts=
+  opts="--ignore-blank-lines --ignore-space-change"
 
   shift
   while [ -n "$*" ]; do
@@ -42,9 +52,14 @@ check () {
   cmd="diff $opts ../$file ../../$file > /dev/null"
 
   test -f ../../$file &&
-  eval $cmd || echo "Warning: $file differs from kernel" >&2
+  eval $cmd || echo "Warning: Kernel ABI header at 'tools/$file' differs from latest version at '$file'" >&2
 }
 
+
+# Check if we have the kernel headers (tools/perf/../../include), else
+# we're probably on a detached tarball, so no point in trying to check
+# differences.
+test -d ../../include || exit 0
 
 # simple diff check
 for i in $HEADERS; do
@@ -52,5 +67,5 @@ for i in $HEADERS; do
 done
 
 # diff with extra ignore lines
-check include/uapi/asm-generic/mman.h -B -I "^#include <\(uapi/\)*asm-generic/mman-common.h>"
-check include/uapi/linux/mman.h       -B -I "^#include <\(uapi/\)*asm/mman.h>"
+check include/uapi/asm-generic/mman.h -I "^#include <\(uapi/\)*asm-generic/mman-common.h>"
+check include/uapi/linux/mman.h       -I "^#include <\(uapi/\)*asm/mman.h>"

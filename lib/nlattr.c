@@ -13,7 +13,6 @@
 #include <linux/skbuff.h>
 #include <linux/string.h>
 #include <linux/types.h>
-#include <linux/nospec.h>
 #include <net/netlink.h>
 
 static const u16 nla_attr_minlen[NLA_TYPE_MAX+1] = {
@@ -61,7 +60,6 @@ static int validate_nla(const struct nlattr *nla, int maxtype,
 
 	if (type <= 0 || type > maxtype)
 		return 0;
-	type = array_index_nospec(type, maxtype + 1);
 
 	pt = &policy[type];
 
@@ -222,8 +220,6 @@ int nla_parse(struct nlattr **tb, int maxtype, const struct nlattr *head,
 		u16 type = nla_type(nla);
 
 		if (type > 0 && type <= maxtype) {
-			type = array_index_nospec(type, maxtype + 1);
-
 			if (policy) {
 				err = validate_nla(nla, maxtype, policy);
 				if (err < 0)

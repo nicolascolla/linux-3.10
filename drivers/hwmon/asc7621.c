@@ -26,7 +26,6 @@
 #include <linux/hwmon-sysfs.h>
 #include <linux/err.h>
 #include <linux/mutex.h>
-#include <linux/nospec.h>
 
 /* Addresses to scan */
 static const unsigned short normal_i2c[] = {
@@ -546,7 +545,6 @@ static ssize_t store_pwm_ac(struct device *dev,
 
 	if (reqval > 31)
 		return -EINVAL;
-	reqval = array_index_nospec(reqval, 32);
 
 	reqval = map[reqval];
 	if (reqval == 0xff)

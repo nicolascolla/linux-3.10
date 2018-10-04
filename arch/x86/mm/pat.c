@@ -35,6 +35,7 @@
 
 #ifdef CONFIG_X86_PAT
 int __read_mostly pat_enabled = 1;
+EXPORT_SYMBOL_GPL(pat_enabled);
 
 static inline void pat_disable(const char *reason)
 {
@@ -484,6 +485,25 @@ static enum page_cache_mode lookup_memtype(u64 paddr)
 	spin_unlock(&memtype_lock);
 	return rettype;
 }
+
+/**
+ * pat_pfn_immune_to_uc_mtrr - Check whether the PAT memory type
+ * of @pfn cannot be overridden by UC MTRR memory type.
+ *
+ * Only to be called when PAT is enabled.
+ *
+ * Returns true, if the PAT memory type of @pfn is UC, UC-, or WC.
+ * Returns false in other cases.
+ */
+bool pat_pfn_immune_to_uc_mtrr(unsigned long pfn)
+{
+	enum page_cache_mode cm = lookup_memtype(PFN_PHYS(pfn));
+
+	return cm == _PAGE_CACHE_MODE_UC ||
+	       cm == _PAGE_CACHE_MODE_UC_MINUS ||
+	       cm == _PAGE_CACHE_MODE_WC;
+}
+EXPORT_SYMBOL_GPL(pat_pfn_immune_to_uc_mtrr);
 
 /**
  * io_reserve_memtype - Request a memory type mapping for a region of memory

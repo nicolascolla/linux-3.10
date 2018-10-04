@@ -18,6 +18,34 @@
 
 #include <linux/ftrace_event.h>
 
+#ifndef TRACE_SYSTEM_VAR
+#define TRACE_SYSTEM_VAR TRACE_SYSTEM
+#endif
+
+#define __app__(x, y) str__##x##y
+#define __app(x, y) __app__(x, y)
+
+#define TRACE_SYSTEM_STRING __app(TRACE_SYSTEM_VAR,__trace_system_name)
+
+#define TRACE_MAKE_SYSTEM_STR()				\
+	static const char TRACE_SYSTEM_STRING[] =	\
+		__stringify(TRACE_SYSTEM)
+
+TRACE_MAKE_SYSTEM_STR();
+
+#undef TRACE_DEFINE_ENUM
+#define TRACE_DEFINE_ENUM(a)				\
+	static struct trace_enum_map __used __initdata	\
+	__##TRACE_SYSTEM##_##a =			\
+	{						\
+		.system = TRACE_SYSTEM_STRING,		\
+		.enum_string = #a,			\
+		.enum_value = a				\
+	};						\
+	static struct trace_enum_map __used		\
+	__attribute__((section("_ftrace_enum_map")))	\
+	*TRACE_SYSTEM##_##a = &__##TRACE_SYSTEM##_##a
+
 /*
  * DECLARE_EVENT_CLASS can be used to add a generic function
  * handlers for events. That is, if all events have the same
@@ -98,7 +126,6 @@
 
 #include TRACE_INCLUDE(TRACE_INCLUDE_FILE)
 
-
 /*
  * Stage 2 of the trace events.
  *
@@ -114,6 +141,9 @@
  * to keep the offset of each array from the beginning of the event.
  * The size of an array is also encoded, in the higher 16 bits of <item>.
  */
+
+#undef TRACE_DEFINE_ENUM
+#define TRACE_DEFINE_ENUM(a)
 
 #undef __field
 #define __field(type, item)
@@ -250,7 +280,12 @@
 #endif
 
 #undef __print_hex
-#define __print_hex(buf, buf_len) ftrace_print_hex_seq(p, buf, buf_len)
+#define __print_hex(buf, buf_len)					\
+	ftrace_print_hex_seq(p, buf, buf_len, true)
+
+#undef __print_hex_str
+#define __print_hex_str(buf, buf_len)					\
+	ftrace_print_hex_seq(p, buf, buf_len, false)
 
 #undef __print_array
 #define __print_array(array, count, el_size)				\
@@ -487,7 +522,7 @@ static inline notrace int ftrace_get_offsets_##call(			\
  *	.trace			= ftrace_raw_output_<call>, <-- stage 2
  * };
  *
- * static const char print_fmt_<call>[] = <TP_printk>;
+ * static char print_fmt_<call>[] = <TP_printk>;
  *
  * static struct ftrace_event_class __used event_class_<template> = {
  *	.system			= "<system>",
@@ -503,6 +538,7 @@ static inline notrace int ftrace_get_offsets_##call(			\
  *	.class			= event_class_<template>,
  *	.event			= &ftrace_event_type_<call>,
  *	.print_fmt		= print_fmt_<call>,
+ *	.flags			= TRACE_EVENT_FL_TRACEPOINT,
  * };
  * // its only safe to use pointers when doing linker tricks to
  * // create an array.
@@ -618,6 +654,7 @@ static inline void ftrace_test_probe_##call(void)			\
 #undef __print_flags
 #undef __print_symbolic
 #undef __print_hex
+#undef __print_hex_str
 #undef __get_dynamic_array
 #undef __get_dynamic_array_len
 #undef __get_str
@@ -629,9 +666,9 @@ static inline void ftrace_test_probe_##call(void)			\
 #undef DECLARE_EVENT_CLASS
 #define DECLARE_EVENT_CLASS(call, proto, args, tstruct, assign, print)	\
 _TRACE_PERF_PROTO(call, PARAMS(proto));					\
-static const char print_fmt_##call[] = print;				\
+static char print_fmt_##call[] = print;					\
 static struct ftrace_event_class __used __refdata event_class_##call = { \
-	.system			= __stringify(TRACE_SYSTEM),		\
+	.system			= TRACE_SYSTEM_STRING,			\
 	.define_fields		= ftrace_define_fields_##call,		\
 	.fields			= LIST_HEAD_INIT(event_class_##call.fields),\
 	.raw_init		= trace_event_raw_init,			\
@@ -648,6 +685,7 @@ static struct ftrace_event_call __used event_##call = {			\
 	.class			= &event_class_##template,		\
 	.event.funcs		= &ftrace_event_type_funcs_##template,	\
 	.print_fmt		= print_fmt_##template,			\
+	.flags			= TRACE_EVENT_FL_TRACEPOINT,		\
 };									\
 static struct ftrace_event_call __used					\
 __attribute__((section("_ftrace_events"))) *__event_##call = &event_##call
@@ -655,19 +693,21 @@ __attribute__((section("_ftrace_events"))) *__event_##call = &event_##call
 #undef DEFINE_EVENT_PRINT
 #define DEFINE_EVENT_PRINT(template, call, proto, args, print)		\
 									\
-static const char print_fmt_##call[] = print;				\
+static char print_fmt_##call[] = print;					\
 									\
 static struct ftrace_event_call __used event_##call = {			\
 	.name			= #call,				\
 	.class			= &event_class_##template,		\
 	.event.funcs		= &ftrace_event_type_funcs_##call,	\
 	.print_fmt		= print_fmt_##call,			\
+	.flags			= TRACE_EVENT_FL_TRACEPOINT,		\
 };									\
 static struct ftrace_event_call __used					\
 __attribute__((section("_ftrace_events"))) *__event_##call = &event_##call
 
 #include TRACE_INCLUDE(TRACE_INCLUDE_FILE)
 
+#undef TRACE_SYSTEM_VAR
 
 #ifdef CONFIG_PERF_EVENTS
 
@@ -684,9 +724,6 @@ __attribute__((section("_ftrace_events"))) *__event_##call = &event_##call
 
 #undef __get_str
 #define __get_str(field) (char *)__get_dynamic_array(field)
-
-#undef __perf_addr
-#define __perf_addr(a) __addr = (a)
 
 #undef __perf_count
 #define __perf_count(c) __count = (c)
@@ -706,7 +743,7 @@ perf_trace_##call(void *__data, proto)					\
 	struct ftrace_data_offsets_##call __maybe_unused __data_offsets;\
 	struct ftrace_raw_##call *entry;				\
 	struct pt_regs *__regs;						\
-	u64 __addr = 0, __count = 1;					\
+	u64 __count = 1;						\
 	struct task_struct *__task = NULL;				\
 	struct hlist_head *head;					\
 	int __entry_size;						\
@@ -714,6 +751,13 @@ perf_trace_##call(void *__data, proto)					\
 	int rctx;							\
 									\
 	__data_size = ftrace_get_offsets_##call(&__data_offsets, args); \
+									\
+	head = this_cpu_ptr(event_call->perf_events);			\
+	if (!bpf_prog_array_valid(event_call) &&			\
+	    __builtin_constant_p(!__task) && !__task &&			\
+	    hlist_empty(head))						\
+		return;							\
+									\
 	__entry_size = ALIGN(__data_size + sizeof(*entry) + sizeof(u32),\
 			     sizeof(u64));				\
 	__entry_size -= sizeof(u32);					\
@@ -733,9 +777,9 @@ perf_trace_##call(void *__data, proto)					\
 									\
 	{ assign; }							\
 									\
-	head = this_cpu_ptr(event_call->perf_events);			\
-	perf_trace_buf_submit(entry, __entry_size, rctx, __addr,	\
-		__count, __regs, head, __task);				\
+	perf_trace_run_bpf_submit(entry, __entry_size, rctx, 0,		\
+				  event_call, __count, __regs,		\
+				  head, __task);			\
 }
 
 /*

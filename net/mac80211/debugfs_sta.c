@@ -286,7 +286,6 @@ static ssize_t sta_agg_status_write(struct file *file, const char __user *userbu
 	ret = kstrtoul(buf, 0, &tid);
 	if (ret || tid >= IEEE80211_NUM_TIDS)
 		return -EINVAL;
-	tid = array_index_nospec(tid, IEEE80211_NUM_TIDS);
 
 	if (tx) {
 		if (start)

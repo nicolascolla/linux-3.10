@@ -152,6 +152,7 @@ bool amd_iommu_dump;
 bool amd_iommu_irq_remap __read_mostly;
 
 int amd_iommu_guest_ir = AMD_IOMMU_GUEST_IR_VAPIC;
+static int amd_iommu_xt_mode = IRQ_REMAP_X2APIC_MODE;
 
 static bool amd_iommu_detected;
 static bool __initdata amd_iommu_disabled;
@@ -281,9 +282,9 @@ static void clear_translation_pre_enabled(struct amd_iommu *iommu)
 
 static void init_translation_status(struct amd_iommu *iommu)
 {
-	u32 ctrl;
+	u64 ctrl;
 
-	ctrl = readl(iommu->mmio_base + MMIO_CONTROL_OFFSET);
+	ctrl = readq(iommu->mmio_base + MMIO_CONTROL_OFFSET);
 	if (ctrl & (1<<CONTROL_IOMMU_EN))
 		iommu->flags |= AMD_IOMMU_FLAG_TRANS_PRE_ENABLED;
 }
@@ -382,30 +383,30 @@ static void iommu_set_device_table(struct amd_iommu *iommu)
 /* Generic functions to enable/disable certain features of the IOMMU. */
 static void iommu_feature_enable(struct amd_iommu *iommu, u8 bit)
 {
-	u32 ctrl;
+	u64 ctrl;
 
-	ctrl = readl(iommu->mmio_base + MMIO_CONTROL_OFFSET);
-	ctrl |= (1 << bit);
-	writel(ctrl, iommu->mmio_base + MMIO_CONTROL_OFFSET);
+	ctrl = readq(iommu->mmio_base +  MMIO_CONTROL_OFFSET);
+	ctrl |= (1ULL << bit);
+	writeq(ctrl, iommu->mmio_base +  MMIO_CONTROL_OFFSET);
 }
 
 static void iommu_feature_disable(struct amd_iommu *iommu, u8 bit)
 {
-	u32 ctrl;
+	u64 ctrl;
 
-	ctrl = readl(iommu->mmio_base + MMIO_CONTROL_OFFSET);
-	ctrl &= ~(1 << bit);
-	writel(ctrl, iommu->mmio_base + MMIO_CONTROL_OFFSET);
+	ctrl = readq(iommu->mmio_base + MMIO_CONTROL_OFFSET);
+	ctrl &= ~(1ULL << bit);
+	writeq(ctrl, iommu->mmio_base + MMIO_CONTROL_OFFSET);
 }
 
 static void iommu_set_inv_tlb_timeout(struct amd_iommu *iommu, int timeout)
 {
-	u32 ctrl;
+	u64 ctrl;
 
-	ctrl = readl(iommu->mmio_base + MMIO_CONTROL_OFFSET);
+	ctrl = readq(iommu->mmio_base + MMIO_CONTROL_OFFSET);
 	ctrl &= ~CTRL_INV_TO_MASK;
 	ctrl |= (timeout << CONTROL_INV_TIMEOUT) & CTRL_INV_TO_MASK;
-	writel(ctrl, iommu->mmio_base + MMIO_CONTROL_OFFSET);
+	writeq(ctrl, iommu->mmio_base + MMIO_CONTROL_OFFSET);
 }
 
 /* Function to enable the hardware */
@@ -821,6 +822,19 @@ static int iommu_init_ga(struct amd_iommu *iommu)
 #endif /* CONFIG_IRQ_REMAP */
 
 	return ret;
+}
+
+static void iommu_enable_xt(struct amd_iommu *iommu)
+{
+#ifdef CONFIG_IRQ_REMAP
+	/*
+	 * XT mode (32-bit APIC destination ID) requires
+	 * GA mode (128-bit IRTE support) as a prerequisite.
+	 */
+	if (AMD_IOMMU_GUEST_IR_GA(amd_iommu_guest_ir) &&
+	    amd_iommu_xt_mode == IRQ_REMAP_X2APIC_MODE)
+		iommu_feature_enable(iommu, CONTROL_XT_EN);
+#endif /* CONFIG_IRQ_REMAP */
 }
 
 static void iommu_enable_gt(struct amd_iommu *iommu)
@@ -1503,6 +1517,8 @@ static int __init init_iommu_one(struct amd_iommu *iommu, struct ivhd_header *h)
 			iommu->mmio_phys_end = MMIO_CNTR_CONF_OFFSET;
 		if (((h->efr_attr & (0x1 << IOMMU_FEAT_GASUP_SHIFT)) == 0))
 			amd_iommu_guest_ir = AMD_IOMMU_GUEST_IR_LEGACY;
+		if (((h->efr_attr & (0x1 << IOMMU_FEAT_XTSUP_SHIFT)) == 0))
+			amd_iommu_xt_mode = IRQ_REMAP_XAPIC_MODE;
 		break;
 	case 0x11:
 	case 0x40:
@@ -1512,6 +1528,8 @@ static int __init init_iommu_one(struct amd_iommu *iommu, struct ivhd_header *h)
 			iommu->mmio_phys_end = MMIO_CNTR_CONF_OFFSET;
 		if (((h->efr_reg & (0x1 << IOMMU_EFR_GASUP_SHIFT)) == 0))
 			amd_iommu_guest_ir = AMD_IOMMU_GUEST_IR_LEGACY;
+		if (((h->efr_reg & (0x1 << IOMMU_EFR_XTSUP_SHIFT)) == 0))
+			amd_iommu_xt_mode = IRQ_REMAP_XAPIC_MODE;
 		break;
 	default:
 		return -EINVAL;
@@ -1821,6 +1839,8 @@ static void print_iommu_info(void)
 		pr_info("AMD-Vi: Interrupt remapping enabled\n");
 		if (AMD_IOMMU_GUEST_IR_VAPIC(amd_iommu_guest_ir))
 			pr_info("AMD-Vi: virtual APIC enabled\n");
+		if (amd_iommu_xt_mode == IRQ_REMAP_X2APIC_MODE)
+			pr_info("AMD-Vi: X2APIC enabled\n");
 	}
 }
 
@@ -2165,6 +2185,7 @@ static void early_enable_iommu(struct amd_iommu *iommu)
 	iommu_enable_event_buffer(iommu);
 	iommu_set_exclusion_range(iommu);
 	iommu_enable_ga(iommu);
+	iommu_enable_xt(iommu);
 	iommu_enable(iommu);
 	iommu_flush_all_caches(iommu);
 }
@@ -2209,6 +2230,7 @@ static void early_enable_iommus(void)
 			iommu_enable_command_buffer(iommu);
 			iommu_enable_event_buffer(iommu);
 			iommu_enable_ga(iommu);
+			iommu_enable_xt(iommu);
 			iommu_set_device_table(iommu);
 			iommu_flush_all_caches(iommu);
 		}
@@ -2428,7 +2450,7 @@ static int __init early_amd_iommu_init(void)
 	 */
 	ret = check_ivrs_checksum(ivrs_base);
 	if (ret)
-		return ret;
+		goto out;
 
 	amd_iommu_target_ivhd_type = get_highest_supported_ivhd_type(ivrs_base);
 	DUMP_printk("Using IVHD type %#x\n", amd_iommu_target_ivhd_type);
@@ -2690,8 +2712,7 @@ int __init amd_iommu_enable(void)
 		return ret;
 
 	irq_remapping_enabled = 1;
-
-	return 0;
+	return amd_iommu_xt_mode;
 }
 
 void amd_iommu_disable(void)
@@ -2991,22 +3012,25 @@ static int iommu_pc_get_set_reg_val(struct amd_iommu *iommu,
 	if (WARN_ON((fxn > 0x28) || (fxn & 7)))
 		return -ENODEV;
 
-	offset = (u32)(((0x40|bank) << 12) | (cntr << 8) | fxn);
+	offset = (u32)(((0x40 | bank) << 12) | (cntr << 8) | fxn);
 
 	/* Limit the offset to the hw defined mmio region aperture */
-	max_offset_lim = (u32)(((0x40|iommu->max_banks) << 12) |
+	max_offset_lim = (u32)(((0x40 | iommu->max_banks) << 12) |
 				(iommu->max_counters << 8) | 0x28);
 	if ((offset < MMIO_CNTR_REG_OFFSET) ||
 	    (offset > max_offset_lim))
 		return -EINVAL;
 
 	if (is_write) {
-		writel((u32)*value, iommu->mmio_base + offset);
-		writel((*value >> 32), iommu->mmio_base + offset + 4);
+		u64 val = *value & GENMASK_ULL(47, 0);
+
+		writel((u32)val, iommu->mmio_base + offset);
+		writel((val >> 32), iommu->mmio_base + offset + 4);
 	} else {
 		*value = readl(iommu->mmio_base + offset + 4);
 		*value <<= 32;
-		*value = readl(iommu->mmio_base + offset);
+		*value |= readl(iommu->mmio_base + offset);
+		*value &= GENMASK_ULL(47, 0);
 	}
 
 	return 0;

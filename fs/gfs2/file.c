@@ -127,45 +127,22 @@ static int gfs2_readdir(struct file *file, void *dirent, filldir_t filldir)
 }
 
 /**
- * fsflags_cvt
- * @table: A table of 32 u32 flags
- * @val: a 32 bit value to convert
+ * fsflag_gfs2flag
  *
- * This function can be used to convert between fsflags values and
- * GFS2's own flags values.
- *
- * Returns: the converted flags
+ * The FS_JOURNAL_DATA_FL flag maps to GFS2_DIF_INHERIT_JDATA for directories,
+ * and to GFS2_DIF_JDATA for non-directories.
  */
-static u32 fsflags_cvt(const u32 *table, u32 val)
-{
-	u32 res = 0;
-	while(val) {
-		if (val & 1)
-			res |= *table;
-		table++;
-		val >>= 1;
-	}
-	return res;
-}
-
-static const u32 fsflags_to_gfs2[32] = {
-	[3] = GFS2_DIF_SYNC,
-	[4] = GFS2_DIF_IMMUTABLE,
-	[5] = GFS2_DIF_APPENDONLY,
-	[7] = GFS2_DIF_NOATIME,
-	[12] = GFS2_DIF_EXHASH,
-	[14] = GFS2_DIF_INHERIT_JDATA,
-	[17] = GFS2_DIF_TOPDIR,
-};
-
-static const u32 gfs2_to_fsflags[32] = {
-	[gfs2fl_Sync] = FS_SYNC_FL,
-	[gfs2fl_Immutable] = FS_IMMUTABLE_FL,
-	[gfs2fl_AppendOnly] = FS_APPEND_FL,
-	[gfs2fl_NoAtime] = FS_NOATIME_FL,
-	[gfs2fl_ExHash] = FS_INDEX_FL,
-	[gfs2fl_TopLevel] = FS_TOPDIR_FL,
-	[gfs2fl_InheritJdata] = FS_JOURNAL_DATA_FL,
+static struct {
+	u32 fsflag;
+	u32 gfsflag;
+} fsflag_gfs2flag[] = {
+	{FS_SYNC_FL, GFS2_DIF_SYNC},
+	{FS_IMMUTABLE_FL, GFS2_DIF_IMMUTABLE},
+	{FS_APPEND_FL, GFS2_DIF_APPENDONLY},
+	{FS_NOATIME_FL, GFS2_DIF_NOATIME},
+	{FS_INDEX_FL, GFS2_DIF_EXHASH},
+	{FS_TOPDIR_FL, GFS2_DIF_TOPDIR},
+	{FS_JOURNAL_DATA_FL, GFS2_DIF_JDATA | GFS2_DIF_INHERIT_JDATA},
 };
 
 static int gfs2_get_flags(struct file *filp, u32 __user *ptr)
@@ -173,17 +150,23 @@ static int gfs2_get_flags(struct file *filp, u32 __user *ptr)
 	struct inode *inode = file_inode(filp);
 	struct gfs2_inode *ip = GFS2_I(inode);
 	struct gfs2_holder gh;
-	int error;
-	u32 fsflags;
+	int i, error;
+	u32 gfsflags, fsflags = 0;
 
 	gfs2_holder_init(ip->i_gl, LM_ST_SHARED, 0, &gh);
 	error = gfs2_glock_nq(&gh);
 	if (error)
 		goto out_uninit;
 
-	fsflags = fsflags_cvt(gfs2_to_fsflags, ip->i_diskflags);
-	if (!S_ISDIR(inode->i_mode) && ip->i_diskflags & GFS2_DIF_JDATA)
-		fsflags |= FS_JOURNAL_DATA_FL;
+	gfsflags = ip->i_diskflags;
+	if (S_ISDIR(inode->i_mode))
+		gfsflags &= ~GFS2_DIF_JDATA;
+	else
+		gfsflags &= ~GFS2_DIF_INHERIT_JDATA;
+	for (i = 0; i < ARRAY_SIZE(fsflag_gfs2flag); i++)
+		if (gfsflags & fsflag_gfs2flag[i].gfsflag)
+			fsflags |= fsflag_gfs2flag[i].fsflag;
+
 	if (put_user(fsflags, ptr))
 		error = -EFAULT;
 
@@ -218,7 +201,6 @@ void gfs2_set_inode_flags(struct inode *inode)
 			     GFS2_DIF_APPENDONLY|		\
 			     GFS2_DIF_NOATIME|			\
 			     GFS2_DIF_SYNC|			\
-			     GFS2_DIF_SYSTEM|			\
 			     GFS2_DIF_TOPDIR|			\
 			     GFS2_DIF_INHERIT_JDATA)
 
@@ -255,10 +237,6 @@ static int do_gfs2_set_flags(struct file *filp, u32 reqflags, u32 mask)
 	flags = ip->i_diskflags;
 	new_flags = (flags & ~mask) | (reqflags & mask);
 	if ((new_flags ^ flags) == 0)
-		goto out;
-
-	error = -EINVAL;
-	if ((new_flags ^ flags) & ~GFS2_FLAGS_USER_SET)
 		goto out;
 
 	error = -EPERM;
@@ -311,19 +289,33 @@ out_drop_write:
 static int gfs2_set_flags(struct file *filp, u32 __user *ptr)
 {
 	struct inode *inode = file_inode(filp);
-	u32 fsflags, gfsflags;
+	u32 fsflags, gfsflags = 0;
+	u32 mask;
+	int i;
 
 	if (get_user(fsflags, ptr))
 		return -EFAULT;
 
-	gfsflags = fsflags_cvt(fsflags_to_gfs2, fsflags);
-	if (!S_ISDIR(inode->i_mode)) {
-		gfsflags &= ~GFS2_DIF_TOPDIR;
-		if (gfsflags & GFS2_DIF_INHERIT_JDATA)
-			gfsflags ^= (GFS2_DIF_JDATA | GFS2_DIF_INHERIT_JDATA);
-		return do_gfs2_set_flags(filp, gfsflags, ~GFS2_DIF_SYSTEM);
+	for (i = 0; i < ARRAY_SIZE(fsflag_gfs2flag); i++) {
+		if (fsflags & fsflag_gfs2flag[i].fsflag) {
+			fsflags &= ~fsflag_gfs2flag[i].fsflag;
+			gfsflags |= fsflag_gfs2flag[i].gfsflag;
+		}
 	}
-	return do_gfs2_set_flags(filp, gfsflags, ~(GFS2_DIF_SYSTEM | GFS2_DIF_JDATA));
+	if (fsflags || gfsflags & ~GFS2_FLAGS_USER_SET)
+		return -EINVAL;
+
+	mask = GFS2_FLAGS_USER_SET;
+	if (S_ISDIR(inode->i_mode)) {
+		mask &= ~GFS2_DIF_JDATA;
+	} else {
+		/* The GFS2_DIF_TOPDIR flag is only valid for directories. */
+		if (gfsflags & GFS2_DIF_TOPDIR)
+			return -EINVAL;
+		mask &= ~(GFS2_DIF_TOPDIR | GFS2_DIF_INHERIT_JDATA);
+	}
+
+	return do_gfs2_set_flags(filp, gfsflags, mask);
 }
 
 static long gfs2_ioctl(struct file *filp, unsigned int cmd, unsigned long arg)
@@ -743,11 +735,12 @@ static ssize_t gfs2_file_aio_write(struct kiocb *iocb, const struct iovec *iov,
 static int fallocate_chunk(struct inode *inode, loff_t offset, loff_t len,
 			   int mode)
 {
+	struct super_block *sb = inode->i_sb;
 	struct gfs2_inode *ip = GFS2_I(inode);
+	loff_t end = offset + len;
 	struct buffer_head *dibh;
+	struct iomap iomap;
 	int error;
-	unsigned int nr_blks;
-	sector_t lblock = offset >> inode->i_blkbits;
 
 	error = gfs2_meta_inode_buffer(ip, &dibh);
 	if (unlikely(error))
@@ -761,21 +754,19 @@ static int fallocate_chunk(struct inode *inode, loff_t offset, loff_t len,
 			goto out;
 	}
 
-	while (len) {
-		struct buffer_head bh_map = { .b_state = 0, .b_blocknr = 0 };
-		bh_map.b_size = len;
-		set_buffer_zeronew(&bh_map);
-
-		error = gfs2_block_map(inode, lblock, &bh_map, 1);
-		if (unlikely(error))
+	while (offset < end) {
+		error = gfs2_iomap_begin(inode, offset, end - offset,
+					 IOMAP_WRITE, &iomap);
+		if (error)
 			goto out;
-		len -= bh_map.b_size;
-		nr_blks = bh_map.b_size >> inode->i_blkbits;
-		lblock += nr_blks;
-		if (!buffer_new(&bh_map))
+		offset = iomap.offset + iomap.length;
+		if (iomap.type != IOMAP_HOLE)
 			continue;
-		if (unlikely(!buffer_zeronew(&bh_map))) {
-			error = -EIO;
+		error = sb_issue_zeroout(sb, iomap.addr >> inode->i_blkbits,
+					 iomap.length >> inode->i_blkbits,
+					 GFP_NOFS);
+		if (error) {
+			fs_err(GFS2_SB(inode), "Failed to zero data buffers\n");
 			goto out;
 		}
 	}
@@ -1101,7 +1092,10 @@ static int do_flock(struct file *file, int cmd, struct file_lock *fl)
 		if (fl_gh->gh_state == state)
 			goto out;
 		locks_lock_file_wait(file,
-				     &(struct file_lock){.fl_type = F_UNLCK});
+				     &(struct file_lock) {
+					     .fl_type = F_UNLCK,
+					     .fl_flags = FL_FLOCK
+				     });
 		gfs2_glock_dq(fl_gh);
 		gfs2_holder_reinit(state, flags, fl_gh);
 	} else {

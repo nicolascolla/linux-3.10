@@ -162,8 +162,7 @@ static int fd_configure_device(struct se_device *dev)
 			dev_size, div_u64(dev_size, fd_dev->fd_block_size),
 			fd_dev->fd_block_size);
 
-		if (target_configure_unmap_from_queue(&dev->dev_attrib, q,
-						      fd_dev->fd_block_size))
+		if (target_configure_unmap_from_queue(&dev->dev_attrib, q))
 			pr_debug("IFILE: BLOCK Discard support available,"
 				 " disabled by default\n");
 		/*
@@ -527,6 +526,10 @@ fd_execute_unmap(struct se_cmd *cmd, sector_t lba, sector_t nolb)
 	struct inode *inode = file->f_mapping->host;
 	int ret;
 
+	if (!nolb) {
+		return 0;
+	}
+
 	if (cmd->se_dev->dev_attrib.pi_prot_type) {
 		ret = fd_do_prot_unmap(cmd, lba, nolb);
 		if (ret)
@@ -583,7 +586,7 @@ fd_execute_rw(struct se_cmd *cmd, struct scatterlist *sgl, u32 sgl_nents,
 	 */
 	if (cmd->data_length > FD_MAX_BYTES) {
 		pr_err("FILEIO: Not able to process I/O of %u bytes due to"
-		       "FD_MAX_BYTES: %lu iovec count limitiation\n",
+		       "FD_MAX_BYTES: %lu iovec count limitation\n",
 			cmd->data_length, FD_MAX_BYTES);
 		return TCM_LOGICAL_UNIT_COMMUNICATION_FAILURE;
 	}
@@ -603,7 +606,8 @@ fd_execute_rw(struct se_cmd *cmd, struct scatterlist *sgl, u32 sgl_nents,
 		ret = fd_do_rw(cmd, file, dev->dev_attrib.block_size,
 			       sgl, sgl_nents, cmd->data_length, 0);
 
-		if (ret > 0 && cmd->prot_type && dev->dev_attrib.pi_prot_type) {
+		if (ret > 0 && cmd->prot_type && dev->dev_attrib.pi_prot_type &&
+		    dev->dev_attrib.pi_prot_verify) {
 			u32 sectors = cmd->data_length >>
 					ilog2(dev->dev_attrib.block_size);
 
@@ -613,7 +617,8 @@ fd_execute_rw(struct se_cmd *cmd, struct scatterlist *sgl, u32 sgl_nents,
 				return rc;
 		}
 	} else {
-		if (cmd->prot_type && dev->dev_attrib.pi_prot_type) {
+		if (cmd->prot_type && dev->dev_attrib.pi_prot_type &&
+		    dev->dev_attrib.pi_prot_verify) {
 			u32 sectors = cmd->data_length >>
 					ilog2(dev->dev_attrib.block_size);
 
@@ -655,8 +660,7 @@ fd_execute_rw(struct se_cmd *cmd, struct scatterlist *sgl, u32 sgl_nents,
 	if (ret < 0)
 		return TCM_LOGICAL_UNIT_COMMUNICATION_FAILURE;
 
-	if (ret)
-		target_complete_cmd(cmd, SAM_STAT_GOOD);
+	target_complete_cmd(cmd, SAM_STAT_GOOD);
 	return 0;
 }
 

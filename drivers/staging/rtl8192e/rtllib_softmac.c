@@ -20,7 +20,6 @@
 #include <linux/delay.h>
 #include <linux/uaccess.h>
 #include <linux/etherdevice.h>
-#include <linux/nospec.h>
 #include "dot11d.h"
 
 short rtllib_is_54g(struct rtllib_network *net)
@@ -3343,7 +3342,6 @@ static int rtllib_wpa_set_encryption(struct rtllib_device *ieee,
 	int ret = 0;
 	struct lib80211_crypto_ops *ops;
 	struct lib80211_crypt_data **crypt;
-	u8 idx;
 
 	struct rtllib_security sec = {
 		.flags = 0,
@@ -3362,9 +3360,7 @@ static int rtllib_wpa_set_encryption(struct rtllib_device *ieee,
 	if (is_broadcast_ether_addr(param->sta_addr)) {
 		if (param->u.crypt.idx >= NUM_WEP_KEYS)
 			return -EINVAL;
-		idx = array_index_nospec(param->u.crypt.idx, NUM_WEP_KEYS);
-
-		crypt = &ieee->crypt_info.crypt[idx];
+		crypt = &ieee->crypt_info.crypt[param->u.crypt.idx];
 	} else {
 		return -EINVAL;
 	}
@@ -3449,10 +3445,10 @@ static int rtllib_wpa_set_encryption(struct rtllib_device *ieee,
 		sec.flags &= ~SEC_ACTIVE_KEY;
 
 	if (param->u.crypt.alg != NULL) {
-		memcpy(sec.keys[idx],
+		memcpy(sec.keys[param->u.crypt.idx],
 		       param->u.crypt.key,
 		       param->u.crypt.key_len);
-		sec.key_sizes[idx] = param->u.crypt.key_len;
+		sec.key_sizes[param->u.crypt.idx] = param->u.crypt.key_len;
 		sec.flags |= (1 << param->u.crypt.idx);
 
 		if (strcmp(param->u.crypt.alg, "R-WEP") == 0) {

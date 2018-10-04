@@ -59,6 +59,9 @@ static int uverbs_process_attr(struct ib_device *ibdev,
 			return 0;
 	}
 
+	if (test_bit(attr_id, attr_bundle_h->valid_bitmap))
+		return -EINVAL;
+
 	spec = &attr_spec_bucket->attrs[attr_id];
 	e = &elements[attr_id];
 	e->uattr = uattr_ptr;
@@ -188,6 +191,15 @@ static int uverbs_validate_kernel_mandatory(const struct uverbs_method_spec *met
 			return -EINVAL;
 	}
 
+	for (; i < method_spec->num_buckets; i++) {
+		struct uverbs_attr_spec_hash *attr_spec_bucket =
+			method_spec->attr_buckets[i];
+
+		if (!bitmap_empty(attr_spec_bucket->mandatory_attrs_bitmask,
+				  attr_spec_bucket->num_attrs))
+			return -EINVAL;
+	}
+
 	return 0;
 }
 
@@ -241,20 +253,15 @@ static long ib_uverbs_cmd_verbs(struct ib_device *ib_dev,
 	struct uverbs_attr *curr_attr;
 	unsigned long *curr_bitmap;
 	size_t ctx_size;
-#ifdef UVERBS_OPTIMIZE_USING_STACK_SZ
 	uintptr_t data[UVERBS_OPTIMIZE_USING_STACK_SZ / sizeof(uintptr_t)];
-#endif
-
-	if (hdr->reserved)
-		return -EINVAL;
 
 	object_spec = uverbs_get_object(ib_dev, hdr->object_id);
 	if (!object_spec)
-		return -EOPNOTSUPP;
+		return -EPROTONOSUPPORT;
 
 	method_spec = uverbs_get_method(object_spec, hdr->method_id);
 	if (!method_spec)
-		return -EOPNOTSUPP;
+		return -EPROTONOSUPPORT;
 
 	if ((method_spec->flags & UVERBS_ACTION_FLAG_CREATE_ROOT) ^ !file->ucontext)
 		return -EINVAL;
@@ -269,13 +276,10 @@ static long ib_uverbs_cmd_verbs(struct ib_device *ib_dev,
 			(method_spec->num_child_attrs / BITS_PER_LONG +
 			 method_spec->num_buckets);
 
-#ifdef UVERBS_OPTIMIZE_USING_STACK_SZ
 	if (ctx_size <= UVERBS_OPTIMIZE_USING_STACK_SZ)
 		ctx = (void *)data;
-
 	if (!ctx)
-#endif
-	ctx = kmalloc(ctx_size, GFP_KERNEL);
+		ctx = kmalloc(ctx_size, GFP_KERNEL);
 	if (!ctx)
 		return -ENOMEM;
 
@@ -310,11 +314,19 @@ static long ib_uverbs_cmd_verbs(struct ib_device *ib_dev,
 
 	err = uverbs_handle_method(buf, ctx->uattrs, hdr->num_attrs, ib_dev,
 				   file, method_spec, ctx->uverbs_attr_bundle);
+
+	/*
+	 * EPROTONOSUPPORT is ONLY to be returned if the ioctl framework can
+	 * not invoke the method because the request is not supported.  No
+	 * other cases should return this code.
+	*/
+	if (unlikely(err == -EPROTONOSUPPORT)) {
+		WARN_ON_ONCE(err == -EPROTONOSUPPORT);
+		err = -EINVAL;
+	}
 out:
-#ifdef UVERBS_OPTIMIZE_USING_STACK_SZ
-	if (ctx_size > UVERBS_OPTIMIZE_USING_STACK_SZ)
-#endif
-	kfree(ctx);
+	if (ctx != (void *)data)
+		kfree(ctx);
 	return err;
 }
 
@@ -348,7 +360,7 @@ long ib_uverbs_ioctl(struct file *filp, unsigned int cmd, unsigned long arg)
 		}
 
 		if (hdr.reserved) {
-			err = -EOPNOTSUPP;
+			err = -EPROTONOSUPPORT;
 			goto out;
 		}
 

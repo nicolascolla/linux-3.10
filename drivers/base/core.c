@@ -526,12 +526,14 @@ int device_add_groups(struct device *dev, const struct attribute_group **groups)
 {
 	return sysfs_create_groups(&dev->kobj, groups);
 }
+EXPORT_SYMBOL_GPL(device_add_groups);
 
 void device_remove_groups(struct device *dev,
 			  const struct attribute_group **groups)
 {
 	sysfs_remove_groups(&dev->kobj, groups);
 }
+EXPORT_SYMBOL_GPL(device_remove_groups);
 
 static int device_add_attrs(struct device *dev)
 {
@@ -771,8 +773,7 @@ void device_initialize(struct device *dev)
 	 * use acpi, of, or pci invoke device_initialize()
 	 * and not device_register() or device_add().
 	 */
-	if (!dev->device_rh)
-		device_rh_alloc(dev);
+	device_rh_alloc(dev);
 	dev->kobj.kset = devices_kset;
 	kobject_init(&dev->kobj, &device_ktype);
 	INIT_LIST_HEAD(&dev->dma_pools);
@@ -1073,8 +1074,9 @@ int device_private_init(struct device *dev)
  */
 void device_rh_alloc(struct device *dev)
 {
-	dev->device_rh = kzalloc(sizeof(struct device_rh),
-				 GFP_KERNEL | __GFP_NOFAIL);
+	if (!dev->device_rh)
+		dev->device_rh = kzalloc(sizeof(struct device_rh),
+					 GFP_KERNEL | __GFP_NOFAIL);
 }
 EXPORT_SYMBOL(device_rh_alloc);
 
@@ -1120,8 +1122,7 @@ int device_add(struct device *dev)
 	 * Regardless of when allocated, the device_rh will be free'd at the
 	 * end of device_del().
 	 */
-	if (!dev->device_rh)
-		device_rh_alloc(dev);
+	device_rh_alloc(dev);
 
 	if (!dev->p) {
 		error = device_private_init(dev);
@@ -2404,3 +2405,20 @@ void set_secondary_fwnode(struct device *dev, struct fwnode_handle *fwnode)
 	else
 		set_rh_dev_fwnode(dev, fwnode);
 }
+
+/**
+ * device_set_of_node_from_dev - reuse device-tree node of another device
+ * @dev: device whose device-tree node is being set
+ * @dev2: device whose device-tree node is being reused
+ *
+ * Takes another reference to the new device-tree node after first dropping
+ * any reference held to the old node.
+ */
+void device_set_of_node_from_dev(struct device *dev, const struct device *dev2)
+{
+	of_node_put(dev->of_node);
+	dev->of_node = of_node_get(dev2->of_node);
+	if (dev->device_rh)
+	    dev->device_rh->of_node_reused = true;
+}
+EXPORT_SYMBOL_GPL(device_set_of_node_from_dev);

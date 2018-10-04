@@ -15,7 +15,6 @@
  * OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
  */
 
-#include <linux/nospec.h>
 #include "core.h"
 #include "hif.h"
 #include "debug.h"
@@ -411,7 +410,6 @@ void ath10k_htc_rx_completion_handler(struct ath10k *ar, struct sk_buff *skb)
 				hdr, sizeof(*hdr));
 		goto out;
 	}
-	eid = array_index_nospec(eid, ATH10K_HTC_EP_COUNT);
 
 	ep = &htc->endpoint[eid];
 
@@ -772,7 +770,6 @@ setup:
 
 	if (assigned_eid >= ATH10K_HTC_EP_COUNT)
 		return -EPROTO;
-	assigned_eid = array_index_nospec(assigned_eid, ATH10K_HTC_EP_COUNT);
 
 	if (max_msg_size == 0)
 		return -EPROTO;

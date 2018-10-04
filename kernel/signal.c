@@ -39,7 +39,6 @@
 #endif
 #define CREATE_TRACE_POINTS
 #include <trace/events/signal.h>
-#include <linux/nospec.h>
 
 #include <asm/param.h>
 #include <asm/uaccess.h>
@@ -58,8 +57,7 @@ int print_fatal_signals __read_mostly;
 
 static void __user *sig_handler(struct task_struct *t, int sig)
 {
-	int idx = array_index_nospec(sig - 1, _NSIG);
-	return t->sighand->action[idx].sa.sa_handler;
+	return t->sighand->action[sig - 1].sa.sa_handler;
 }
 
 static int sig_handler_ignored(void __user *handler, int sig)
@@ -969,7 +967,6 @@ static void complete_signal(int sig, struct task_struct *p, int group)
 {
 	struct signal_struct *signal = p->signal;
 	struct task_struct *t;
-	int idx;
 
 	/*
 	 * Now find a thread we can wake up to take the signal off the queue.
@@ -1007,8 +1004,7 @@ static void complete_signal(int sig, struct task_struct *p, int group)
 	 * Found a killable thread.  If the signal will be fatal,
 	 * then start taking the whole group down immediately.
 	 */
-	idx = array_index_nospec(sig - 1, _NSIG);
-	if (sig_fatal_nospec(p, sig, idx) &&
+	if (sig_fatal(p, sig) &&
 	    !(signal->flags & (SIGNAL_UNKILLABLE | SIGNAL_GROUP_EXIT)) &&
 	    !sigismember(&t->real_blocked, sig) &&
 	    (sig == SIGKILL || !t->ptrace)) {
@@ -2850,23 +2846,18 @@ int copy_siginfo_to_user(siginfo_t __user *to, siginfo_t *from)
  *  @ts: upper bound on process time suspension
  */
 int do_sigtimedwait(const sigset_t *which, siginfo_t *info,
-			const struct timespec *ts)
+		    const struct timespec *ts)
 {
+	ktime_t *to = NULL, timeout = { .tv64 = KTIME_MAX };
 	struct task_struct *tsk = current;
-	long timeout = MAX_SCHEDULE_TIMEOUT;
 	sigset_t mask = *which;
-	int sig;
+	int sig, ret = 0;
 
 	if (ts) {
 		if (!timespec_valid(ts))
 			return -EINVAL;
-		timeout = timespec_to_jiffies(ts);
-		/*
-		 * We can be close to the next tick, add another one
-		 * to ensure we will wait at least the time asked for.
-		 */
-		if (ts->tv_sec || ts->tv_nsec)
-			timeout++;
+		timeout = timespec_to_ktime(*ts);
+		to = &timeout;
 	}
 
 	/*
@@ -2877,7 +2868,7 @@ int do_sigtimedwait(const sigset_t *which, siginfo_t *info,
 
 	spin_lock_irq(&tsk->sighand->siglock);
 	sig = dequeue_signal(tsk, &mask, info);
-	if (!sig && timeout) {
+	if (!sig && timeout.tv64) {
 		/*
 		 * None ready, temporarily unblock those we're interested
 		 * while we are sleeping in so that we'll be awakened when
@@ -2889,8 +2880,9 @@ int do_sigtimedwait(const sigset_t *which, siginfo_t *info,
 		recalc_sigpending();
 		spin_unlock_irq(&tsk->sighand->siglock);
 
-		timeout = freezable_schedule_timeout_interruptible(timeout);
-
+		__set_current_state(TASK_INTERRUPTIBLE);
+		ret = freezable_schedule_hrtimeout_range(to, tsk->timer_slack_ns,
+							 HRTIMER_MODE_REL);
 		spin_lock_irq(&tsk->sighand->siglock);
 		__set_task_blocked(tsk, &tsk->real_blocked);
 		siginitset(&tsk->real_blocked, 0);
@@ -2900,7 +2892,7 @@ int do_sigtimedwait(const sigset_t *which, siginfo_t *info,
 
 	if (sig)
 		return sig;
-	return timeout ? -EINTR : -EAGAIN;
+	return ret ? -EINTR : -EAGAIN;
 }
 
 /**
@@ -3131,13 +3123,11 @@ int do_sigaction(int sig, struct k_sigaction *act, struct k_sigaction *oact)
 	struct task_struct *t = current;
 	struct k_sigaction *k;
 	sigset_t mask;
-	int idx;
 
 	if (!valid_signal(sig) || sig < 1 || (act && sig_kernel_only(sig)))
 		return -EINVAL;
 
-	idx = array_index_nospec(sig - 1, _NSIG);
-	k = &t->sighand->action[idx];
+	k = &t->sighand->action[sig-1];
 
 	spin_lock_irq(&current->sighand->siglock);
 	if (oact)

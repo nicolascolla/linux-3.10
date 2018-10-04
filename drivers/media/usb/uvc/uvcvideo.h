@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0 */
 #ifndef _USB_VIDEO_H_
 #define _USB_VIDEO_H_
 
@@ -403,8 +404,8 @@ struct uvc_stats_frame {
 };
 
 struct uvc_stats_stream {
-	struct timespec start_ts;	/* Stream start timestamp */
-	struct timespec stop_ts;	/* Stream stop timestamp */
+	ktime_t start_ts;		/* Stream start timestamp */
+	ktime_t stop_ts;		/* Stream stop timestamp */
 
 	unsigned int nb_frames;		/* Number of frames */
 

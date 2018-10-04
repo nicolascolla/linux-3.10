@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0
 /*
  * Universal Host Controller Interface driver for USB.
  *
@@ -265,9 +266,13 @@ static void configure_hc(struct uhci_hcd *uhci)
 
 static int resume_detect_interrupts_are_broken(struct uhci_hcd *uhci)
 {
-	/* If we have to ignore overcurrent events then almost by definition
-	 * we can't depend on resume-detect interrupts. */
-	if (ignore_oc)
+	/*
+	 * If we have to ignore overcurrent events then almost by definition
+	 * we can't depend on resume-detect interrupts.
+	 *
+	 * Those interrupts also don't seem to work on ASpeed SoCs.
+	 */
+	if (ignore_oc || uhci_is_aspeed(uhci))
 		return 1;
 
 	return uhci->resume_detect_interrupts_are_broken ?
@@ -383,6 +388,13 @@ __acquires(uhci->lock)
 static void start_rh(struct uhci_hcd *uhci)
 {
 	uhci->is_stopped = 0;
+
+	/*
+	 * Clear stale status bits on Aspeed as we get a stale HCH
+	 * which causes problems later on
+	 */
+	if (uhci_is_aspeed(uhci))
+		uhci_writew(uhci, uhci_readw(uhci, USBSTS), USBSTS);
 
 	/* Mark it configured and running with a 64-byte max packet.
 	 * All interrupts are enabled, even though RESUME won't do anything.
@@ -573,8 +585,7 @@ static int uhci_start(struct usb_hcd *hcd)
 		hcd->self.sg_tablesize = ~0;
 
 	spin_lock_init(&uhci->lock);
-	setup_timer(&uhci->fsbr_timer, uhci_fsbr_timeout,
-			(unsigned long) uhci);
+	timer_setup(&uhci->fsbr_timer, uhci_fsbr_timeout, 0);
 	INIT_LIST_HEAD(&uhci->idle_qh_list);
 	init_waitqueue_head(&uhci->waitqh);
 
@@ -589,7 +600,7 @@ static int uhci_start(struct usb_hcd *hcd)
 	uhci->dentry = dentry;
 #endif
 
-	uhci->frame = dma_alloc_coherent(uhci_dev(uhci),
+	uhci->frame = dma_zalloc_coherent(uhci_dev(uhci),
 			UHCI_NUMFRAMES * sizeof(*uhci->frame),
 			&uhci->frame_dma_handle, GFP_KERNEL);
 	if (!uhci->frame) {
@@ -597,7 +608,6 @@ static int uhci_start(struct usb_hcd *hcd)
 			"unable to allocate consistent memory for frame list\n");
 		goto err_alloc_frame;
 	}
-	memset(uhci->frame, 0, UHCI_NUMFRAMES * sizeof(*uhci->frame));
 
 	uhci->frame_cpu = kcalloc(UHCI_NUMFRAMES, sizeof(*uhci->frame_cpu),
 			GFP_KERNEL);
@@ -837,7 +847,7 @@ static int uhci_count_ports(struct usb_hcd *hcd)
 
 static const char hcd_name[] = "uhci_hcd";
 
-#ifdef CONFIG_PCI
+#ifdef CONFIG_USB_PCI
 #include "uhci-pci.c"
 #define	PCI_DRIVER		uhci_pci_driver
 #endif

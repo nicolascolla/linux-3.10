@@ -16,7 +16,6 @@
  * Contact Information:
  * wlanfae <wlanfae@realtek.com>
 ******************************************************************************/
-#include <linux/nospec.h>
 #include "dot11d.h"
 
 struct channel_list {
@@ -146,11 +145,8 @@ void Dot11d_UpdateCountryIe(struct rtllib_device *dev, u8 *pTaddr,
 		}
 
 		for (j = 0 ; j < pTriple->NumChnls; j++) {
-			u8 idx = array_index_nospec(pTriple->FirstChnl + j,
-						    MAX_CHANNEL_NUMBER + 1);
-
-			pDot11dInfo->channel_map[idx] = 1;
-			pDot11dInfo->MaxTxPwrDbmList[idx] =
+			pDot11dInfo->channel_map[pTriple->FirstChnl + j] = 1;
+			pDot11dInfo->MaxTxPwrDbmList[pTriple->FirstChnl + j] =
 						 pTriple->MaxTxPowerInDbm;
 			MaxChnlNum = pTriple->FirstChnl + j;
 		}

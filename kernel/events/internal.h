@@ -38,9 +38,9 @@ struct ring_buffer {
 	struct user_struct		*mmap_user;
 
 	/* AUX area */
-	local_t				aux_head;
+	long				aux_head;
 	local_t				aux_nest;
-	local_t				aux_wakeup;
+	long				aux_wakeup;	/* last aux_watermark boundary crossed by aux_head */
 	unsigned long			aux_pgoff;
 	int				aux_nr_pages;
 	int				aux_overwrite;
@@ -123,21 +123,19 @@ static inline unsigned long perf_aux_size(struct ring_buffer *rb)
 	return rb->aux_nr_pages << PAGE_SHIFT;
 }
 
-#define DEFINE_OUTPUT_COPY(func_name, memcpy_func)			\
-static inline unsigned long						\
-func_name(struct perf_output_handle *handle,				\
-	  const void *buf, unsigned long len)				\
+#define __DEFINE_OUTPUT_COPY_BODY(advance_buf, memcpy_func, ...)	\
 {									\
 	unsigned long size, written;					\
 									\
 	do {								\
 		size    = min(handle->size, len);			\
-		written = memcpy_func(handle->addr, buf, size);		\
+		written = memcpy_func(__VA_ARGS__);			\
 		written = size - written;				\
 									\
 		len -= written;						\
 		handle->addr += written;				\
-		buf += written;						\
+		if (advance_buf)					\
+			buf += written;					\
 		handle->size -= written;				\
 		if (!handle->size) {					\
 			struct ring_buffer *rb = handle->rb;		\
@@ -150,6 +148,21 @@ func_name(struct perf_output_handle *handle,				\
 	} while (len && written == size);				\
 									\
 	return len;							\
+}
+
+#define DEFINE_OUTPUT_COPY(func_name, memcpy_func)			\
+static inline unsigned long						\
+func_name(struct perf_output_handle *handle,				\
+	  const void *buf, unsigned long len)				\
+__DEFINE_OUTPUT_COPY_BODY(true, memcpy_func, handle->addr, buf, size)
+
+static inline unsigned long
+__output_custom(struct perf_output_handle *handle, perf_copy_f copy_func,
+		const void *buf, unsigned long len)
+{
+	unsigned long orig_len = len;
+	__DEFINE_OUTPUT_COPY_BODY(false, copy_func, handle->addr, buf,
+				  orig_len - len, size)
 }
 
 static inline unsigned long
@@ -195,7 +208,7 @@ static inline int get_recursion_context(int *recursion)
 {
 	int rctx;
 
-	if (in_nmi())
+	if (unlikely(in_nmi()))
 		rctx = 3;
 	else if (in_irq())
 		rctx = 2;

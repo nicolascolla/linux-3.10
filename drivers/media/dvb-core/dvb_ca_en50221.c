@@ -38,7 +38,6 @@
 #include <linux/spinlock.h>
 #include <linux/sched.h>
 #include <linux/kthread.h>
-#include <linux/nospec.h>
 
 #include "dvb_ca_en50221.h"
 #include "dvb_ringbuffer.h"
@@ -1228,21 +1227,19 @@ static int dvb_ca_en50221_io_do_ioctl(struct file *file,
 
 	case CA_GET_SLOT_INFO: {
 		struct ca_slot_info *info = parg;
-		int num;
 
-		if ((info->num >= ca->slot_count) || (info->num < 0)) {
+		if ((info->num > ca->slot_count) || (info->num < 0)) {
 			err = -EINVAL;
 			goto out_unlock;
 		}
-		num = array_index_nospec(info->num, ca->slot_count);
 
 		info->type = CA_CI_LINK;
 		info->flags = 0;
-		if ((ca->slot_info[num].slot_state != DVB_CA_SLOTSTATE_NONE)
-			&& (ca->slot_info[num].slot_state != DVB_CA_SLOTSTATE_INVALID)) {
+		if ((ca->slot_info[info->num].slot_state != DVB_CA_SLOTSTATE_NONE)
+			&& (ca->slot_info[info->num].slot_state != DVB_CA_SLOTSTATE_INVALID)) {
 			info->flags = CA_CI_MODULE_PRESENT;
 		}
-		if (ca->slot_info[num].slot_state == DVB_CA_SLOTSTATE_RUNNING) {
+		if (ca->slot_info[info->num].slot_state == DVB_CA_SLOTSTATE_RUNNING) {
 			info->flags |= CA_CI_MODULE_READY;
 		}
 		break;

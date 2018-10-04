@@ -482,28 +482,37 @@ struct net_device *alloc_etherdev_mqs(int sizeof_priv, unsigned int txqs,
 }
 EXPORT_SYMBOL(alloc_etherdev_mqs);
 
-static size_t _format_mac_addr(char *buf, int buflen,
-			       const unsigned char *addr, int len)
+static void devm_free_netdev(struct device *dev, void *res)
 {
-	int i;
-	char *cp = buf;
-
-	for (i = 0; i < len; i++) {
-		cp += scnprintf(cp, buflen - (cp - buf), "%02x", addr[i]);
-		if (i == len - 1)
-			break;
-		cp += scnprintf(cp, buflen - (cp - buf), ":");
-	}
-	return cp - buf;
+	free_netdev(*(struct net_device **)res);
 }
+
+struct net_device *devm_alloc_etherdev_mqs(struct device *dev, int sizeof_priv,
+					   unsigned int txqs, unsigned int rxqs)
+{
+	struct net_device **dr;
+	struct net_device *netdev;
+
+	dr = devres_alloc(devm_free_netdev, sizeof(*dr), GFP_KERNEL);
+	if (!dr)
+		return NULL;
+
+	netdev = alloc_etherdev_mqs(sizeof_priv, txqs, rxqs);
+	if (!netdev) {
+		devres_free(dr);
+		return NULL;
+	}
+
+	*dr = netdev;
+	devres_add(dev, dr);
+
+	return netdev;
+}
+EXPORT_SYMBOL(devm_alloc_etherdev_mqs);
 
 ssize_t sysfs_format_mac(char *buf, const unsigned char *addr, int len)
 {
-	size_t l;
-
-	l = _format_mac_addr(buf, PAGE_SIZE, addr, len);
-	l += scnprintf(buf + l, PAGE_SIZE - l, "\n");
-	return (ssize_t)l;
+	return scnprintf(buf, PAGE_SIZE, "%*phC\n", len, addr);
 }
 EXPORT_SYMBOL(sysfs_format_mac);
 

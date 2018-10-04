@@ -64,7 +64,6 @@
  * OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
  *
  *****************************************************************************/
-#include <linux/nospec.h>
 #include <net/mac80211.h>
 
 #include "iwl-debug.h"
@@ -711,11 +710,10 @@ static bool iwl_mvm_update_txq_mapping(struct iwl_mvm *mvm, int queue,
 	mvm->queue_info[queue].ra_sta_id = sta_id;
 
 	if (enable_queue) {
-		if (tid != IWL_MAX_TID_COUNT) {
-			tid = array_index_nospec(tid, IWL_MAX_TID_COUNT + 1);
+		if (tid != IWL_MAX_TID_COUNT)
 			mvm->queue_info[queue].mac80211_ac =
 				tid_to_mac80211_ac[tid];
-		} else
+		else
 			mvm->queue_info[queue].mac80211_ac = IEEE80211_AC_VO;
 
 		mvm->queue_info[queue].txq_tid = tid;

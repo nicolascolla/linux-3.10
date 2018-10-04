@@ -75,6 +75,8 @@ static unsigned int prof_sel = MLX5_DEFAULT_PROF;
 module_param_named(prof_sel, prof_sel, uint, 0444);
 MODULE_PARM_DESC(prof_sel, "profile selector. Valid range 0 - 2");
 
+static u32 sw_owner_id[4];
+
 enum {
 	MLX5_ATOMIC_REQ_MODE_BE = 0x0,
 	MLX5_ATOMIC_REQ_MODE_HOST_ENDIANNESS = 0x1,
@@ -319,6 +321,7 @@ static int mlx5_alloc_irq_vectors(struct mlx5_core_dev *dev)
 	struct mlx5_eq_table *table = &priv->eq_table;
 	int num_eqs = 1 << MLX5_CAP_GEN(dev, log_max_eq);
 	int nvec;
+	int err;
 
 	nvec = MLX5_CAP_GEN(dev, num_ports) * num_online_cpus() +
 	       MLX5_EQ_VEC_COMP_BASE;
@@ -328,21 +331,23 @@ static int mlx5_alloc_irq_vectors(struct mlx5_core_dev *dev)
 
 	priv->irq_info = kcalloc(nvec, sizeof(*priv->irq_info), GFP_KERNEL);
 	if (!priv->irq_info)
-		goto err_free_msix;
+		return -ENOMEM;
 
 	nvec = pci_alloc_irq_vectors(dev->pdev,
 			MLX5_EQ_VEC_COMP_BASE + 1, nvec,
 			PCI_IRQ_MSIX);
-	if (nvec < 0)
-		return nvec;
+	if (nvec < 0) {
+		err = nvec;
+		goto err_free_irq_info;
+	}
 
 	table->num_comp_vectors = nvec - MLX5_EQ_VEC_COMP_BASE;
 
 	return 0;
 
-err_free_msix:
+err_free_irq_info:
 	kfree(priv->irq_info);
-	return -ENOMEM;
+	return err;
 }
 
 static void mlx5_free_irq_vectors(struct mlx5_core_dev *dev)
@@ -546,7 +551,16 @@ static int handle_hca_cap(struct mlx5_core_dev *dev)
 		MLX5_SET(cmd_hca_cap,
 			 set_hca_cap,
 			 cache_line_128byte,
-			 cache_line_size() == 128 ? 1 : 0);
+			 cache_line_size() >= 128 ? 1 : 0);
+
+	if (MLX5_CAP_GEN_MAX(dev, dct))
+		MLX5_SET(cmd_hca_cap, set_hca_cap, dct, 1);
+
+	if (MLX5_CAP_GEN_MAX(dev, num_vhca_ports))
+		MLX5_SET(cmd_hca_cap,
+			 set_hca_cap,
+			 num_vhca_ports,
+			 MLX5_CAP_GEN_MAX(dev, num_vhca_ports));
 
 	err = set_caps(dev, set_ctx, set_sz,
 		       MLX5_SET_HCA_CAP_OP_MOD_GENERAL_DEVICE);
@@ -578,8 +592,7 @@ static int mlx5_core_set_hca_defaults(struct mlx5_core_dev *dev)
 	int ret = 0;
 
 	/* Disable local_lb by default */
-	if ((MLX5_CAP_GEN(dev, port_type) == MLX5_CAP_PORT_TYPE_ETH) &&
-	    MLX5_CAP_GEN(dev, disable_local_lb))
+	if (MLX5_CAP_GEN(dev, port_type) == MLX5_CAP_PORT_TYPE_ETH)
 		ret = mlx5_nic_vport_update_local_lb(dev, false);
 
 	return ret;
@@ -841,6 +854,38 @@ static int mlx5_core_set_issi(struct mlx5_core_dev *dev)
 	return -EOPNOTSUPP;
 }
 
+/* PCI table of mlx5 devices that are tech preview in RHEL */
+static const struct pci_device_id mlx5_core_hw_unsupp_pci_table[] = {
+	{ PCI_VDEVICE(MELLANOX, 0x101b) },			/* ConnectX-6 */
+	{ PCI_VDEVICE(MELLANOX, 0x101c), MLX5_PCI_DEV_IS_VF},	/* ConnectX-6 VF */
+	{ PCI_VDEVICE(MELLANOX, 0xa2d2) },			/* BlueField integrated ConnectX-5 network controller */
+	{ PCI_VDEVICE(MELLANOX, 0xa2d3), MLX5_PCI_DEV_IS_VF},	/* BlueField integrated ConnectX-5 network controller VF */
+	{ 0, }
+};
+
+static char mlx5_pci_id[32]; /* more than enough space */
+/*
+ * Function to check if an mlx5 device is tech-preview.
+ * If so, print out message and mark accordingly.
+ *
+ * most of it stolen from pci_match_device() in drivers/pci/pci-drivers.c
+ *
+ */
+static void mlx5_check_hw_unsupp_status(struct pci_dev *pdev)
+{
+	const struct pci_device_id *found_id = NULL;
+
+	found_id = pci_match_id(mlx5_core_hw_unsupp_pci_table, pdev);
+
+	if (found_id) {
+		sprintf(mlx5_pci_id, "%s: %04x:%02x:%02x.%01x\n", "pci-device",
+				pci_domain_nr(pdev->bus), pdev->bus->number,
+				PCI_SLOT(pdev->devfn), PCI_FUNC(pdev->devfn));
+		/* mark-hw-unsupported doesn't taint kernel; just prints warning */
+		mark_hardware_unsupported(mlx5_pci_id);
+	}
+}
+
 static int mlx5_pci_init(struct mlx5_core_dev *dev, struct mlx5_priv *priv)
 {
 	struct pci_dev *pdev = dev->pdev;
@@ -890,6 +935,7 @@ static int mlx5_pci_init(struct mlx5_core_dev *dev, struct mlx5_priv *priv)
 		goto err_clr_master;
 	}
 
+	mlx5_check_hw_unsupp_status(pdev);
 	return 0;
 
 err_clr_master:
@@ -1105,7 +1151,7 @@ static int mlx5_load_one(struct mlx5_core_dev *dev, struct mlx5_priv *priv,
 		goto reclaim_boot_pages;
 	}
 
-	err = mlx5_cmd_init_hca(dev);
+	err = mlx5_cmd_init_hca(dev, sw_owner_id);
 	if (err) {
 		dev_err(&pdev->dev, "init hca failed\n");
 		goto err_pagealloc_stop;
@@ -1121,9 +1167,12 @@ static int mlx5_load_one(struct mlx5_core_dev *dev, struct mlx5_priv *priv,
 		goto err_stop_poll;
 	}
 
-	if (boot && mlx5_init_once(dev, priv)) {
-		dev_err(&pdev->dev, "sw objs init failed\n");
-		goto err_stop_poll;
+	if (boot) {
+		err = mlx5_init_once(dev, priv);
+		if (err) {
+			dev_err(&pdev->dev, "sw objs init failed\n");
+			goto err_stop_poll;
+		}
 	}
 
 	err = mlx5_alloc_irq_vectors(dev);
@@ -1133,8 +1182,9 @@ static int mlx5_load_one(struct mlx5_core_dev *dev, struct mlx5_priv *priv,
 	}
 
 	dev->priv.uar = mlx5_get_uars_page(dev);
-	if (!dev->priv.uar) {
+	if (IS_ERR(dev->priv.uar)) {
 		dev_err(&pdev->dev, "Failed allocating uar, aborting\n");
+		err = PTR_ERR(dev->priv.uar);
 		goto err_disable_msix;
 	}
 
@@ -1601,6 +1651,8 @@ static void mlx5_core_verify_params(void)
 static int __init init(void)
 {
 	int err;
+
+	get_random_bytes(&sw_owner_id, sizeof(sw_owner_id));
 
 	mlx5_core_verify_params();
 	mlx5_register_debugfs();

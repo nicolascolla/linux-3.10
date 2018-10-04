@@ -29,18 +29,16 @@
 #include "core.h"
 #include "host.h"
 #include "slot-gpio.h"
+#include "sdio_ops.h"
 
 #define cls_dev_to_mmc_host(d)	container_of(d, struct mmc_host, class_dev)
 
 static DEFINE_IDA(mmc_host_ida);
-static DEFINE_SPINLOCK(mmc_host_lock);
 
 static void mmc_host_classdev_release(struct device *dev)
 {
 	struct mmc_host *host = cls_dev_to_mmc_host(dev);
-	spin_lock(&mmc_host_lock);
-	ida_remove(&mmc_host_ida, host->index);
-	spin_unlock(&mmc_host_lock);
+	ida_simple_remove(&mmc_host_ida, host->index);
 	kfree(host);
 }
 
@@ -119,6 +117,7 @@ void mmc_retune_release(struct mmc_host *host)
 	else
 		WARN_ON(1);
 }
+EXPORT_SYMBOL(mmc_retune_release);
 
 int mmc_retune(struct mmc_host *host)
 {
@@ -300,6 +299,8 @@ int mmc_of_parse(struct mmc_host *host)
 	if (of_property_read_bool(np, "wakeup-source") ||
 	    of_property_read_bool(np, "enable-sdio-wakeup")) /* legacy */
 		host->pm_caps |= MMC_PM_WAKE_SDIO_IRQ;
+	if (of_property_read_bool(np, "mmc-ddr-3_3v"))
+		host->caps |= MMC_CAP_3_3V_DDR;
 	if (of_property_read_bool(np, "mmc-ddr-1_8v"))
 		host->caps |= MMC_CAP_1_8V_DDR;
 	if (of_property_read_bool(np, "mmc-ddr-1_2v"))
@@ -353,22 +354,13 @@ struct mmc_host *mmc_alloc_host(int extra, struct device *dev)
 	/* scanning will be enabled when we're ready */
 	host->rescan_disable = 1;
 
-again:
-	if (!ida_pre_get(&mmc_host_ida, GFP_KERNEL)) {
+	err = ida_simple_get(&mmc_host_ida, 0, 0, GFP_KERNEL);
+	if (err < 0) {
 		kfree(host);
 		return NULL;
 	}
 
-	spin_lock(&mmc_host_lock);
-	err = ida_get_new(&mmc_host_ida, &host->index);
-	spin_unlock(&mmc_host_lock);
-
-	if (err == -EAGAIN) {
-		goto again;
-	} else if (err) {
-		kfree(host);
-		return NULL;
-	}
+	host->index = err;
 
 	dev_set_name(&host->class_dev, "mmc%d", host->index);
 
@@ -380,12 +372,15 @@ again:
 
 	if (mmc_gpio_alloc(host)) {
 		put_device(&host->class_dev);
+		ida_simple_remove(&mmc_host_ida, host->index);
+		kfree(host);
 		return NULL;
 	}
 
 	spin_lock_init(&host->lock);
 	init_waitqueue_head(&host->wq);
 	INIT_DELAYED_WORK(&host->detect, mmc_rescan);
+	INIT_DELAYED_WORK(&host->sdio_irq_work, sdio_irq_work);
 	setup_timer(&host->retune_timer, mmc_retune_timer, (unsigned long)host);
 
 	/*

@@ -1029,8 +1029,7 @@ err:
 
 static int xennet_change_mtu(struct net_device *dev, int mtu)
 {
-	int max = xennet_can_sg(dev) ?
-		XEN_NETIF_MAX_TX_SIZE - MAX_TCP_HEADER : ETH_DATA_LEN;
+	int max = xennet_can_sg(dev) ? XEN_NETIF_MAX_TX_SIZE : ETH_DATA_LEN;
 
 	if (mtu > max)
 		return -EINVAL;
@@ -1296,8 +1295,6 @@ static struct net_device *xennet_create_dev(struct xenbus_device *dev)
 	netdev->extended->min_mtu = ETH_MIN_MTU;
 	netdev->extended->max_mtu = XEN_NETIF_MAX_TX_SIZE;
 	SET_NETDEV_DEV(netdev, &dev->dev);
-
-	netif_set_gso_max_size(netdev, XEN_NETIF_MAX_TX_SIZE - MAX_TCP_HEADER);
 
 	np->netdev = netdev;
 
@@ -2000,7 +1997,10 @@ static void netback_changed(struct xenbus_device *dev,
 	case XenbusStateInitialised:
 	case XenbusStateReconfiguring:
 	case XenbusStateReconfigured:
+		break;
+
 	case XenbusStateUnknown:
+		wake_up_all(&module_unload_q);
 		break;
 
 	case XenbusStateInitWait:
@@ -2156,7 +2156,9 @@ static int xennet_remove(struct xenbus_device *dev)
 		xenbus_switch_state(dev, XenbusStateClosing);
 		wait_event(module_unload_q,
 			   xenbus_read_driver_state(dev->otherend) ==
-			   XenbusStateClosing);
+			   XenbusStateClosing ||
+			   xenbus_read_driver_state(dev->otherend) ==
+			   XenbusStateUnknown);
 
 		xenbus_switch_state(dev, XenbusStateClosed);
 		wait_event(module_unload_q,

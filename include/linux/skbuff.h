@@ -631,6 +631,7 @@ static inline u32 skb_mstamp_us_delta(const struct skb_mstamp *t1,
  *	@tc_verd: traffic control verdict
  *	@hash: the packet hash
  *	@queue_mapping: Queue mapping for multiqueue devices
+ *	@pfmemalloc: skbuff was allocated from PFMEMALLOC reserves
  *	@ndisc_nodetype: router type (from link layer)
  *	@ooo_okay: allow the mapping of a socket to a queue to be changed
  *	@l4_hash: indicate hash is a canonical 4-tuple hash over transport
@@ -683,7 +684,7 @@ struct sk_buff {
 							   struct skb_mstamp b);
 			};
 		};
-		struct rb_node	rbnode; /* used in netem & tcp stack */
+		struct rb_node	rbnode; /* used in netem, ip4 defrag, and tcp stack */
 	};
 #endif
 	struct sock		*sk;
@@ -820,7 +821,8 @@ struct sk_buff {
 	RH_KABI_EXTEND(__u8	sw_hash:1)
 	RH_KABI_EXTEND(__u8     csum_not_inet:1)
 	RH_KABI_EXTEND(__u8	dst_pending_confirm:1)
-	/* 8 bit hole */
+	RH_KABI_EXTEND(__u8	offload_mr_fwd_mark:1)
+	/* 7 bit hole */
 	RH_KABI_EXTEND(kmemcheck_bitfield_end(flags3))
 
 	/* private: */
@@ -1415,27 +1417,8 @@ static inline int skb_header_unclone(struct sk_buff *skb, gfp_t pri)
 }
 
 /**
- *	skb_header_release - release reference to header
- *	@skb: buffer to operate on
- *
- *	Drop a reference to the header part of the buffer.  This is done
- *	by acquiring a payload reference.  You must not read from the header
- *	part of skb->data after this.
- *	Note : Check if you can use __skb_header_release() instead.
- */
-static inline void skb_header_release(struct sk_buff *skb)
-{
-	BUG_ON(skb->nohdr);
-	skb->nohdr = 1;
-	atomic_add(1 << SKB_DATAREF_SHIFT, &skb_shinfo(skb)->dataref);
-}
-
-/**
  *	__skb_header_release - release reference to header
  *	@skb: buffer to operate on
- *
- *	Variant of skb_header_release() assuming skb is private to caller.
- *	We can avoid one atomic operation.
  */
 static inline void __skb_header_release(struct sk_buff *skb)
 {
@@ -2478,7 +2461,7 @@ static inline void __skb_queue_purge(struct sk_buff_head *list)
 		kfree_skb(skb);
 }
 
-void skb_rbtree_purge(struct rb_root *root);
+unsigned int skb_rbtree_purge(struct rb_root *root);
 
 void *netdev_alloc_frag(unsigned int fragsz);
 
@@ -3184,6 +3167,7 @@ int skb_shift(struct sk_buff *tgt, struct sk_buff *skb, int shiftlen);
 void skb_scrub_packet(struct sk_buff *skb, bool xnet);
 unsigned int skb_gso_transport_seglen(const struct sk_buff *skb);
 bool skb_gso_validate_mtu(const struct sk_buff *skb, unsigned int mtu);
+bool skb_gso_validate_mac_len(const struct sk_buff *skb, unsigned int len);
 struct sk_buff *skb_segment(struct sk_buff *skb, netdev_features_t features);
 struct sk_buff *skb_vlan_untag(struct sk_buff *skb);
 int skb_ensure_writable(struct sk_buff *skb, int write_len);
@@ -3903,6 +3887,21 @@ static inline unsigned int skb_gso_network_seglen(const struct sk_buff *skb)
 {
 	unsigned int hdr_len = skb_transport_header(skb) -
 			       skb_network_header(skb);
+	return hdr_len + skb_gso_transport_seglen(skb);
+}
+
+/**
+ * skb_gso_mac_seglen - Return length of individual segments of a gso packet
+ *
+ * @skb: GSO skb
+ *
+ * skb_gso_mac_seglen is used to determine the real size of the
+ * individual segments, including MAC/L2, Layer3 (IP, IPv6) and L4
+ * headers (TCP/UDP).
+ */
+static inline unsigned int skb_gso_mac_seglen(const struct sk_buff *skb)
+{
+	unsigned int hdr_len = skb_transport_header(skb) - skb_mac_header(skb);
 	return hdr_len + skb_gso_transport_seglen(skb);
 }
 

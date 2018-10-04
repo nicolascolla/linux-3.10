@@ -568,8 +568,15 @@ static void __tun_detach(struct tun_file *tfile, bool clean)
 
 static void tun_detach(struct tun_file *tfile, bool clean)
 {
+	struct tun_struct *tun;
+	struct net_device *dev;
+
 	rtnl_lock();
+	tun = rtnl_dereference(tfile->tun);
+	dev = tun ? tun->dev : NULL;
 	__tun_detach(tfile, clean);
+	if (dev)
+		netdev_state_change(dev);
 	rtnl_unlock();
 }
 
@@ -1725,11 +1732,67 @@ static int tun_validate(struct nlattr *tb[], struct nlattr *data[])
 	return -EINVAL;
 }
 
+static size_t tun_get_size(const struct net_device *dev)
+{
+	BUILD_BUG_ON(sizeof(u32) != sizeof(uid_t));
+	BUILD_BUG_ON(sizeof(u32) != sizeof(gid_t));
+
+	return nla_total_size(sizeof(uid_t)) + /* OWNER */
+	       nla_total_size(sizeof(gid_t)) + /* GROUP */
+	       nla_total_size(sizeof(u8)) + /* TYPE */
+	       nla_total_size(sizeof(u8)) + /* PI */
+	       nla_total_size(sizeof(u8)) + /* VNET_HDR */
+	       nla_total_size(sizeof(u8)) + /* PERSIST */
+	       nla_total_size(sizeof(u8)) + /* MULTI_QUEUE */
+	       nla_total_size(sizeof(u32)) + /* NUM_QUEUES */
+	       nla_total_size(sizeof(u32)) + /* NUM_DISABLED_QUEUES */
+	       0;
+}
+
+static int tun_fill_info(struct sk_buff *skb, const struct net_device *dev)
+{
+	struct tun_struct *tun = netdev_priv(dev);
+
+	if (nla_put_u8(skb, IFLA_TUN_TYPE, tun->flags & TUN_TYPE_MASK))
+		goto nla_put_failure;
+	if (uid_valid(tun->owner) &&
+	    nla_put_u32(skb, IFLA_TUN_OWNER,
+			from_kuid_munged(current_user_ns(), tun->owner)))
+		goto nla_put_failure;
+	if (gid_valid(tun->group) &&
+	    nla_put_u32(skb, IFLA_TUN_GROUP,
+			from_kgid_munged(current_user_ns(), tun->group)))
+		goto nla_put_failure;
+	if (nla_put_u8(skb, IFLA_TUN_PI, !(tun->flags & IFF_NO_PI)))
+		goto nla_put_failure;
+	if (nla_put_u8(skb, IFLA_TUN_VNET_HDR, !!(tun->flags & IFF_VNET_HDR)))
+		goto nla_put_failure;
+	if (nla_put_u8(skb, IFLA_TUN_PERSIST, !!(tun->flags & IFF_PERSIST)))
+		goto nla_put_failure;
+	if (nla_put_u8(skb, IFLA_TUN_MULTI_QUEUE,
+		       !!(tun->flags & IFF_MULTI_QUEUE)))
+		goto nla_put_failure;
+	if (tun->flags & IFF_MULTI_QUEUE) {
+		if (nla_put_u32(skb, IFLA_TUN_NUM_QUEUES, tun->numqueues))
+			goto nla_put_failure;
+		if (nla_put_u32(skb, IFLA_TUN_NUM_DISABLED_QUEUES,
+				tun->numdisabled))
+			goto nla_put_failure;
+	}
+
+	return 0;
+
+nla_put_failure:
+	return -EMSGSIZE;
+}
+
 static struct rtnl_link_ops tun_link_ops __read_mostly = {
 	.kind		= DRV_NAME,
 	.priv_size	= sizeof(struct tun_struct),
 	.setup		= tun_setup,
 	.validate	= tun_validate,
+	.get_size       = tun_get_size,
+	.fill_info      = tun_fill_info,
 };
 
 static void tun_sock_write_space(struct sock *sk)
@@ -1908,10 +1971,15 @@ static int tun_set_iff(struct net *net, struct file *file, struct ifreq *ifr)
 			/* One or more queue has already been attached, no need
 			 * to initialize the device again.
 			 */
+			netdev_state_change(dev);
 			return 0;
 		}
-	}
-	else {
+
+		tun->flags = (tun->flags & ~TUN_FEATURES) |
+			      (ifr->ifr_flags & TUN_FEATURES);
+
+		netdev_state_change(dev);
+	} else {
 		char *name;
 		unsigned long flags = 0;
 		int queues = ifr->ifr_flags & IFF_MULTI_QUEUE ?
@@ -1982,6 +2050,9 @@ static int tun_set_iff(struct net *net, struct file *file, struct ifreq *ifr)
 				     ~(NETIF_F_HW_VLAN_CTAG_TX |
 				       NETIF_F_HW_VLAN_STAG_TX);
 
+		tun->flags = (tun->flags & ~TUN_FEATURES) |
+			      (ifr->ifr_flags & TUN_FEATURES);
+
 		INIT_LIST_HEAD(&tun->disabled);
 		err = tun_attach(tun, file, false);
 		if (err < 0)
@@ -2000,9 +2071,6 @@ static int tun_set_iff(struct net *net, struct file *file, struct ifreq *ifr)
 	netif_carrier_on(tun->dev);
 
 	tun_debug(KERN_INFO, tun, "tun_set_iff\n");
-
-	tun->flags = (tun->flags & ~TUN_FEATURES) |
-		(ifr->ifr_flags & TUN_FEATURES);
 
 	/* Make sure persistent devices do not get stuck in
 	 * xoff state.
@@ -2147,6 +2215,9 @@ static int tun_set_queue(struct file *file, struct ifreq *ifr)
 	} else
 		ret = -EINVAL;
 
+	if (ret >= 0)
+		netdev_state_change(tun->dev);
+
 unlock:
 	rtnl_unlock();
 	return ret;
@@ -2166,6 +2237,7 @@ static long __tun_chr_ioctl(struct file *file, unsigned int cmd,
 	unsigned int ifindex;
 	int le;
 	int ret;
+	bool do_notify = false;
 
 	if (cmd == TUNSETIFF || cmd == TUNSETQUEUE || _IOC_TYPE(cmd) == 0x89) {
 		if (copy_from_user(&ifr, argp, ifreq_len))
@@ -2248,10 +2320,12 @@ static long __tun_chr_ioctl(struct file *file, unsigned int cmd,
 		if (arg && !(tun->flags & IFF_PERSIST)) {
 			tun->flags |= IFF_PERSIST;
 			__module_get(THIS_MODULE);
+			do_notify = true;
 		}
 		if (!arg && (tun->flags & IFF_PERSIST)) {
 			tun->flags &= ~IFF_PERSIST;
 			module_put(THIS_MODULE);
+			do_notify = true;
 		}
 
 		tun_debug(KERN_INFO, tun, "persist %s\n",
@@ -2266,6 +2340,7 @@ static long __tun_chr_ioctl(struct file *file, unsigned int cmd,
 			break;
 		}
 		tun->owner = owner;
+		do_notify = true;
 		tun_debug(KERN_INFO, tun, "owner set to %u\n",
 			  from_kuid(&init_user_ns, tun->owner));
 		break;
@@ -2278,6 +2353,7 @@ static long __tun_chr_ioctl(struct file *file, unsigned int cmd,
 			break;
 		}
 		tun->group = group;
+		do_notify = true;
 		tun_debug(KERN_INFO, tun, "group set to %u\n",
 			  from_kgid(&init_user_ns, tun->group));
 		break;
@@ -2424,6 +2500,9 @@ static long __tun_chr_ioctl(struct file *file, unsigned int cmd,
 		ret = -EINVAL;
 		break;
 	}
+
+	if (do_notify)
+		netdev_state_change(tun->dev);
 
 unlock:
 	rtnl_unlock();

@@ -610,12 +610,6 @@ static inline void intel_pmu_drain_pebs_buffer(void)
 	x86_pmu.drain_pebs(&regs);
 }
 
-void intel_pmu_pebs_sched_task(struct perf_event_context *ctx, bool sched_in)
-{
-	if (!sched_in)
-		intel_pmu_drain_pebs_buffer();
-}
-
 /*
  * PEBS
  */
@@ -826,6 +820,14 @@ static inline bool pebs_needs_sched_cb(struct cpu_hw_events *cpuc)
 	return cpuc->n_pebs && (cpuc->n_pebs == cpuc->n_large_pebs);
 }
 
+void intel_pmu_pebs_sched_task(struct perf_event_context *ctx, bool sched_in)
+{
+	struct cpu_hw_events *cpuc = this_cpu_ptr(&cpu_hw_events);
+
+	if (!sched_in && pebs_needs_sched_cb(cpuc))
+		intel_pmu_drain_pebs_buffer();
+}
+
 static inline void pebs_update_threshold(struct cpu_hw_events *cpuc)
 {
 	struct debug_store *ds = cpuc->ds;
@@ -899,6 +901,8 @@ void intel_pmu_pebs_enable(struct perf_event *event)
 	if (hwc->flags & PERF_X86_EVENT_AUTO_RELOAD) {
 		ds->pebs_event_reset[hwc->idx] =
 			(u64)(-hwc->sample_period) & x86_pmu.cntval_mask;
+	} else {
+		ds->pebs_event_reset[hwc->idx] = 0;
 	}
 }
 
@@ -1175,7 +1179,7 @@ static void setup_pebs_sample_data(struct perf_event *event,
 	else
 		regs->flags &= ~PERF_EFLAGS_EXACT;
 
-	if ((sample_type & PERF_SAMPLE_ADDR) &&
+	if ((sample_type & (PERF_SAMPLE_ADDR | PERF_SAMPLE_PHYS_ADDR)) &&
 	    x86_pmu.intel_cap.pebs_format >= 1)
 		data->addr = pebs->dla;
 

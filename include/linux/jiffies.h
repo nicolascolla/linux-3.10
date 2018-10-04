@@ -149,15 +149,19 @@ static inline u64 get_jiffies_64(void)
 
 /* time_is_before_jiffies(a) return true if a is before jiffies */
 #define time_is_before_jiffies(a) time_after(jiffies, a)
+#define time_is_before_jiffies64(a) time_after64(get_jiffies_64(), a)
 
 /* time_is_after_jiffies(a) return true if a is after jiffies */
 #define time_is_after_jiffies(a) time_before(jiffies, a)
+#define time_is_after_jiffies64(a) time_before64(get_jiffies_64(), a)
 
 /* time_is_before_eq_jiffies(a) return true if a is before or equal to jiffies*/
 #define time_is_before_eq_jiffies(a) time_after_eq(jiffies, a)
+#define time_is_before_eq_jiffies64(a) time_after_eq64(get_jiffies_64(), a)
 
 /* time_is_after_eq_jiffies(a) return true if a is after or equal to jiffies*/
 #define time_is_after_eq_jiffies(a) time_before_eq(jiffies, a)
+#define time_is_after_eq_jiffies64(a) time_before_eq64(get_jiffies_64(), a)
 
 /*
  * Have the 32 bit jiffies value wrap 5 minutes after boot
@@ -282,6 +286,12 @@ extern unsigned long preset_lpj;
  */
 extern unsigned int jiffies_to_msecs(const unsigned long j);
 extern unsigned int jiffies_to_usecs(const unsigned long j);
+
+static inline u64 jiffies_to_nsecs(const unsigned long j)
+{
+	return (u64)jiffies_to_usecs(j) * NSEC_PER_USEC;
+}
+
 extern unsigned long msecs_to_jiffies(const unsigned int m);
 extern unsigned long usecs_to_jiffies(const unsigned int u);
 extern unsigned long timespec_to_jiffies(const struct timespec *value);

@@ -27,7 +27,6 @@
 #include <linux/module.h>
 #include <linux/debugfs.h>
 #include <linux/stringify.h>
-#include <linux/nospec.h>
 #include <asm/ioctls.h>
 
 #include <net/bluetooth/bluetooth.h>
@@ -117,7 +116,6 @@ static int bt_sock_create(struct net *net, struct socket *sock, int proto,
 
 	if (proto < 0 || proto >= BT_MAX_PROTO)
 		return -EINVAL;
-	proto = array_index_nospec(proto, BT_MAX_PROTO);
 
 	if (!bt_proto[proto])
 		request_module("bt-proto-%d", proto);

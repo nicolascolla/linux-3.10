@@ -204,16 +204,18 @@
 #define X86_FEATURE_RETPOLINE_AMD (7*32+13) /* AMD Retpoline mitigation for Spectre variant 2 */
 #define X86_FEATURE_INTEL_PPIN	( 7*32+14) /* Intel Processor Inventory Number */
 #define X86_FEATURE_INTEL_PT	( 7*32+15) /* Intel Processor Trace */
+#define X86_FEATURE_CDP_L2	( 7*32+16) /* Code and Data Prioritization L2 */
 #define X86_FEATURE_SSBD	( 7*32+17) /* Speculative Store Bypass Disable */
 #define X86_FEATURE_MBA		( 7*32+18) /* Memory Bandwidth Allocation */
 #define X86_FEATURE_IBP_DISABLE ( 7*32+21) /* Old AMD Indirect Branch Predictor Disable */
 #define X86_FEATURE_SPEC_STORE_BYPASS_DISABLE	(7*32+23) /* "" Disable Speculative Store Bypass. */
-#define X86_FEATURE_LS_CFG_SSBD		( 7*32+24) /* "" AMD SSBD implementation */
+#define X86_FEATURE_LS_CFG_SSBD 	( 7*32+24) /* "" AMD SSBD implementation */
 #define X86_FEATURE_IBRS		( 7*32+25) /* Indirect Branch Restricted Speculation */
 #define X86_FEATURE_IBPB		( 7*32+26) /* Indirect Branch Prediction Barrier */
 #define X86_FEATURE_STIBP		( 7*32+27) /* Single Thread Indirect Branch Predictors */
 #define X86_FEATURE_ZEN			( 7*32+28) /* "" CPU is AMD family 0x17 (Zen) */
 #define X86_FEATURE_L1TF_PTEINV		( 7*32+29) /* "" L1TF workaround PTE inversion */
+#define X86_FEATURE_IBRS_ENHANCED	( 7*32+30) /* Enhanced IBRS */
 
 /* Virtualization flags: Linux defined, word 8 */
 #define X86_FEATURE_TPR_SHADOW  (8*32+ 0) /* Intel TPR Shadow */
@@ -311,8 +313,15 @@
 
 /* Intel-defined CPU features, CPUID level 0x00000007:0 (ecx), word 16 */
 #define X86_FEATURE_AVX512VBMI	(16*32+ 1) /* AVX512 Vector Bit Manipulation instructions*/
+#define X86_FEATURE_UMIP	(16*32+ 2) /* User Mode Instruction Protection */
 #define X86_FEATURE_PKU		(16*32+ 3) /* Protection Keys for Userspace */
 #define X86_FEATURE_OSPKE	(16*32+ 4) /* OS Protection Keys Enable */
+#define X86_FEATURE_AVX512_VBMI2 (16*32+ 6) /* Additional AVX512 Vector Bit Manipulation Instructions */
+#define X86_FEATURE_GFNI	(16*32+ 8) /* Galois Field New Instructions */
+#define X86_FEATURE_VAES	(16*32+ 9) /* Vector AES */
+#define X86_FEATURE_VPCLMULQDQ	(16*32+ 10) /* Carry-Less Multiplication Double Quadword */
+#define X86_FEATURE_AVX512_VNNI (16*32+ 11) /* Vector Neural Network Instructions */
+#define X86_FEATURE_AVX512_BITALG (16*32+12) /* Support for VPOPCNT[B,W] and VPSHUF-BITQMB */
 #define X86_FEATURE_AVX512_VPOPCNTDQ (16*32+14) /* POPCNT for vectors of DW/QW */
 
 /* Intel-defined CPU features, CPUID level 0x00000007:0 (EDX), word 18 */

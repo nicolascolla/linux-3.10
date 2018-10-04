@@ -19,7 +19,6 @@
 #include <linux/init.h>
 #include <linux/isdn/capiutil.h>
 #include <linux/slab.h>
-#include <linux/nospec.h>
 
 /* from CAPI2.0 DDK AVM Berlin GmbH */
 
@@ -678,9 +677,7 @@ static char *mnames[] =
 
 char *capi_cmd2str(u8 cmd, u8 subcmd)
 {
-	int idx = array_index_nospec(command_2_index(cmd, subcmd),
-				     ARRAY_SIZE(mnames));
-	return mnames[idx];
+	return mnames[command_2_index(cmd, subcmd)];
 }
 
 

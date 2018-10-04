@@ -50,7 +50,6 @@
 #include <linux/log2.h>
 #include <linux/aer.h>
 #include <linux/crash_dump.h>
-#include <linux/nospec.h>
 
 #if IS_ENABLED(CONFIG_CNIC)
 #define BCM_CNIC 1
@@ -88,7 +87,7 @@ MODULE_FIRMWARE(FW_RV2P_FILE_09_Ax);
 
 static int disable_msi = 0;
 
-module_param(disable_msi, int, S_IRUGO);
+module_param(disable_msi, int, 0444);
 MODULE_PARM_DESC(disable_msi, "Disable Message Signaled Interrupt (MSI)");
 
 typedef enum {
@@ -371,7 +370,6 @@ static void bnx2_setup_cnic_irq_info(struct bnx2 *bp)
 		cp->irq_arr[0].irq_flags &= ~CNIC_IRQ_FL_MSIX;
 	}
 
-	sb_id = array_index_nospec(sb_id, BNX2_MAX_MSIX_VEC);
 	cp->irq_arr[0].vector = bp->irq_tbl[sb_id].vector;
 	cp->irq_arr[0].status_blk = (void *)
 		((unsigned long) bnapi->status_blk.msi +
@@ -5820,8 +5818,8 @@ bnx2_run_loopback(struct bnx2 *bp, int loopback_mode)
 	struct l2_fhdr *rx_hdr;
 	int ret = -ENODEV;
 	struct bnx2_napi *bnapi = &bp->bnx2_napi[0], *tx_napi;
-	struct bnx2_tx_ring_info *txr = &bnapi->tx_ring;
-	struct bnx2_rx_ring_info *rxr = &bnapi->rx_ring;
+	struct bnx2_tx_ring_info *txr;
+	struct bnx2_rx_ring_info *rxr;
 
 	tx_napi = bnapi;
 
@@ -6185,9 +6183,9 @@ bnx2_5708_serdes_timer(struct bnx2 *bp)
 }
 
 static void
-bnx2_timer(unsigned long data)
+bnx2_timer(struct timer_list *t)
 {
-	struct bnx2 *bp = (struct bnx2 *) data;
+	struct bnx2 *bp = from_timer(bp, t, timer);
 
 	if (!netif_running(bp->dev))
 		return;
@@ -8464,7 +8462,7 @@ bnx2_init_board(struct pci_dev *pdev, struct net_device *dev)
 	bnx2_set_default_link(bp);
 	bp->req_flow_ctrl = FLOW_CTRL_RX | FLOW_CTRL_TX;
 
-	setup_timer(&bp->timer, bnx2_timer, (unsigned long)bp);
+	timer_setup(&bp->timer, bnx2_timer, 0);
 	bp->timer.expires = RUN_AT(BNX2_TIMER_INTERVAL);
 
 #ifdef BCM_CNIC

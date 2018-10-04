@@ -72,7 +72,6 @@
 #include <linux/ip.h>
 #include <linux/if_arp.h>
 #include <linux/time.h>
-#include <linux/nospec.h>
 #include <net/mac80211.h>
 #include <net/ieee80211_radiotap.h>
 #include <net/tcp.h>
@@ -334,7 +333,8 @@ struct ieee80211_regdomain *iwl_mvm_get_regdomain(struct wiphy *wiphy,
 	regd = iwl_parse_nvm_mcc_info(mvm->trans->dev, mvm->cfg,
 				      __le32_to_cpu(resp->n_channels),
 				      resp->channels,
-				      __le16_to_cpu(resp->mcc));
+				      __le16_to_cpu(resp->mcc),
+				      __le16_to_cpu(resp->geo_info));
 	/* Store the return source id */
 	src_id = resp->source_id;
 	kfree(resp);
@@ -876,7 +876,6 @@ iwl_mvm_ampdu_check_trigger(struct iwl_mvm *mvm, struct ieee80211_vif *vif,
 					   ieee80211_vif_to_wdev(vif), trig))
 		return;
 
-	tid = array_index_nospec(tid, IWL_MAX_TID_COUNT + 1);
 	switch (action) {
 	case IEEE80211_AMPDU_TX_OPERATIONAL: {
 		struct iwl_mvm_sta *mvmsta = iwl_mvm_sta_from_mac80211(sta);

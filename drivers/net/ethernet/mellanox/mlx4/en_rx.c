@@ -32,6 +32,8 @@
  */
 
 #include <net/busy_poll.h>
+#include <linux/bpf.h>
+#include <linux/bpf_trace.h>
 #include <linux/mlx4/cq.h>
 #include <linux/slab.h>
 #include <linux/mlx4/qp.h>
@@ -85,7 +87,6 @@ static int mlx4_en_alloc_frags(struct mlx4_en_priv *priv,
 		}
 		rx_desc->data[i].addr = cpu_to_be64(frags->dma +
 						    frags->page_offset);
-
 	}
 	return 0;
 }
@@ -138,13 +139,15 @@ static int mlx4_en_prepare_rx_desc(struct mlx4_en_priv *priv,
 	struct mlx4_en_rx_alloc *frags = ring->rx_info +
 					(index << priv->log_rx_info);
 	if (likely(ring->page_cache.index > 0)) {
+		/* XDP uses a single page per frame */
 		if (!frags->page) {
 			ring->page_cache.index--;
 			frags->page = ring->page_cache.buf[ring->page_cache.index].page;
 			frags->dma  = ring->page_cache.buf[ring->page_cache.index].dma;
 		}
-		frags->page_offset = 0;
-		rx_desc->data[0].addr = cpu_to_be64(frags->dma);
+		frags->page_offset = XDP_PACKET_HEADROOM;
+		rx_desc->data[0].addr = cpu_to_be64(frags->dma +
+						    XDP_PACKET_HEADROOM);
 		return 0;
 	}
 
@@ -430,7 +433,13 @@ void mlx4_en_destroy_rx_ring(struct mlx4_en_priv *priv,
 {
 	struct mlx4_en_dev *mdev = priv->mdev;
 	struct mlx4_en_rx_ring *ring = *pring;
+	struct bpf_prog *old_prog;
 
+	old_prog = rcu_dereference_protected(
+					ring->xdp_prog,
+					lockdep_is_held(&mdev->state_lock));
+	if (old_prog)
+		bpf_prog_put(old_prog);
 	mlx4_free_hwq_res(mdev->dev, &ring->wqres, size * stride + TXBB_SIZE);
 	vfree(ring->rx_info);
 	ring->rx_info = NULL;
@@ -609,6 +618,10 @@ static int get_fixed_ipv6_csum(__wsum hw_checksum, struct sk_buff *skb,
 	return 0;
 }
 #endif
+
+/* We reach this function only after checking that any of
+ * the (IPv4 | IPv6) bits are set in cqe->status.
+ */
 static int check_csum(struct mlx4_cqe *cqe, struct sk_buff *skb, void *va,
 		      netdev_features_t dev_features)
 {
@@ -624,13 +637,11 @@ static int check_csum(struct mlx4_cqe *cqe, struct sk_buff *skb, void *va,
 		hdr += sizeof(struct vlan_hdr);
 	}
 
-	if (cqe->status & cpu_to_be16(MLX4_CQE_STATUS_IPV4))
-		return get_fixed_ipv4_csum(hw_checksum, skb, hdr);
 #if IS_ENABLED(CONFIG_IPV6)
 	if (cqe->status & cpu_to_be16(MLX4_CQE_STATUS_IPV6))
 		return get_fixed_ipv6_csum(hw_checksum, skb, hdr);
 #endif
-	return 0;
+	return get_fixed_ipv4_csum(hw_checksum, skb, hdr);
 }
 
 int mlx4_en_process_rx_cq(struct net_device *dev, struct mlx4_en_cq *cq, int budget)
@@ -638,7 +649,9 @@ int mlx4_en_process_rx_cq(struct net_device *dev, struct mlx4_en_cq *cq, int bud
 	struct mlx4_en_priv *priv = netdev_priv(dev);
 	int factor = priv->cqe_factor;
 	struct mlx4_en_rx_ring *ring;
+	struct bpf_prog *xdp_prog;
 	int cq_ring = cq->ring;
+	bool doorbell_pending;
 	struct mlx4_cqe *cqe;
 	int polled = 0;
 	int index;
@@ -650,6 +663,11 @@ int mlx4_en_process_rx_cq(struct net_device *dev, struct mlx4_en_cq *cq, int bud
 		return polled;
 
 	ring = priv->rx_ring[cq_ring];
+
+	/* Protect accesses to: ring->xdp_prog, priv->mac_hash list */
+	rcu_read_lock();
+	xdp_prog = rcu_dereference(ring->xdp_prog);
+	doorbell_pending = 0;
 
 	/* We assume a 1:1 mapping between CQEs and Rx descriptors, so Rx
 	 * descriptor offset can be deduced from the CQE index instead of
@@ -710,15 +728,11 @@ int mlx4_en_process_rx_cq(struct net_device *dev, struct mlx4_en_cq *cq, int bud
 				/* Drop the packet, since HW loopback-ed it */
 				mac_hash = ethh->h_source[MLX4_EN_MAC_HASH_IDX];
 				bucket = &priv->mac_hash[mac_hash];
-				rcu_read_lock();
 				hlist_for_each_entry_rcu(entry, bucket, hlist) {
 					if (ether_addr_equal_64bits(entry->mac,
-								    ethh->h_source)) {
-						rcu_read_unlock();
+								    ethh->h_source))
 						goto next;
-					}
 				}
-				rcu_read_unlock();
 			}
 		}
 
@@ -732,6 +746,58 @@ int mlx4_en_process_rx_cq(struct net_device *dev, struct mlx4_en_cq *cq, int bud
 		 */
 		length = be32_to_cpu(cqe->byte_cnt);
 		length -= ring->fcs_del;
+
+		/* A bpf program gets first chance to drop the packet. It may
+		 * read bytes but not past the end of the frag.
+		 */
+		if (xdp_prog) {
+			struct xdp_buff xdp;
+			dma_addr_t dma;
+			void *orig_data;
+			u32 act;
+
+			dma = frags[0].dma + frags[0].page_offset;
+			dma_sync_single_for_cpu(priv->ddev, dma,
+						priv->frag_info[0].frag_size,
+						DMA_FROM_DEVICE);
+
+			xdp.data_hard_start = va - frags[0].page_offset;
+			xdp.data = va;
+			xdp.data_end = xdp.data + length;
+			orig_data = xdp.data;
+
+			act = bpf_prog_run_xdp(xdp_prog, &xdp);
+
+			if (xdp.data != orig_data) {
+				length = xdp.data_end - xdp.data;
+				frags[0].page_offset = xdp.data -
+					xdp.data_hard_start;
+				va = xdp.data;
+			}
+
+			switch (act) {
+			case XDP_PASS:
+				break;
+			case XDP_TX:
+				if (likely(!mlx4_en_xmit_frame(ring, frags, priv,
+							length, cq_ring,
+							&doorbell_pending))) {
+					frags[0].page = NULL;
+					goto next;
+				}
+				trace_xdp_exception(dev, xdp_prog, act);
+				goto xdp_drop_no_cnt; /* Drop on xmit failure */
+			default:
+				bpf_warn_invalid_xdp_action(act);
+			case XDP_ABORTED:
+				trace_xdp_exception(dev, xdp_prog, act);
+			case XDP_DROP:
+				ring->xdp_drop++;
+xdp_drop_no_cnt:
+				goto next;
+			}
+		}
+
 		ring->bytes += length;
 		ring->packets++;
 
@@ -750,33 +816,33 @@ int mlx4_en_process_rx_cq(struct net_device *dev, struct mlx4_en_cq *cq, int bud
 		if (likely(dev->features & NETIF_F_RXCSUM)) {
 			if (cqe->status & cpu_to_be16(MLX4_CQE_STATUS_TCP |
 						      MLX4_CQE_STATUS_UDP)) {
-				if ((cqe->status & cpu_to_be16(MLX4_CQE_STATUS_IPOK)) &&
-				    cqe->checksum == cpu_to_be16(0xffff)) {
-					bool l2_tunnel = (dev->hw_enc_features & NETIF_F_RXCSUM) &&
-						(cqe->vlan_my_qpn & cpu_to_be32(MLX4_CQE_L2_TUNNEL));
+				bool l2_tunnel;
 
-					ip_summed = CHECKSUM_UNNECESSARY;
-					hash_type = PKT_HASH_TYPE_L4;
-					if (l2_tunnel)
-						skb->csum_level = 1;
-					ring->csum_ok++;
-				} else {
+				if (!((cqe->status & cpu_to_be16(MLX4_CQE_STATUS_IPOK)) &&
+				      cqe->checksum == cpu_to_be16(0xffff)))
 					goto csum_none;
-				}
+
+				l2_tunnel = (dev->hw_enc_features & NETIF_F_RXCSUM) &&
+					(cqe->vlan_my_qpn & cpu_to_be32(MLX4_CQE_L2_TUNNEL));
+				ip_summed = CHECKSUM_UNNECESSARY;
+				hash_type = PKT_HASH_TYPE_L4;
+				if (l2_tunnel)
+					skb->csum_level = 1;
+				ring->csum_ok++;
 			} else {
-				if (priv->flags & MLX4_EN_FLAG_RX_CSUM_NON_TCP_UDP &&
-				    (cqe->status & cpu_to_be16(MLX4_CQE_STATUS_IPV4 |
-							       MLX4_CQE_STATUS_IPV6))) {
-					if (check_csum(cqe, skb, va, dev->features)) {
-						goto csum_none;
-					} else {
-						ip_summed = CHECKSUM_COMPLETE;
-						hash_type = PKT_HASH_TYPE_L3;
-						ring->csum_complete++;
-					}
-				} else {
+				if (!(priv->flags & MLX4_EN_FLAG_RX_CSUM_NON_TCP_UDP &&
+				      (cqe->status & cpu_to_be16(MLX4_CQE_STATUS_IPV4 |
+#if IS_ENABLED(CONFIG_IPV6)
+								 MLX4_CQE_STATUS_IPV6))))
+#else
+								 0))))
+#endif
 					goto csum_none;
-				}
+				if (check_csum(cqe, skb, va, dev->features))
+					goto csum_none;
+				ip_summed = CHECKSUM_COMPLETE;
+				hash_type = PKT_HASH_TYPE_L3;
+				ring->csum_complete++;
 			}
 		} else {
 csum_none:
@@ -821,7 +887,14 @@ next:
 			break;
 	}
 
+	rcu_read_unlock();
+
 	if (likely(polled)) {
+		if (doorbell_pending) {
+			priv->tx_cq[TX_XDP][cq_ring]->xdp_busy = true;
+			mlx4_en_xmit_doorbell(priv->tx_ring[TX_XDP][cq_ring]);
+		}
+
 		mlx4_cq_set_ci(&cq->mcq);
 		wmb(); /* ensure HW sees CQ consumer before we post new buffers */
 		ring->cons = cq->mcq.cons_index;
@@ -832,7 +905,6 @@ next:
 
 	return polled;
 }
-
 
 void mlx4_en_rx_irq(struct mlx4_cq *mcq)
 {
@@ -851,7 +923,18 @@ int mlx4_en_poll_rx_cq(struct napi_struct *napi, int budget)
 	struct mlx4_en_cq *cq = container_of(napi, struct mlx4_en_cq, napi);
 	struct net_device *dev = cq->dev;
 	struct mlx4_en_priv *priv = netdev_priv(dev);
+	struct mlx4_en_cq *xdp_tx_cq = NULL;
+	bool clean_complete = true;
 	int done;
+
+	if (priv->tx_ring_num[TX_XDP]) {
+		xdp_tx_cq = priv->tx_cq[TX_XDP][cq->ring];
+		if (xdp_tx_cq->xdp_busy) {
+			clean_complete = mlx4_en_process_tx_cq(dev, xdp_tx_cq,
+							       budget);
+			xdp_tx_cq->xdp_busy = !clean_complete;
+		}
+	}
 
 	done = mlx4_en_process_rx_cq(dev, cq, budget);
 
@@ -907,32 +990,49 @@ void mlx4_en_calc_rx_buf(struct net_device *dev)
 	 */
 	int eff_mtu = dev->mtu + ETH_HLEN + (2 * VLAN_HLEN);
 	int i = 0;
-	int frag_size_max = 2048, buf_size = 0;
 
-	/* should not happen, right ? */
-	if (eff_mtu > PAGE_SIZE + (MLX4_EN_MAX_RX_FRAGS - 1) * 2048)
-		frag_size_max = PAGE_SIZE;
-
-	while (buf_size < eff_mtu) {
-		int frag_stride, frag_size = eff_mtu - buf_size;
-		int pad, nb;
-
-		if (i < MLX4_EN_MAX_RX_FRAGS - 1)
-			frag_size = min(frag_size, frag_size_max);
-		priv->frag_info[i].frag_size = frag_size;
-		frag_stride = ALIGN(frag_size, SMP_CACHE_BYTES);
-		/* We can only pack 2 1536-bytes frames in on 4K page
-		 * Therefore, each frame would consume more bytes (truesize)
+	/* bpf requires buffers to be set up as 1 packet per page.
+	 * This only works when num_frags == 1.
+	 */
+	if (priv->tx_ring_num[TX_XDP]) {
+		priv->frag_info[0].frag_size = eff_mtu;
+		/* This will gain efficient xdp frame recycling at the
+		 * expense of more costly truesize accounting
 		 */
-		nb = PAGE_SIZE / frag_stride;
-		pad = (PAGE_SIZE - nb * frag_stride) / nb;
-		pad &= ~(SMP_CACHE_BYTES - 1);
-		priv->frag_info[i].frag_stride = frag_stride + pad;
-		buf_size += frag_size;
-		i++;
+		priv->frag_info[0].frag_stride = PAGE_SIZE;
+		priv->dma_dir = PCI_DMA_BIDIRECTIONAL;
+		priv->rx_headroom = XDP_PACKET_HEADROOM;
+		i = 1;
+	} else {
+		int frag_size_max = 2048, buf_size = 0;
+
+		/* should not happen, right ? */
+		if (eff_mtu > PAGE_SIZE + (MLX4_EN_MAX_RX_FRAGS - 1) * 2048)
+			frag_size_max = PAGE_SIZE;
+
+		while (buf_size < eff_mtu) {
+			int frag_stride, frag_size = eff_mtu - buf_size;
+			int pad, nb;
+
+			if (i < MLX4_EN_MAX_RX_FRAGS - 1)
+				frag_size = min(frag_size, frag_size_max);
+
+			priv->frag_info[i].frag_size = frag_size;
+			frag_stride = ALIGN(frag_size, SMP_CACHE_BYTES);
+			/* We can only pack 2 1536-bytes frames in on 4K page
+			 * Therefore, each frame would consume more bytes (truesize)
+			 */
+			nb = PAGE_SIZE / frag_stride;
+			pad = (PAGE_SIZE - nb * frag_stride) / nb;
+			pad &= ~(SMP_CACHE_BYTES - 1);
+			priv->frag_info[i].frag_stride = frag_stride + pad;
+
+			buf_size += frag_size;
+			i++;
+		}
+		priv->dma_dir = PCI_DMA_FROMDEVICE;
+		priv->rx_headroom = 0;
 	}
-	priv->dma_dir = PCI_DMA_FROMDEVICE;
-	priv->rx_headroom = 0;
 
 	priv->num_frags = i;
 	priv->rx_skb_size = eff_mtu;

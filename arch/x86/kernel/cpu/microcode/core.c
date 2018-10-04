@@ -66,7 +66,7 @@ static DEFINE_MUTEX(microcode_mutex);
 /*
  * Serialize late loading so that CPUs get updated one-by-one.
  */
-static DEFINE_SPINLOCK(update_lock);
+static DEFINE_RAW_SPINLOCK(update_lock);
 
 struct ucode_cpu_info		ucode_cpu_info[NR_CPUS];
 EXPORT_SYMBOL_GPL(ucode_cpu_info);
@@ -458,9 +458,9 @@ static int __reload_late(void *info)
 	if (__wait_for_cpus(&late_cpus_in, NSEC_PER_SEC))
 		return -1;
 
-	spin_lock(&update_lock);
+	raw_spin_lock(&update_lock);
 	apply_microcode_local(&err);
-	spin_unlock(&update_lock);
+	raw_spin_unlock(&update_lock);
 
 	if (err > UCODE_NFOUND) {
 		pr_warn("Error reloading microcode on CPU %d\n", cpu);
@@ -576,7 +576,7 @@ static struct attribute *mc_default_attrs[] = {
 	NULL
 };
 
-static struct attribute_group mc_attr_group = {
+static const struct attribute_group mc_attr_group = {
 	.attrs			= mc_default_attrs,
 	.name			= "microcode",
 };
@@ -740,7 +740,7 @@ static struct attribute *cpu_root_microcode_attrs[] = {
 	NULL
 };
 
-static struct attribute_group cpu_root_microcode_group = {
+static const struct attribute_group cpu_root_microcode_group = {
 	.name  = "microcode",
 	.attrs = cpu_root_microcode_attrs,
 };

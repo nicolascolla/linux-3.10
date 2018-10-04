@@ -42,7 +42,6 @@
 #include <linux/io.h>
 #include <linux/jiffies.h>
 #include <linux/module.h>
-#include <linux/nospec.h>
 #include <rdma/ib_verbs.h>
 #include <rdma/ib_smi.h>
 #ifdef CONFIG_INFINIBAND_QIB_DCA
@@ -1648,7 +1647,6 @@ static noinline void handle_7322_errors(struct qib_devdata *dd)
 	u64 iserr = 0;
 	u64 errs;
 	u64 mask;
-	int log_idx;
 
 	qib_stats.sps_errints++;
 	errs = qib_read_kreg64(dd, kr_errstatus);
@@ -1666,10 +1664,7 @@ static noinline void handle_7322_errors(struct qib_devdata *dd)
 	if (errs & QIB_E_HARDWARE) {
 		*msg = '\0';
 		qib_7322_handle_hwerrors(dd, msg, sizeof(dd->cspec->emsgbuf));
-	} else
-		for (log_idx = 0; log_idx < QIB_EEP_LOG_CNT; ++log_idx)
-			if (errs & dd->eep_st_masks[log_idx].errs_to_log)
-				qib_inc_eeprom_err(dd, log_idx, 1);
+	}
 
 	if (errs & QIB_E_SPKTERRS) {
 		qib_disarm_7322_senderrbufs(dd->pport);
@@ -1740,9 +1735,10 @@ static void qib_error_tasklet(unsigned long data)
 	qib_write_kreg(dd, kr_errmask, dd->cspec->errormask);
 }
 
-static void reenable_chase(unsigned long opaque)
+static void reenable_chase(struct timer_list *t)
 {
-	struct qib_pportdata *ppd = (struct qib_pportdata *)opaque;
+	struct qib_chippport_specific *cp = from_timer(cp, t, chase_timer);
+	struct qib_pportdata *ppd = cp->ppd;
 
 	ppd->cpspec->chase_timer.expires = 0;
 	qib_set_ib_7322_lstate(ppd, QLOGIC_IB_IBCC_LINKCMD_DOWN,
@@ -2532,7 +2528,7 @@ static void qib_7322_mini_quiet_serdes(struct qib_pportdata *ppd)
 		cancel_delayed_work_sync(&ppd->cpspec->ipg_work);
 
 	ppd->cpspec->chase_end = 0;
-	if (ppd->cpspec->chase_timer.data) /* if initted */
+	if (ppd->cpspec->chase_timer.function) /* if initted */
 		del_timer_sync(&ppd->cpspec->chase_timer);
 
 	/*
@@ -5139,9 +5135,9 @@ done:
  *
  * called from add_timer
  */
-static void qib_get_7322_faststats(unsigned long opaque)
+static void qib_get_7322_faststats(struct timer_list *t)
 {
-	struct qib_devdata *dd = (struct qib_devdata *) opaque;
+	struct qib_devdata *dd = from_timer(dd, t, stats_timer);
 	struct qib_pportdata *ppd;
 	unsigned long flags;
 	u64 traffic_wds;
@@ -6614,8 +6610,7 @@ static int qib_init_7322_variables(struct qib_devdata *dd)
 		if (!qib_mini_init)
 			write_7322_init_portregs(ppd);
 
-		setup_timer(&cp->chase_timer, reenable_chase,
-			    (unsigned long)ppd);
+		timer_setup(&cp->chase_timer, reenable_chase, 0);
 
 		ppd++;
 	}
@@ -6641,8 +6636,7 @@ static int qib_init_7322_variables(struct qib_devdata *dd)
 		(u64) rcv_int_count << IBA7322_HDRHEAD_PKTINT_SHIFT;
 
 	/* setup the stats timer; the add_timer is done at end of init */
-	setup_timer(&dd->stats_timer, qib_get_7322_faststats,
-		    (unsigned long)dd);
+	timer_setup(&dd->stats_timer, qib_get_7322_faststats, 0);
 
 	dd->ureg_align = 0x10000;  /* 64KB alignment */
 
@@ -7695,14 +7689,12 @@ static void find_best_ent(struct qib_pportdata *ppd,
 		 * table.
 		 */
 		idx = ppd->cpspec->no_eep;
-		idx = array_index_nospec(idx, TXDDS_TABLE_SZ);
 		*sdr_dds = &txdds_sdr[idx];
 		*ddr_dds = &txdds_ddr[idx];
 		*qdr_dds = &txdds_qdr[idx];
 	} else if (ppd->cpspec->no_eep < (TXDDS_TABLE_SZ + TXDDS_EXTRA_SZ)) {
 		/* similar to above, but index into the "extra" table. */
 		idx = ppd->cpspec->no_eep - TXDDS_TABLE_SZ;
-		idx = array_index_nospec(idx, TXDDS_EXTRA_SZ);
 		*sdr_dds = &txdds_extra_sdr[idx];
 		*ddr_dds = &txdds_extra_ddr[idx];
 		*qdr_dds = &txdds_extra_qdr[idx];
@@ -7712,7 +7704,6 @@ static void find_best_ent(struct qib_pportdata *ppd,
 		idx = ppd->cpspec->no_eep - (TXDDS_TABLE_SZ + TXDDS_EXTRA_SZ);
 		pr_info("IB%u:%u use idx %u into txdds_mfg\n",
 			ppd->dd->unit, ppd->port, idx);
-		idx = array_index_nospec(idx, TXDDS_MFG_SZ);
 		*sdr_dds = &txdds_extra_mfg[idx];
 		*ddr_dds = &txdds_extra_mfg[idx];
 		*qdr_dds = &txdds_extra_mfg[idx];

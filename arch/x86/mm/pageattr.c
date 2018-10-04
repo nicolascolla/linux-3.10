@@ -149,6 +149,12 @@ void clflush_cache_range(void *vaddr, unsigned int size)
 }
 EXPORT_SYMBOL_GPL(clflush_cache_range);
 
+void arch_invalidate_pmem(void *addr, size_t size)
+{
+	clflush_cache_range(addr, size);
+}
+EXPORT_SYMBOL_GPL(arch_invalidate_pmem);
+
 static void __cpa_flush_all(void *arg)
 {
 	unsigned long cache = (unsigned long)arg;
@@ -1643,8 +1649,8 @@ static int __set_memory_enc_dec(unsigned long addr, int numpages, bool enc)
 	unsigned long start;
 	int ret;
 
-	/* Nothing to do if the SME is not active */
-	if (!sme_active())
+	/* Nothing to do if memory encryption is not active */
+	if (!mem_encrypt_active())
 		return 0;
 
 	/* Should not be working on unaligned addresses */

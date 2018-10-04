@@ -196,7 +196,6 @@ get_sdev(int dev)
 	struct seq_oss_synth *rec;
 	unsigned long flags;
 
-	dev = array_index_nospec(dev, SNDRV_SEQ_OSS_MAX_SYNTH_DEVS);
 	spin_lock_irqsave(&register_lock, flags);
 	rec = synth_devs[dev];
 	if (rec)
@@ -621,7 +620,6 @@ snd_seq_oss_synth_make_info(struct seq_oss_devinfo *dp, int dev, struct synth_in
 
 	if (dev < 0 || dev >= dp->max_synthdev)
 		return -ENXIO;
-	dev = array_index_nospec(dev, dp->max_synthdev);
 
 	if (dp->synths[dev].is_midi) {
 		struct midi_info minf;

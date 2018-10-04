@@ -152,14 +152,14 @@ static int l2tp_nl_cmd_tunnel_create(struct sk_buff *skb, struct genl_info *info
 			cfg.local_udp_port = nla_get_u16(info->attrs[L2TP_ATTR_UDP_SPORT]);
 		if (info->attrs[L2TP_ATTR_UDP_DPORT])
 			cfg.peer_udp_port = nla_get_u16(info->attrs[L2TP_ATTR_UDP_DPORT]);
-		if (info->attrs[L2TP_ATTR_UDP_CSUM])
-			cfg.use_udp_checksums = nla_get_flag(info->attrs[L2TP_ATTR_UDP_CSUM]);
+		cfg.use_udp_checksums = nla_get_flag(
+			info->attrs[L2TP_ATTR_UDP_CSUM]);
 
 #if IS_ENABLED(CONFIG_IPV6)
-		if (info->attrs[L2TP_ATTR_UDP_ZERO_CSUM6_TX])
-			cfg.udp6_zero_tx_checksums = nla_get_flag(info->attrs[L2TP_ATTR_UDP_ZERO_CSUM6_TX]);
-		if (info->attrs[L2TP_ATTR_UDP_ZERO_CSUM6_RX])
-			cfg.udp6_zero_rx_checksums = nla_get_flag(info->attrs[L2TP_ATTR_UDP_ZERO_CSUM6_RX]);
+		cfg.udp6_zero_tx_checksums = nla_get_flag(
+			info->attrs[L2TP_ATTR_UDP_ZERO_CSUM6_TX]);
+		cfg.udp6_zero_rx_checksums = nla_get_flag(
+			info->attrs[L2TP_ATTR_UDP_ZERO_CSUM6_RX]);
 #endif
 	}
 
@@ -303,9 +303,24 @@ static int l2tp_nl_tunnel_send(struct sk_buff *skb, u32 portid, u32 seq, int fla
 
 	switch (tunnel->encap) {
 	case L2TP_ENCAPTYPE_UDP:
+		switch (sk->sk_family) {
+		case AF_INET:
+			if (nla_put_u8(skb, L2TP_ATTR_UDP_CSUM, !sk->sk_no_check_tx))
+				goto nla_put_failure;
+			break;
+#if IS_ENABLED(CONFIG_IPV6)
+		case AF_INET6:
+			if (udp_get_no_check6_tx(sk) &&
+			    nla_put_flag(skb, L2TP_ATTR_UDP_ZERO_CSUM6_TX))
+				goto nla_put_failure;
+			if (udp_get_no_check6_rx(sk) &&
+			    nla_put_flag(skb, L2TP_ATTR_UDP_ZERO_CSUM6_RX))
+				goto nla_put_failure;
+			break;
+#endif
+		}
 		if (nla_put_u16(skb, L2TP_ATTR_UDP_SPORT, ntohs(inet->inet_sport)) ||
-		    nla_put_u16(skb, L2TP_ATTR_UDP_DPORT, ntohs(inet->inet_dport)) ||
-		    nla_put_u8(skb, L2TP_ATTR_UDP_CSUM, !sk->sk_no_check_tx))
+		    nla_put_u16(skb, L2TP_ATTR_UDP_DPORT, ntohs(inet->inet_dport)))
 			goto nla_put_failure;
 		/* NOBREAK */
 	case L2TP_ENCAPTYPE_IP:

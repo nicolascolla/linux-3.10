@@ -17,7 +17,6 @@
 #include <linux/pageblock-flags.h>
 #include <linux/page-flags-layout.h>
 #include <linux/atomic.h>
-#include <linux/nospec.h>
 #include <asm/page.h>
 
 #include <linux/rh_kabi.h>
@@ -68,8 +67,10 @@ enum {
 
 #ifdef CONFIG_CMA
 #  define is_migrate_cma(migratetype) unlikely((migratetype) == MIGRATE_CMA)
+#  define is_migrate_cma_page(_page) (get_pageblock_migratetype(_page) == MIGRATE_CMA)
 #else
 #  define is_migrate_cma(migratetype) false
+#  define is_migrate_cma_page(_page) false
 #endif
 
 #define for_each_migratetype_order(order, type) \
@@ -1246,11 +1247,9 @@ extern struct mem_section mem_section[NR_SECTION_ROOTS][SECTIONS_PER_ROOT];
 
 static inline struct mem_section *__nr_to_section(unsigned long nr)
 {
-	int root = array_index_nospec(SECTION_NR_TO_ROOT(nr), NR_SECTION_ROOTS);
-
-	if (!mem_section[root])
+	if (!mem_section[SECTION_NR_TO_ROOT(nr)])
 		return NULL;
-	return &mem_section[root][nr & SECTION_ROOT_MASK];
+	return &mem_section[SECTION_NR_TO_ROOT(nr)][nr & SECTION_ROOT_MASK];
 }
 extern int __section_nr(struct mem_section* ms);
 extern unsigned long usemap_size(void);
@@ -1301,13 +1300,9 @@ static inline struct mem_section *__pfn_to_section(unsigned long pfn)
 #ifndef CONFIG_HAVE_ARCH_PFN_VALID
 static inline int pfn_valid(unsigned long pfn)
 {
-	unsigned long nr = pfn_to_section_nr(pfn);
-
-	if (nr >= NR_MEM_SECTIONS)
+	if (pfn_to_section_nr(pfn) >= NR_MEM_SECTIONS)
 		return 0;
-	nr = array_index_nospec(nr, NR_MEM_SECTIONS);
-
-	return valid_section(__nr_to_section(nr));
+	return valid_section(__nr_to_section(pfn_to_section_nr(pfn)));
 }
 #endif
 

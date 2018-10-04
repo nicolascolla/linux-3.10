@@ -38,7 +38,6 @@
 #include <linux/tty_flip.h>
 #include <linux/kfifo.h>
 #include <linux/slab.h>
-#include <linux/nospec.h>
 
 #include <linux/mmc/core.h>
 #include <linux/mmc/card.h>
@@ -117,7 +116,6 @@ static struct sdio_uart_port *sdio_uart_port_get(unsigned index)
 
 	if (index >= UART_NR)
 		return NULL;
-	index = array_index_nospec(index, UART_NR);
 
 	spin_lock(&sdio_uart_table_lock);
 	port = sdio_uart_table[index];

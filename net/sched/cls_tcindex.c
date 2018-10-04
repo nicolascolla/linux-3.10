@@ -13,6 +13,7 @@
 #include <net/act_api.h>
 #include <net/netlink.h>
 #include <net/pkt_cls.h>
+#include <net/sch_generic.h>
 
 /*
  * Passing parameters to the root seems to be done more awkwardly than really
@@ -96,9 +97,11 @@ static int tcindex_classify(struct sk_buff *skb, const struct tcf_proto *tp,
 
 	f = tcindex_lookup(p, key);
 	if (!f) {
+		struct Qdisc *q = tcf_block_q(tp->chain->block);
+
 		if (!p->fall_through)
 			return -1;
-		res->classid = TC_H_MAKE(TC_H_MAJ(tp->q->handle), key);
+		res->classid = TC_H_MAKE(TC_H_MAJ(q->handle), key);
 		res->class = 0;
 		pr_debug("alg 0x%x\n", res->classid);
 		return 0;
@@ -463,11 +466,6 @@ tcindex_set_parms(struct net *net, struct tcf_proto *tp, unsigned long base,
 		tcf_bind_filter(tp, &cr.res, base);
 	}
 
-	if (old_r)
-		tcf_exts_change(&r->exts, &e);
-	else
-		tcf_exts_change(&cr.exts, &e);
-
 	if (old_r && old_r != r) {
 		err = tcindex_filter_result_init(old_r);
 		if (err < 0) {
@@ -478,12 +476,15 @@ tcindex_set_parms(struct net *net, struct tcf_proto *tp, unsigned long base,
 
 	oldp = p;
 	r->res = cr.res;
+	tcf_exts_change(&r->exts, &e);
+
 	rcu_assign_pointer(tp->root, cp);
 
 	if (r == &new_filter_result) {
 		struct tcindex_filter *nfp;
 		struct tcindex_filter __rcu **fp;
 
+		f->result.res = r->res;
 		tcf_exts_change(&f->result.exts, &r->exts);
 
 		fp = cp->h + (handle % cp->hash);

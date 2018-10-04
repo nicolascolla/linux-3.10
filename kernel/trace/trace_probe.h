@@ -270,6 +270,26 @@ struct probe_arg {
 	const struct fetch_type	*type;	/* Type of this argument */
 };
 
+struct trace_probe {
+	unsigned int			flags;	/* For TP_FLAG_* */
+	struct ftrace_event_class	class;
+	struct ftrace_event_call	call;
+	struct list_head 		files;
+	ssize_t				size;	/* trace entry size */
+	unsigned int			nr_args;
+	struct probe_arg		args[];
+};
+
+static inline bool trace_probe_is_enabled(struct trace_probe *tp)
+{
+	return !!(tp->flags & (TP_FLAG_TRACE | TP_FLAG_PROFILE));
+}
+
+static inline bool trace_probe_is_registered(struct trace_probe *tp)
+{
+	return !!(tp->flags & TP_FLAG_REGISTERED);
+}
+
 static inline __kprobes void call_fetch(struct fetch_param *fprm,
 				 struct pt_regs *regs, void *dest)
 {
@@ -304,3 +324,64 @@ extern ssize_t traceprobe_probes_write(struct file *file,
 		int (*createfn)(int, char**));
 
 extern int traceprobe_command(const char *buf, int (*createfn)(int, char**));
+
+/* Sum up total data length for dynamic arraies (strings) */
+static inline __kprobes int
+__get_data_size(struct trace_probe *tp, struct pt_regs *regs)
+{
+	int i, ret = 0;
+	u32 len;
+
+	for (i = 0; i < tp->nr_args; i++)
+		if (unlikely(tp->args[i].fetch_size.fn)) {
+			call_fetch(&tp->args[i].fetch_size, regs, &len);
+			ret += len;
+		}
+
+	return ret;
+}
+
+/* Store the value of each argument */
+static inline __kprobes void
+store_trace_args(int ent_size, struct trace_probe *tp, struct pt_regs *regs,
+		 u8 *data, int maxlen)
+{
+	int i;
+	u32 end = tp->size;
+	u32 *dl;	/* Data (relative) location */
+
+	for (i = 0; i < tp->nr_args; i++) {
+		if (unlikely(tp->args[i].fetch_size.fn)) {
+			/*
+			 * First, we set the relative location and
+			 * maximum data length to *dl
+			 */
+			dl = (u32 *)(data + tp->args[i].offset);
+			*dl = make_data_rloc(maxlen, end - tp->args[i].offset);
+			/* Then try to fetch string or dynamic array data */
+			call_fetch(&tp->args[i].fetch, regs, dl);
+			/* Reduce maximum length */
+			end += get_rloc_len(*dl);
+			maxlen -= get_rloc_len(*dl);
+			/* Trick here, convert data_rloc to data_loc */
+			*dl = convert_rloc_to_loc(*dl,
+				 ent_size + tp->args[i].offset);
+		} else
+			/* Just fetching data normally */
+			call_fetch(&tp->args[i].fetch, regs,
+				   data + tp->args[i].offset);
+	}
+}
+
+extern int set_print_fmt(struct trace_probe *tp, bool is_return);
+
+#ifdef CONFIG_PERF_EVENTS
+extern struct ftrace_event_call *
+create_local_trace_kprobe(char *func, void *addr, unsigned long offs,
+			  bool is_return);
+extern void destroy_local_trace_kprobe(struct ftrace_event_call *event_call);
+
+extern struct ftrace_event_call *
+create_local_trace_uprobe(char *name, unsigned long offs, bool is_return);
+extern void destroy_local_trace_uprobe(struct ftrace_event_call *event_call);
+#endif

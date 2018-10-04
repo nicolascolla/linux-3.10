@@ -198,7 +198,7 @@ void ipv6_mc_remap(struct inet6_dev *idev);
 void ipv6_mc_init_dev(struct inet6_dev *idev);
 void ipv6_mc_destroy_dev(struct inet6_dev *idev);
 int ipv6_mc_check_mld(struct sk_buff *skb, struct sk_buff **skb_trimmed);
-void addrconf_dad_failure(struct inet6_ifaddr *ifp);
+void addrconf_dad_failure(struct sk_buff *skb, struct inet6_ifaddr *ifp);
 
 bool ipv6_chk_mcast_addr(struct net_device *dev, const struct in6_addr *group,
 			 const struct in6_addr *src_addr);
@@ -320,6 +320,16 @@ static inline void in6_dev_put(struct inet6_dev *idev)
 {
 	if (atomic_dec_and_test(&idev->refcnt))
 		in6_dev_finish_destroy(idev);
+}
+
+static inline void in6_dev_put_clear(struct inet6_dev **pidev)
+{
+	struct inet6_dev *idev = *pidev;
+
+	if (idev) {
+		in6_dev_put(idev);
+		*pidev = NULL;
+	}
 }
 
 static inline void __in6_dev_put(struct inet6_dev *idev)

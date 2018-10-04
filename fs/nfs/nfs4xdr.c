@@ -167,8 +167,10 @@ static int nfs4_stat_to_errno(int);
 				open_owner_id_maxsz + \
 				encode_opentype_maxsz + \
 				encode_claim_null_maxsz)
+#define decode_space_limit_maxsz	(3)
 #define decode_ace_maxsz	(3 + nfs4_owner_maxsz)
 #define decode_delegation_maxsz	(1 + decode_stateid_maxsz + 1 + \
+				decode_space_limit_maxsz + \
 				decode_ace_maxsz)
 #define decode_change_info_maxsz	(5)
 #define decode_open_maxsz	(op_decode_hdr_maxsz + \
@@ -1778,7 +1780,7 @@ static void encode_exchange_id(struct xdr_stream *xdr,
 	int len = 0;
 
 	encode_op_hdr(xdr, OP_EXCHANGE_ID, decode_exchange_id_maxsz, hdr);
-	encode_nfs4_verifier(xdr, args->verifier);
+	encode_nfs4_verifier(xdr, &args->verifier);
 
 	encode_string(xdr, strlen(args->client->cl_owner_id),
 			args->client->cl_owner_id);
@@ -2047,7 +2049,9 @@ encode_layoutreturn(struct xdr_stream *xdr,
 	spin_lock(&args->inode->i_lock);
 	encode_nfs4_stateid(xdr, &args->stateid);
 	spin_unlock(&args->inode->i_lock);
-	if (lr_ops->encode_layoutreturn)
+	if (args->ld_private->ops && args->ld_private->ops->encode)
+		args->ld_private->ops->encode(xdr, args, args->ld_private);
+	else if (lr_ops->encode_layoutreturn)
 		lr_ops->encode_layoutreturn(xdr, args);
 	else
 		encode_uint32(xdr, 0);
@@ -7393,6 +7397,7 @@ int nfs4_decode_dirent(struct xdr_stream *xdr, struct nfs_entry *entry,
 	unsigned int savep;
 	uint32_t bitmap[3] = {0};
 	uint32_t len;
+	uint64_t new_cookie;
 	__be32 *p = xdr_inline_decode(xdr, 4);
 	if (unlikely(!p))
 		goto out_overflow;
@@ -7409,8 +7414,7 @@ int nfs4_decode_dirent(struct xdr_stream *xdr, struct nfs_entry *entry,
 	p = xdr_inline_decode(xdr, 12);
 	if (unlikely(!p))
 		goto out_overflow;
-	entry->prev_cookie = entry->cookie;
-	p = xdr_decode_hyper(p, &entry->cookie);
+	p = xdr_decode_hyper(p, &new_cookie);
 	entry->len = be32_to_cpup(p);
 
 	p = xdr_inline_decode(xdr, entry->len);
@@ -7443,6 +7447,9 @@ int nfs4_decode_dirent(struct xdr_stream *xdr, struct nfs_entry *entry,
 	entry->d_type = DT_UNKNOWN;
 	if (entry->fattr->valid & NFS_ATTR_FATTR_TYPE)
 		entry->d_type = nfs_umode_to_dtype(entry->fattr->mode);
+
+	entry->prev_cookie = entry->cookie;
+	entry->cookie = new_cookie;
 
 	return 0;
 

@@ -23,7 +23,6 @@
 #include <linux/sched.h>
 #include <linux/slab.h>
 #include <linux/timekeeping.h>
-#include <linux/nospec.h>
 
 #include "ptp_private.h"
 
@@ -262,8 +261,6 @@ long ptp_ioctl(struct posix_clock *pc, unsigned int cmd, unsigned long arg)
 			err = -EINVAL;
 			break;
 		}
-		pin_index = array_index_nospec(pin_index, ops->n_pins);
-
 		if (mutex_lock_interruptible(&ptp->pincfg_mux))
 			return -ERESTARTSYS;
 		pd = ops->pin_config[pin_index];
@@ -282,8 +279,6 @@ long ptp_ioctl(struct posix_clock *pc, unsigned int cmd, unsigned long arg)
 			err = -EINVAL;
 			break;
 		}
-		pin_index = array_index_nospec(pin_index, ops->n_pins);
-
 		if (mutex_lock_interruptible(&ptp->pincfg_mux))
 			return -ERESTARTSYS;
 		err = ptp_set_pinfunc(ptp, pin_index, pd.func, pd.chan);

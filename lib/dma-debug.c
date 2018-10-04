@@ -22,6 +22,7 @@
 #include <linux/stacktrace.h>
 #include <linux/dma-debug.h>
 #include <linux/spinlock.h>
+#include <linux/vmalloc.h>
 #include <linux/debugfs.h>
 #include <linux/uaccess.h>
 #include <linux/export.h>
@@ -255,6 +256,7 @@ static int hash_fn(struct dma_debug_entry *entry)
  */
 static struct hash_bucket *get_hash_bucket(struct dma_debug_entry *entry,
 					   unsigned long *flags)
+	__acquires(&dma_entry_hash[idx].lock)
 {
 	int idx = hash_fn(entry);
 	unsigned long __flags;
@@ -269,6 +271,7 @@ static struct hash_bucket *get_hash_bucket(struct dma_debug_entry *entry,
  */
 static void put_hash_bucket(struct hash_bucket *bucket,
 			    unsigned long *flags)
+	__releases(&bucket->lock)
 {
 	unsigned long __flags = *flags;
 
@@ -363,7 +366,7 @@ static struct dma_debug_entry *bucket_find_contain(struct hash_bucket **bucket,
 	unsigned int range = 0;
 
 	while (range <= max_range) {
-		entry = __hash_bucket_find(*bucket, &index, containing_match);
+		entry = __hash_bucket_find(*bucket, ref, containing_match);
 
 		if (entry)
 			return entry;
@@ -579,6 +582,9 @@ void debug_dma_assert_idle(struct page *page)
 	unsigned long flags;
 	phys_addr_t cln;
 
+	if (dma_debug_disabled())
+		return;
+
 	if (!page)
 		return;
 
@@ -659,9 +665,9 @@ static struct dma_debug_entry *dma_entry_alloc(void)
 	spin_lock_irqsave(&free_entries_lock, flags);
 
 	if (list_empty(&free_entries)) {
-		pr_err("DMA-API: debugging out of memory - disabling\n");
 		global_disable = true;
 		spin_unlock_irqrestore(&free_entries_lock, flags);
+		pr_err("DMA-API: debugging out of memory - disabling\n");
 		return NULL;
 	}
 
@@ -934,20 +940,16 @@ static int device_dma_allocations(struct device *dev, struct dma_debug_entry **o
 	unsigned long flags;
 	int count = 0, i;
 
-	local_irq_save(flags);
-
 	for (i = 0; i < HASH_SIZE; ++i) {
-		spin_lock(&dma_entry_hash[i].lock);
+		spin_lock_irqsave(&dma_entry_hash[i].lock, flags);
 		list_for_each_entry(entry, &dma_entry_hash[i].list, list) {
 			if (entry->dev == dev) {
 				count += 1;
 				*out_entry = entry;
 			}
 		}
-		spin_unlock(&dma_entry_hash[i].lock);
+		spin_unlock_irqrestore(&dma_entry_hash[i].lock, flags);
 	}
-
-	local_irq_restore(flags);
 
 	return count;
 }
@@ -1149,6 +1151,11 @@ static void check_unmap(struct dma_debug_entry *ref)
 			   dir2name[ref->direction]);
 	}
 
+	/*
+	 * Drivers should use dma_mapping_error() to check the returned
+	 * addresses of dma_map_single() and dma_map_page().
+	 * If not, print this warning message. See Documentation/DMA-API.txt.
+	 */
 	if (entry->map_err_type == MAP_ERR_NOT_CHECKED) {
 		err_printk(ref->dev, entry,
 			   "DMA-API: device driver failed to check map error"
@@ -1164,11 +1171,32 @@ static void check_unmap(struct dma_debug_entry *ref)
 	put_hash_bucket(bucket, &flags);
 }
 
-static void check_for_stack(struct device *dev, void *addr)
+static void check_for_stack(struct device *dev,
+			    struct page *page, size_t offset)
 {
-	if (object_is_on_stack(addr))
-		err_printk(dev, NULL, "DMA-API: device driver maps memory from"
-				"stack [addr=%p]\n", addr);
+	void *addr;
+	struct vm_struct *stack_vm_area = task_stack_vm_area(current);
+
+	if (!stack_vm_area) {
+		/* Stack is direct-mapped. */
+		if (PageHighMem(page))
+			return;
+		addr = page_address(page) + offset;
+		if (object_is_on_stack(addr))
+			err_printk(dev, NULL, "DMA-API: device driver maps memory from stack [addr=%p]\n", addr);
+	} else {
+		/* Stack is vmalloced. */
+		int i;
+
+		for (i = 0; i < stack_vm_area->nr_pages; i++) {
+			if (page != stack_vm_area->pages[i])
+				continue;
+
+			addr = (u8 *)current->stack + i * PAGE_SIZE + offset;
+			err_printk(dev, NULL, "DMA-API: device driver maps memory from stack [probable addr=%p]\n", addr);
+			break;
+		}
+	}
 }
 
 static inline bool overlap(void *addr, unsigned long len, void *start, void *end)
@@ -1183,7 +1211,7 @@ static inline bool overlap(void *addr, unsigned long len, void *start, void *end
 
 static void check_for_illegal_area(struct device *dev, void *addr, unsigned long len)
 {
-	if (overlap(addr, len, _text, _etext) ||
+	if (overlap(addr, len, _stext, _etext) ||
 	    overlap(addr, len, __start_rodata, __end_rodata))
 		err_printk(dev, NULL, "DMA-API: device driver maps memory from kernel text or rodata [addr=%p] [len=%lu]\n", addr, len);
 }
@@ -1251,6 +1279,14 @@ static void check_sync(struct device *dev,
 				dir2name[entry->direction],
 				dir2name[ref->direction]);
 
+	if (ref->sg_call_ents && ref->type == dma_debug_sg &&
+	    ref->sg_call_ents != entry->sg_call_ents) {
+		err_printk(ref->dev, entry, "DMA-API: device driver syncs "
+			   "DMA sg list with different entry count "
+			   "[map count=%d] [sync count=%d]\n",
+			   entry->sg_call_ents, ref->sg_call_ents);
+	}
+
 out:
 	put_hash_bucket(bucket, &flags);
 }
@@ -1283,10 +1319,11 @@ void debug_dma_map_page(struct device *dev, struct page *page, size_t offset,
 	if (map_single)
 		entry->type = dma_debug_single;
 
+	check_for_stack(dev, page, offset);
+
 	if (!PageHighMem(page)) {
 		void *addr = page_address(page) + offset;
 
-		check_for_stack(dev, addr);
 		check_for_illegal_area(dev, addr, size);
 	}
 
@@ -1378,8 +1415,9 @@ void debug_dma_map_sg(struct device *dev, struct scatterlist *sg,
 		entry->sg_call_ents   = nents;
 		entry->sg_mapped_ents = mapped_ents;
 
+		check_for_stack(dev, sg_page(s), s->offset);
+
 		if (!PageHighMem(sg_page(s))) {
-			check_for_stack(dev, sg_virt(s));
 			check_for_illegal_area(dev, sg_virt(s), sg_dma_len(s));
 		}
 
@@ -1451,17 +1489,25 @@ void debug_dma_alloc_coherent(struct device *dev, size_t size,
 	if (unlikely(virt == NULL))
 		return;
 
+	/* handle vmalloc and linear addresses */
+	if (!is_vmalloc_addr(virt) && !virt_addr_valid(virt))
+		return;
+
 	entry = dma_entry_alloc();
 	if (!entry)
 		return;
 
 	entry->type      = dma_debug_coherent;
 	entry->dev       = dev;
-	entry->pfn	 = page_to_pfn(virt_to_page(virt));
-	entry->offset	 = (size_t) virt & ~PAGE_MASK;
+	entry->offset	 = offset_in_page(virt);
 	entry->size      = size;
 	entry->dev_addr  = dma_addr;
 	entry->direction = DMA_BIDIRECTIONAL;
+
+	if (is_vmalloc_addr(virt))
+		entry->pfn = vmalloc_to_pfn(virt);
+	else
+		entry->pfn = page_to_pfn(virt_to_page(virt));
 
 	add_dma_entry(entry);
 }
@@ -1473,12 +1519,20 @@ void debug_dma_free_coherent(struct device *dev, size_t size,
 	struct dma_debug_entry ref = {
 		.type           = dma_debug_coherent,
 		.dev            = dev,
-		.pfn		= page_to_pfn(virt_to_page(virt)),
-		.offset		= (size_t) virt & ~PAGE_MASK,
+		.offset		= offset_in_page(virt),
 		.dev_addr       = addr,
 		.size           = size,
 		.direction      = DMA_BIDIRECTIONAL,
 	};
+
+	/* handle vmalloc and linear addresses */
+	if (!is_vmalloc_addr(virt) && !virt_addr_valid(virt))
+		return;
+
+	if (is_vmalloc_addr(virt))
+		ref.pfn = vmalloc_to_pfn(virt);
+	else
+		ref.pfn = page_to_pfn(virt_to_page(virt));
 
 	if (unlikely(dma_debug_disabled()))
 		return;

@@ -33,7 +33,6 @@
 #include <linux/slab.h>
 #include <linux/string.h>
 #include <linux/module.h>
-#include <linux/nospec.h>
 #include <sound/core.h>
 #include <sound/seq_kernel.h>
 #include <sound/seq_midi_emul.h>
@@ -88,7 +87,6 @@ snd_midi_process_event(struct snd_midi_op *ops,
 	struct snd_midi_channel *chan;
 	void *drv;
 	int dest_channel = 0;
-	u8 note;
 
 	if (ev == NULL || chanset == NULL) {
 		pr_debug("ALSA: seq_midi_emul: ev or chanbase NULL (snd_midi_process_event)\n");
@@ -126,26 +124,25 @@ snd_midi_process_event(struct snd_midi_op *ops,
 			return;
 	}
 
-	note = array_index_nospec(ev->data.note.note, 128);
 	switch (ev->type) {
 	case SNDRV_SEQ_EVENT_NOTEON:
-		if (chan->note[note] & SNDRV_MIDI_NOTE_ON) {
+		if (chan->note[ev->data.note.note] & SNDRV_MIDI_NOTE_ON) {
 			if (ops->note_off)
-				ops->note_off(drv, note, 0, chan);
+				ops->note_off(drv, ev->data.note.note, 0, chan);
 		}
-		chan->note[note] = SNDRV_MIDI_NOTE_ON;
+		chan->note[ev->data.note.note] = SNDRV_MIDI_NOTE_ON;
 		if (ops->note_on)
-			ops->note_on(drv, note, ev->data.note.velocity, chan);
+			ops->note_on(drv, ev->data.note.note, ev->data.note.velocity, chan);
 		break;
 	case SNDRV_SEQ_EVENT_NOTEOFF:
-		if (! (chan->note[note] & SNDRV_MIDI_NOTE_ON))
+		if (! (chan->note[ev->data.note.note] & SNDRV_MIDI_NOTE_ON))
 			break;
 		if (ops->note_off)
-			note_off(ops, drv, chan, note, ev->data.note.velocity);
+			note_off(ops, drv, chan, ev->data.note.note, ev->data.note.velocity);
 		break;
 	case SNDRV_SEQ_EVENT_KEYPRESS:
 		if (ops->key_press)
-			ops->key_press(drv, note, ev->data.note.velocity, chan);
+			ops->key_press(drv, ev->data.note.note, ev->data.note.velocity, chan);
 		break;
 	case SNDRV_SEQ_EVENT_CONTROLLER:
 		do_control(ops, drv, chanset, chan,
@@ -168,9 +165,7 @@ snd_midi_process_event(struct snd_midi_op *ops,
 		/* Best guess is that this is any of the 14 bit controller values */
 		if (ev->data.control.param < 32) {
 			/* set low part first */
-			unsigned int idx = array_index_nospec(ev->data.control.param + 32,
-							      128);
-			chan->control[idx] =
+			chan->control[ev->data.control.param + 32] =
 				ev->data.control.value & 0x7f;
 			do_control(ops, drv, chanset, chan,
 				   ev->data.control.param,
@@ -277,7 +272,6 @@ do_control(struct snd_midi_op *ops, void *drv, struct snd_midi_channel_set *chse
 
 	if (control >= ARRAY_SIZE(chan->control))
 		return;
-	control = array_index_nospec(control, ARRAY_SIZE(chan->control));
 
 	/* Switches */
 	if ((control >=64 && control <=69) || (control >= 80 && control <= 83)) {

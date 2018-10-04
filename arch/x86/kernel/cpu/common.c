@@ -352,6 +352,30 @@ static __always_inline void setup_smap(struct cpuinfo_x86 *c)
 		set_in_cr4(X86_CR4_SMAP);
 }
 
+static __always_inline void setup_umip(struct cpuinfo_x86 *c)
+{
+	/* Check the boot processor, plus build option for UMIP. */
+	if (!cpu_feature_enabled(X86_FEATURE_UMIP))
+		goto out;
+
+	/* Check the current processor's cpuid bits. */
+	if (!cpu_has(c, X86_FEATURE_UMIP))
+		goto out;
+
+	set_in_cr4(X86_CR4_UMIP);
+
+	pr_info("x86/cpu: Activated the Intel User Mode Instruction Prevention (UMIP) CPU feature\n");
+
+	return;
+
+out:
+	/*
+	 * Make sure UMIP is disabled in case it was enabled in a
+	 * previous boot (e.g., via kexec).
+	 */
+	clear_in_cr4(X86_CR4_UMIP);
+}
+
 /*
  * Protection Keys are not available in 32-bit mode.
  */
@@ -937,6 +961,9 @@ static void __init cpu_set_bug_bits(struct cpuinfo_x86 *c)
 	   !cpu_has(c, X86_FEATURE_AMD_SSB_NO))
 		setup_force_cpu_bug(X86_BUG_SPEC_STORE_BYPASS);
 
+	if (ia32_cap & ARCH_CAP_IBRS_ALL)
+		setup_force_cpu_cap(X86_FEATURE_IBRS_ENHANCED);
+
 	if (x86_match_cpu(cpu_no_meltdown))
 		return;
 
@@ -1192,9 +1219,10 @@ static void identify_cpu(struct cpuinfo_x86 *c)
 	/* Disable the PN if appropriate */
 	squash_the_stupid_serial_number(c);
 
-	/* Set up SMEP/SMAP */
+	/* Set up SMEP/SMAP/UMIP */
 	setup_smep(c);
 	setup_smap(c);
+	setup_umip(c);
 
 	/*
 	 * The vendor-specific functions might have changed features.
@@ -1660,7 +1688,7 @@ void cpu_init(void)
 	current->thread.sp0 = v;	/* Restore original value */
 	set_tss_desc(cpu, t);
 	load_TR_desc();
-	load_LDT(&init_mm.context);
+	load_mm_ldt(&init_mm);
 
 	clear_all_debug_regs();
 	dbg_restore_debug_regs();
@@ -1705,7 +1733,7 @@ void cpu_init(void)
 	load_sp0(t, thread);
 	set_tss_desc(cpu, t);
 	load_TR_desc();
-	load_LDT(&init_mm.context);
+	load_mm_ldt(&init_mm);
 
 	t->x86_tss.io_bitmap_base = offsetof(struct tss_struct, io_bitmap);
 

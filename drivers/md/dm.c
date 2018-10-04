@@ -18,6 +18,7 @@
 #include <linux/dax.h>
 #include <linux/slab.h>
 #include <linux/idr.h>
+#include <linux/socket.h>
 #include <linux/hdreg.h>
 #include <linux/delay.h>
 #include <linux/wait.h>
@@ -510,7 +511,7 @@ static void start_io_acct(struct dm_io *io)
 	io->start_time = jiffies;
 
 	cpu = part_stat_lock();
-	part_round_stats(cpu, &dm_disk(md)->part0);
+	part_round_stats(md->queue, cpu, &dm_disk(md)->part0);
 	part_stat_unlock();
 	atomic_set(&dm_disk(md)->part0.in_flight[rw],
 		atomic_inc_return(&md->pending[rw]));
@@ -529,7 +530,7 @@ static void end_io_acct(struct dm_io *io)
 	int rw = bio_data_dir(bio);
 
 	cpu = part_stat_lock();
-	part_round_stats(cpu, &dm_disk(md)->part0);
+	part_round_stats(md->queue, cpu, &dm_disk(md)->part0);
 	part_stat_add(cpu, &dm_disk(md)->part0, ticks[rw], duration);
 	part_stat_unlock();
 
@@ -945,9 +946,60 @@ static long dm_dax_direct_access(struct dax_device *dax_dev, pgoff_t pgoff,
 	if (len < 1)
 		goto out;
 	nr_pages = min(len, nr_pages);
-	if (ti->type->direct_access)
-		ret = ti->type->direct_access(ti, pgoff, nr_pages, kaddr, pfn);
+	ret = ti->type->direct_access(ti, pgoff, nr_pages, kaddr, pfn);
 
+ out:
+	dm_put_live_table(md, srcu_idx);
+
+	return ret;
+}
+
+static int dm_dax_memcpy_fromiovecend(struct dax_device *dax_dev, pgoff_t pgoff,
+				      void *addr, const struct iovec *iov,
+				      int offset, int len)
+{
+	struct mapped_device *md = dax_get_private(dax_dev);
+	sector_t sector = pgoff * PAGE_SECTORS;
+	struct dm_target *ti;
+	long ret = 0;
+	int srcu_idx;
+
+	ti = dm_dax_get_live_target(md, sector, &srcu_idx);
+
+	if (!ti)
+		goto out;
+	if (!ti->type->dax_memcpy_fromiovecend) {
+		ret = memcpy_fromiovecend_partial_flushcache(addr, iov,
+							     offset, len);
+		goto out;
+	}
+	ret = ti->type->dax_memcpy_fromiovecend(ti, pgoff, addr,
+						iov, offset, len);
+ out:
+	dm_put_live_table(md, srcu_idx);
+
+	return ret;
+}
+
+static int dm_dax_memcpy_toiovecend(struct dax_device *dax_dev, pgoff_t pgoff,
+		const struct iovec *iov, void *addr, int offset, int len)
+{
+	struct mapped_device *md = dax_get_private(dax_dev);
+	sector_t sector = pgoff * PAGE_SECTORS;
+	struct dm_target *ti;
+	long ret = 0;
+	int srcu_idx;
+
+	ti = dm_dax_get_live_target(md, sector, &srcu_idx);
+
+	if (!ti)
+		goto out;
+	if (!ti->type->dax_memcpy_toiovecend) {
+		ret = memcpy_toiovecend_partial(iov, addr, offset, len);
+		goto out;
+	}
+	ret = ti->type->dax_memcpy_toiovecend(ti, pgoff,
+					      iov, addr, offset, len);
  out:
 	dm_put_live_table(md, srcu_idx);
 
@@ -1710,7 +1762,7 @@ static void cleanup_mapped_device(struct mapped_device *md)
 static struct mapped_device *alloc_dev(int minor)
 {
 	int r, numa_node_id = dm_get_numa_node();
-	struct dax_device *dax_dev;
+	struct dax_device *dax_dev = NULL;
 	struct mapped_device *md;
 	void *old_md;
 
@@ -1751,7 +1803,7 @@ static struct mapped_device *alloc_dev(int minor)
 	INIT_LIST_HEAD(&md->table_devices);
 	spin_lock_init(&md->uevent_lock);
 
-	md->queue = blk_alloc_queue_node(GFP_KERNEL, numa_node_id);
+	md->queue = blk_alloc_queue_node(GFP_KERNEL, numa_node_id, NULL);
 	if (!md->queue)
 		goto bad;
 
@@ -1776,9 +1828,11 @@ static struct mapped_device *alloc_dev(int minor)
 	md->disk->private_data = md;
 	sprintf(md->disk->disk_name, "dm-%d", minor);
 
-	dax_dev = alloc_dax(md, md->disk->disk_name, &dm_dax_ops);
-	if (!dax_dev)
-		goto bad;
+	if (IS_ENABLED(CONFIG_DAX_DRIVER)) {
+		dax_dev = alloc_dax(md, md->disk->disk_name, &dm_dax_ops);
+		if (!dax_dev)
+			goto bad;
+	}
 	md->dax_dev = dax_dev;
 
 	add_disk_no_queue_reg(md->disk);
@@ -2127,9 +2181,6 @@ int dm_setup_md_queue(struct mapped_device *md, struct dm_table *t)
 		dm_init_normal_md_queue(md);
 		blk_queue_make_request(md->queue, dm_make_request);
 		blk_queue_merge_bvec(md->queue, dm_merge_bvec);
-
-		if (type == DM_TYPE_DAX_BIO_BASED)
-			queue_flag_set_unlocked(QUEUE_FLAG_DAX, md->queue);
 		break;
 	case DM_TYPE_NONE:
 		WARN_ON_ONCE(true);
@@ -3080,6 +3131,8 @@ static const struct block_device_operations dm_blk_dops = {
 
 static const struct dax_operations dm_dax_ops = {
 	.direct_access = dm_dax_direct_access,
+	.memcpy_fromiovecend = dm_dax_memcpy_fromiovecend,
+	.memcpy_toiovecend = dm_dax_memcpy_toiovecend,
 };
 
 /*

@@ -52,11 +52,18 @@ struct resource {
 #define IORESOURCE_WINDOW	0x00200000	/* forwarded by bridge */
 #define IORESOURCE_MUXED	0x00400000	/* Resource is software muxed */
 
+#define IORESOURCE_EXT_TYPE_BITS 0x01000000	/* Resource extended types */
+#define IORESOURCE_SYSRAM	0x01000000	/* System RAM (modifier) */
+
 #define IORESOURCE_EXCLUSIVE	0x08000000	/* Userland may not map this resource */
+
 #define IORESOURCE_DISABLED	0x10000000
 #define IORESOURCE_UNSET	0x20000000	/* No address assigned yet */
 #define IORESOURCE_AUTO		0x40000000
 #define IORESOURCE_BUSY		0x80000000	/* Driver has marked this resource busy */
+
+/* I/O resource extended types */
+#define IORESOURCE_SYSTEM_RAM		(IORESOURCE_MEM|IORESOURCE_SYSRAM)
 
 /* PnP IRQ specific bits (IORESOURCE_BITS) */
 #define IORESOURCE_IRQ_HIGHEDGE		(1<<0)
@@ -97,6 +104,7 @@ struct resource {
 /* PnP I/O specific bits (IORESOURCE_BITS) */
 #define IORESOURCE_IO_16BIT_ADDR	(1<<0)
 #define IORESOURCE_IO_FIXED		(1<<1)
+#define IORESOURCE_IO_SPARSE		(1<<2)
 
 /* PCI ROM control bits (IORESOURCE_BITS) */
 #define IORESOURCE_ROM_ENABLE		(1<<0)	/* ROM is enabled, same as PCI_ROM_ADDRESS_ENABLE */
@@ -174,6 +182,10 @@ static inline unsigned long resource_type(const struct resource *res)
 {
 	return res->flags & IORESOURCE_TYPE_BITS;
 }
+static inline unsigned long resource_ext_type(const struct resource *res)
+{
+	return res->flags & IORESOURCE_EXT_TYPE_BITS;
+}
 /* True iff r1 completely contains r2 */
 static inline bool resource_contains(struct resource *r1, struct resource *r2)
 {
@@ -248,11 +260,14 @@ extern int
 walk_system_ram_range(unsigned long start_pfn, unsigned long nr_pages,
 		void *arg, int (*func)(unsigned long, unsigned long, void *));
 extern int
+walk_mem_res(u64 start, u64 end, void *arg,
+	     int (*func)(struct resource *, void *));
+extern int
 walk_system_ram_res(u64 start, u64 end, void *arg,
-		    int (*func)(u64, u64, void *));
+		    int (*func)(struct resource *, void *));
 extern int
 walk_iomem_res(char *name, unsigned long flags, u64 start, u64 end, void *arg,
-	       int (*func)(u64, u64, void *));
+	       int (*func)(struct resource *, void *));
 
 /* True if any part of r1 overlaps r2 */
 static inline bool resource_overlaps(struct resource *r1, struct resource *r2)

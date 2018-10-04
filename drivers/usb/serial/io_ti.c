@@ -1,13 +1,9 @@
+// SPDX-License-Identifier: GPL-2.0+
 /*
  * Edgeport USB Serial Converter driver
  *
  * Copyright (C) 2000-2002 Inside Out Networks, All rights reserved.
  * Copyright (C) 2001-2002 Greg Kroah-Hartman <greg@kroah.com>
- *
- *	This program is free software; you can redistribute it and/or modify
- *	it under the terms of the GNU General Public License as published by
- *	the Free Software Foundation; either version 2 of the License, or
- *	(at your option) any later version.
  *
  * Supports the following devices:
  *	EP/1 EP/2 EP/4 EP/21 EP/22 EP/221 EP/42 EP/421 WATCHPORT
@@ -1933,13 +1929,6 @@ static int edge_open(struct tty_struct *tty, struct usb_serial_port *port)
 	if (edge_serial->num_ports_open == 0) {
 		/* we are the first port to open, post the interrupt urb */
 		urb = edge_serial->serial->port[0]->interrupt_in_urb;
-		if (!urb) {
-			dev_err(&port->dev,
-				"%s - no interrupt urb present, exiting\n",
-				__func__);
-			status = -EINVAL;
-			goto release_es_lock;
-		}
 		urb->context = edge_serial;
 		status = usb_submit_urb(urb, GFP_KERNEL);
 		if (status) {
@@ -1959,12 +1948,6 @@ static int edge_open(struct tty_struct *tty, struct usb_serial_port *port)
 
 	/* start up our bulk read urb */
 	urb = port->read_urb;
-	if (!urb) {
-		dev_err(&port->dev, "%s - no read urb present, exiting\n",
-								__func__);
-		status = -EINVAL;
-		goto unlink_int_urb;
-	}
 	edge_port->ep_read_urb_state = EDGE_READ_URB_RUNNING;
 	urb->context = edge_port;
 	status = usb_submit_urb(urb, GFP_KERNEL);
@@ -2349,8 +2332,11 @@ static void change_port_settings(struct tty_struct *tty,
 	if (!baud) {
 		/* pick a default, any default... */
 		baud = 9600;
-	} else
+	} else {
+		/* Avoid a zero divisor. */
+		baud = min(baud, 461550);
 		tty_encode_baud_rate(tty, baud, baud);
+	}
 
 	edge_port->baud_rate = baud;
 	config->wBaudRate = (__u16)((461550L + baud/2) / baud);
@@ -2385,14 +2371,6 @@ static void edge_set_termios(struct tty_struct *tty,
 		struct usb_serial_port *port, struct ktermios *old_termios)
 {
 	struct edgeport_port *edge_port = usb_get_serial_port_data(port);
-	unsigned int cflag;
-
-	cflag = tty->termios.c_cflag;
-
-	dev_dbg(&port->dev, "%s - clfag %08x iflag %08x\n", __func__,
-		tty->termios.c_cflag, tty->termios.c_iflag);
-	dev_dbg(&port->dev, "%s - old clfag %08x old iflag %08x\n", __func__,
-		old_termios->c_cflag, old_termios->c_iflag);
 
 	if (edge_port == NULL)
 		return;
@@ -2544,18 +2522,30 @@ static void edge_heartbeat_work(struct work_struct *work)
 	edge_heartbeat_schedule(serial);
 }
 
+static int edge_calc_num_ports(struct usb_serial *serial,
+				struct usb_serial_endpoints *epds)
+{
+	struct device *dev = &serial->interface->dev;
+	unsigned char num_ports = serial->type->num_ports;
+
+	/* Make sure we have the required endpoints when in download mode. */
+	if (serial->interface->cur_altsetting->desc.bNumEndpoints > 1) {
+		if (epds->num_bulk_in < num_ports ||
+				epds->num_bulk_out < num_ports ||
+				epds->num_interrupt_in < 1) {
+			dev_err(dev, "required endpoints missing\n");
+			return -ENODEV;
+		}
+	}
+
+	return num_ports;
+}
+
 static int edge_startup(struct usb_serial *serial)
 {
 	struct edgeport_serial *edge_serial;
 	int status;
 	u16 product_id;
-
-	/* Make sure we have the required endpoints when in download mode. */
-	if (serial->interface->cur_altsetting->desc.bNumEndpoints > 1) {
-		if (serial->num_bulk_in < serial->num_ports ||
-				serial->num_bulk_out < serial->num_ports)
-			return -ENODEV;
-	}
 
 	/* create our private serial structure */
 	edge_serial = kzalloc(sizeof(struct edgeport_serial), GFP_KERNEL);
@@ -2736,11 +2726,13 @@ static struct usb_serial_driver edgeport_1port_device = {
 	.description		= "Edgeport TI 1 port adapter",
 	.id_table		= edgeport_1port_id_table,
 	.num_ports		= 1,
+	.num_bulk_out		= 1,
 	.open			= edge_open,
 	.close			= edge_close,
 	.throttle		= edge_throttle,
 	.unthrottle		= edge_unthrottle,
 	.attach			= edge_startup,
+	.calc_num_ports		= edge_calc_num_ports,
 	.disconnect		= edge_disconnect,
 	.release		= edge_release,
 	.port_probe		= edge_port_probe,
@@ -2773,11 +2765,13 @@ static struct usb_serial_driver edgeport_2port_device = {
 	.description		= "Edgeport TI 2 port adapter",
 	.id_table		= edgeport_2port_id_table,
 	.num_ports		= 2,
+	.num_bulk_out		= 1,
 	.open			= edge_open,
 	.close			= edge_close,
 	.throttle		= edge_throttle,
 	.unthrottle		= edge_unthrottle,
 	.attach			= edge_startup,
+	.calc_num_ports		= edge_calc_num_ports,
 	.disconnect		= edge_disconnect,
 	.release		= edge_release,
 	.port_probe		= edge_port_probe,

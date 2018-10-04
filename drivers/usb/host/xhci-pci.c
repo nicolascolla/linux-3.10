@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0
 /*
  * xHCI host controller driver PCI Bus Glue.
  *
@@ -5,19 +6,6 @@
  *
  * Author: Sarah Sharp
  * Some code borrowed from the Linux EHCI driver.
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License version 2 as
- * published by the Free Software Foundation.
- *
- * This program is distributed in the hope that it will be useful, but
- * WITHOUT ANY WARRANTY; without even the implied warranty of MERCHANTABILITY
- * or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License
- * for more details.
- *
- * You should have received a copy of the GNU General Public License
- * along with this program; if not, write to the Free Software Foundation,
- * Inc., 675 Mass Ave, Cambridge, MA 02139, USA.
  */
 
 #include <linux/pci.h>
@@ -52,6 +40,7 @@
 #define PCI_DEVICE_ID_INTEL_BROXTON_M_XHCI		0x0aa8
 #define PCI_DEVICE_ID_INTEL_BROXTON_B_XHCI		0x1aa8
 #define PCI_DEVICE_ID_INTEL_APL_XHCI			0x5aa8
+#define PCI_DEVICE_ID_INTEL_DNV_XHCI			0x19d0
 #define PCI_DEVICE_ID_ASMEDIA_1042A_XHCI		0x1142
 
 static const char hcd_name[] = "xhci_hcd";
@@ -167,7 +156,8 @@ static void xhci_pci_quirks(struct device *dev, struct xhci_hcd *xhci)
 		 pdev->device == PCI_DEVICE_ID_INTEL_CHERRYVIEW_XHCI ||
 		 pdev->device == PCI_DEVICE_ID_INTEL_BROXTON_M_XHCI ||
 		 pdev->device == PCI_DEVICE_ID_INTEL_BROXTON_B_XHCI ||
-		 pdev->device == PCI_DEVICE_ID_INTEL_APL_XHCI)) {
+		 pdev->device == PCI_DEVICE_ID_INTEL_APL_XHCI ||
+		 pdev->device == PCI_DEVICE_ID_INTEL_DNV_XHCI)) {
 		xhci->quirks |= XHCI_PME_STUCK_QUIRK;
 	}
 	if (pdev->vendor == PCI_VENDOR_ID_INTEL &&
@@ -176,7 +166,8 @@ static void xhci_pci_quirks(struct device *dev, struct xhci_hcd *xhci)
 	}
 	if (pdev->vendor == PCI_VENDOR_ID_INTEL &&
 	    (pdev->device == PCI_DEVICE_ID_INTEL_CHERRYVIEW_XHCI ||
-	     pdev->device == PCI_DEVICE_ID_INTEL_APL_XHCI))
+	     pdev->device == PCI_DEVICE_ID_INTEL_APL_XHCI ||
+	     pdev->device == PCI_DEVICE_ID_INTEL_DNV_XHCI))
 		xhci->quirks |= XHCI_MISSING_CAS;
 
 	if (pdev->vendor == PCI_VENDOR_ID_ETRON &&
@@ -185,6 +176,9 @@ static void xhci_pci_quirks(struct device *dev, struct xhci_hcd *xhci)
 		xhci->quirks |= XHCI_TRUST_TX_LENGTH;
 		xhci->quirks |= XHCI_BROKEN_STREAMS;
 	}
+	if (pdev->vendor == PCI_VENDOR_ID_RENESAS &&
+			pdev->device == 0x0014)
+		xhci->quirks |= XHCI_TRUST_TX_LENGTH;
 	if (pdev->vendor == PCI_VENDOR_ID_RENESAS &&
 			pdev->device == 0x0015)
 		xhci->quirks |= XHCI_RESET_ON_RESUME;
@@ -199,10 +193,16 @@ static void xhci_pci_quirks(struct device *dev, struct xhci_hcd *xhci)
 	if (pdev->vendor == PCI_VENDOR_ID_ASMEDIA &&
 			pdev->device == 0x1042)
 		xhci->quirks |= XHCI_BROKEN_STREAMS;
+	if (pdev->vendor == PCI_VENDOR_ID_ASMEDIA &&
+			pdev->device == 0x1142)
+		xhci->quirks |= XHCI_TRUST_TX_LENGTH;
 
 	if (pdev->vendor == PCI_VENDOR_ID_ASMEDIA &&
 		pdev->device == PCI_DEVICE_ID_ASMEDIA_1042A_XHCI)
 		xhci->quirks |= XHCI_ASMEDIA_MODIFY_FLOWCONTROL;
+
+	if (pdev->vendor == PCI_VENDOR_ID_TI && pdev->device == 0x8241)
+		xhci->quirks |= XHCI_LIMIT_ENDPOINT_INTERVAL_7;
 
 	if (xhci->quirks & XHCI_RESET_ON_RESUME)
 		xhci_dbg_trace(xhci, trace_xhci_dbg_quirks,
@@ -237,6 +237,9 @@ static int xhci_pci_setup(struct usb_hcd *hcd)
 	if (!xhci->sbrn)
 		pci_read_config_byte(pdev, XHCI_SBRN_OFFSET, &xhci->sbrn);
 
+	/* imod_interval is the interrupt moderation value in nanoseconds. */
+	xhci->imod_interval = 40000;
+
 	retval = xhci_gen_setup(hcd, xhci_pci_quirks);
 	if (retval)
 		return retval;
@@ -262,6 +265,13 @@ static int xhci_pci_probe(struct pci_dev *dev, const struct pci_device_id *id)
 	struct usb_hcd *hcd;
 
 	driver = (struct hc_driver *)id->driver_data;
+
+	/* For some HW implementation, a XHCI reset is just not enough... */
+	if (usb_xhci_needs_pci_reset(dev)) {
+		dev_info(&dev->dev, "Resetting\n");
+		if (pci_reset_function_locked(dev))
+			dev_warn(&dev->dev, "Reset failed");
+	}
 
 	/* Prevent runtime suspending between USB-2 and USB-3 initialization */
 	pm_runtime_get_noresume(&dev->dev);

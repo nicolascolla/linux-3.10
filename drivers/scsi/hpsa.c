@@ -60,7 +60,7 @@
  * HPSA_DRIVER_VERSION must be 3 byte values (0-255) separated by '.'
  * with an optional trailing '-' followed by a byte value (0-255).
  */
-#define HPSA_DRIVER_VERSION "3.4.20-0-RH2"
+#define HPSA_DRIVER_VERSION "3.4.20-125-RH1"
 #define DRIVER_NAME "HP HPSA Driver (v " HPSA_DRIVER_VERSION ")"
 #define HPSA "hpsa"
 
@@ -871,14 +871,14 @@ static ssize_t host_show_ctlr_num(struct device *dev,
 	return snprintf(buf, 20, "%d\n", h->ctlr);
 }
 
-static DEVICE_ATTR(raid_level, S_IRUGO, raid_level_show, NULL);
-static DEVICE_ATTR(lunid, S_IRUGO, lunid_show, NULL);
-static DEVICE_ATTR(unique_id, S_IRUGO, unique_id_show, NULL);
+static DEVICE_ATTR_RO(raid_level);
+static DEVICE_ATTR_RO(lunid);
+static DEVICE_ATTR_RO(unique_id);
 static DEVICE_ATTR(rescan, S_IWUSR, NULL, host_store_rescan);
-static DEVICE_ATTR(sas_address, S_IRUGO, sas_address_show, NULL);
+static DEVICE_ATTR_RO(sas_address);
 static DEVICE_ATTR(hp_ssd_smart_path_enabled, S_IRUGO,
 			host_show_hp_ssd_smart_path_enabled, NULL);
-static DEVICE_ATTR(path_info, S_IRUGO, path_info_show, NULL);
+static DEVICE_ATTR_RO(path_info);
 static DEVICE_ATTR(hp_ssd_smart_path_status, S_IWUSR|S_IRUGO|S_IROTH,
 		host_show_hp_ssd_smart_path_status,
 		host_store_hp_ssd_smart_path_status);
@@ -1010,13 +1010,9 @@ static void set_performant_mode(struct ctlr_info *h, struct CommandList *c,
 {
 	if (likely(h->transMethod & CFGTBL_Trans_Performant)) {
 		c->busaddr |= 1 | (h->blockFetchTable[c->Header.SGList] << 1);
-		if (unlikely(!h->msix_vector))
+		if (unlikely(!h->msix_vectors))
 			return;
-		if (likely(reply_queue == DEFAULT_REPLY_QUEUE))
-			c->Header.ReplyQueue =
-				raw_smp_processor_id() % h->nreply_queues;
-		else
-			c->Header.ReplyQueue = reply_queue % h->nreply_queues;
+		c->Header.ReplyQueue = reply_queue;
 	}
 }
 
@@ -1030,10 +1026,7 @@ static void set_ioaccel1_performant_mode(struct ctlr_info *h,
 	 * Tell the controller to post the reply to the queue for this
 	 * processor.  This seems to give the best I/O throughput.
 	 */
-	if (likely(reply_queue == DEFAULT_REPLY_QUEUE))
-		cp->ReplyQueue = smp_processor_id() % h->nreply_queues;
-	else
-		cp->ReplyQueue = reply_queue % h->nreply_queues;
+	cp->ReplyQueue = reply_queue;
 	/*
 	 * Set the bits in the address sent down to include:
 	 *  - performant mode bit (bit 0)
@@ -1054,10 +1047,7 @@ static void set_ioaccel2_tmf_performant_mode(struct ctlr_info *h,
 	/* Tell the controller to post the reply to the queue for this
 	 * processor.  This seems to give the best I/O throughput.
 	 */
-	if (likely(reply_queue == DEFAULT_REPLY_QUEUE))
-		cp->reply_queue = smp_processor_id() % h->nreply_queues;
-	else
-		cp->reply_queue = reply_queue % h->nreply_queues;
+	cp->reply_queue = reply_queue;
 	/* Set the bits in the address sent down to include:
 	 *  - performant mode bit not used in ioaccel mode 2
 	 *  - pull count (bits 0-3)
@@ -1076,10 +1066,7 @@ static void set_ioaccel2_performant_mode(struct ctlr_info *h,
 	 * Tell the controller to post the reply to the queue for this
 	 * processor.  This seems to give the best I/O throughput.
 	 */
-	if (likely(reply_queue == DEFAULT_REPLY_QUEUE))
-		cp->reply_queue = smp_processor_id() % h->nreply_queues;
-	else
-		cp->reply_queue = reply_queue % h->nreply_queues;
+	cp->reply_queue = reply_queue;
 	/*
 	 * Set the bits in the address sent down to include:
 	 *  - performant mode bit not used in ioaccel mode 2
@@ -1124,6 +1111,8 @@ static void __enqueue_cmd_and_start_io(struct ctlr_info *h,
 {
 	dial_down_lockup_detection_during_fw_flash(h, c);
 	atomic_inc(&h->commands_outstanding);
+
+	reply_queue = h->reply_map[raw_smp_processor_id()];
 	switch (c->cmd_type) {
 	case CMD_IOACCEL1:
 		set_ioaccel1_performant_mode(h, c, reply_queue);
@@ -1730,8 +1719,12 @@ static void hpsa_figure_phys_disk_ptrs(struct ctlr_info *h,
 		 * way too high for partial stripe writes
 		 */
 		logical_drive->queue_depth = qdepth;
-	else
-		logical_drive->queue_depth = h->nr_cmds;
+	else {
+		if (logical_drive->external)
+			logical_drive->queue_depth = EXTERNAL_QD;
+		else
+			logical_drive->queue_depth = h->nr_cmds;
+	}
 }
 
 static void hpsa_update_log_drive_phys_drive_ptrs(struct ctlr_info *h,
@@ -1825,11 +1818,13 @@ static void hpsa_wait_for_outstanding_commands_for_dev(struct ctlr_info *h,
 			break;
 		if (++waits > 20)
 			break;
+		msleep(1000);
+	}
+
+	if (waits > 20)
 		dev_warn(&h->pdev->dev,
 			"%s: removing device with %d outstanding commands!\n",
 			__func__, cmds);
-		msleep(1000);
-	}
 }
 
 static void hpsa_remove_device(struct ctlr_info *h,
@@ -2928,6 +2923,57 @@ static void hpsa_scsi_interpret_error(struct ctlr_info *h,
 	}
 }
 
+static int hpsa_do_receive_diagnostic(struct ctlr_info *h, u8 *scsi3addr,
+					u8 page, u8 *buf, size_t bufsize)
+{
+	int rc = IO_OK;
+	struct CommandList *c;
+	struct ErrorInfo *ei;
+
+	c = cmd_alloc(h);
+	if (fill_cmd(c, RECEIVE_DIAGNOSTIC, h, buf, bufsize,
+			page, scsi3addr, TYPE_CMD)) {
+		rc = -1;
+		goto out;
+	}
+	rc = hpsa_scsi_do_simple_cmd_with_retry(h, c,
+		PCI_DMA_FROMDEVICE, NO_TIMEOUT);
+	if (rc)
+		goto out;
+	ei = c->err_info;
+	if (ei->CommandStatus != 0 && ei->CommandStatus != CMD_DATA_UNDERRUN) {
+		hpsa_scsi_interpret_error(h, c);
+		rc = -1;
+	}
+out:
+	cmd_free(h, c);
+	return rc;
+}
+
+static u64 hpsa_get_enclosure_logical_identifier(struct ctlr_info *h,
+						u8 *scsi3addr)
+{
+	u8 *buf;
+	u64 sa = 0;
+	int rc = 0;
+
+	buf = kzalloc(1024, GFP_KERNEL);
+	if (!buf)
+		return 0;
+
+	rc = hpsa_do_receive_diagnostic(h, scsi3addr, RECEIVE_DIAGNOSTIC,
+					buf, 1024);
+
+	if (rc)
+		goto out;
+
+	sa = get_unaligned_be64(buf+12);
+
+out:
+	kfree(buf);
+	return sa;
+}
+
 static int hpsa_scsi_do_inquiry(struct ctlr_info *h, unsigned char *scsi3addr,
 			u16 page, unsigned char *buf,
 			unsigned char bufsize)
@@ -3361,6 +3407,9 @@ static void hpsa_get_enclosure_info(struct ctlr_info *h,
 	struct ext_report_lun_entry *rle = &rlep->LUN[rle_index];
 	u16 bmic_device_index = 0;
 
+	encl_dev->eli =
+		hpsa_get_enclosure_logical_identifier(h, scsi3addr);
+
 	bmic_device_index = GET_BMIC_DRIVE_NUMBER(&rle->lunid[0]);
 
 	if (encl_dev->target == -1 || encl_dev->lun == -1) {
@@ -3427,7 +3476,7 @@ out:
 
 	if (rc != IO_OK)
 		hpsa_show_dev_msg(KERN_INFO, h, encl_dev,
-			"Error, could not get enclosure information\n");
+			"Error, could not get enclosure information");
 }
 
 static u64 hpsa_get_sas_address_from_report_physical(struct ctlr_info *h,
@@ -3485,6 +3534,30 @@ static void hpsa_get_sas_address(struct ctlr_info *h, unsigned char *scsi3addr,
 		sa = hpsa_get_sas_address_from_report_physical(h, scsi3addr);
 
 	dev->sas_address = sa;
+}
+
+static void hpsa_ext_ctrl_present(struct ctlr_info *h,
+	struct ReportExtendedLUNdata *physdev)
+{
+	u32 nphysicals;
+	int i;
+
+	if (h->discovery_polling)
+		return;
+
+	nphysicals = (get_unaligned_be32(physdev->LUNListLength) / 24) + 1;
+
+	for (i = 0; i < nphysicals; i++) {
+		if (physdev->LUN[i].device_type ==
+			BMIC_DEVICE_TYPE_CONTROLLER
+			&& !is_hba_lunid(physdev->LUN[i].lunid)) {
+			dev_info(&h->pdev->dev,
+				"External controller present, activate discovery polling and disable rld caching\n");
+			hpsa_disable_rld_caching(h);
+			h->discovery_polling = 1;
+			break;
+		}
+	}
 }
 
 /* Get a device id from inquiry page 0x83 */
@@ -4100,7 +4173,7 @@ static int hpsa_set_local_logical_count(struct ctlr_info *h,
 	memset(id_ctlr, 0, sizeof(*id_ctlr));
 	rc = hpsa_bmic_id_controller(h, id_ctlr, sizeof(*id_ctlr));
 	if (!rc)
-		if (id_ctlr->configured_logical_drive_count < 256)
+		if (id_ctlr->configured_logical_drive_count < 255)
 			*nlocals = id_ctlr->configured_logical_drive_count;
 		else
 			*nlocals = le16_to_cpu(
@@ -4237,6 +4310,8 @@ static void hpsa_update_scsi_devices(struct ctlr_info *h)
 	 */
 	ndevs_to_allocate = nphysicals + nlogicals + MAX_EXT_TARGETS + 1;
 
+	hpsa_ext_ctrl_present(h, physdev_list);
+
 	/* Allocate the per device structures */
 	for (i = 0; i < ndevs_to_allocate; i++) {
 		if (i >= HPSA_MAX_DEVICES) {
@@ -4266,6 +4341,8 @@ static void hpsa_update_scsi_devices(struct ctlr_info *h)
 		int rc = 0;
 		int phys_dev_index = i - (raid_ctlr_position == 0);
 		bool skip_device = false;
+
+		memset(tmpdevice, 0, sizeof(*tmpdevice));
 
 		physical_device = i < nphysicals + (raid_ctlr_position == 0);
 
@@ -4304,18 +4381,6 @@ static void hpsa_update_scsi_devices(struct ctlr_info *h)
 
 		figure_bus_target_lun(h, lunaddrbytes, tmpdevice);
 		this_device = currentsd[ncurrent];
-
-		/* Turn on discovery_polling if there are ext target devices.
-		 * Event-based change notification is unreliable for those.
-		 */
-		if (!h->discovery_polling) {
-			if (tmpdevice->external) {
-				h->discovery_polling = 1;
-				dev_info(&h->pdev->dev,
-					"External target, activate discovery polling.\n");
-			}
-		}
-
 
 		*this_device = *tmpdevice;
 		this_device->physical_device = physical_device;
@@ -4498,21 +4563,13 @@ sglist_finished:
 	return 0;
 }
 
-#define BUFLEN 128
 static inline void warn_zero_length_transfer(struct ctlr_info *h,
 						u8 *cdb, int cdb_len,
 						const char *func)
 {
-	char buf[BUFLEN];
-	int outlen;
-	int i;
-
-	outlen = scnprintf(buf, BUFLEN,
-				"%s: Blocking zero-length request: CDB:", func);
-	for (i = 0; i < cdb_len; i++)
-		outlen += scnprintf(buf+outlen, BUFLEN - outlen,
-					"%02hhx", cdb[i]);
-	dev_warn(&h->pdev->dev, "%s\n", buf);
+	dev_warn(&h->pdev->dev,
+		 "%s: Blocking zero-length request: CDB:%*phN\n",
+		 func, cdb_len, cdb);
 }
 
 #define IO_ACCEL_INELIGIBLE 1
@@ -5663,7 +5720,7 @@ static int hpsa_scsi_host_alloc(struct ctlr_info *h)
 	sh->sg_tablesize = h->maxsgentries;
 	sh->transportt = hpsa_sas_transport_template;
 	sh->hostdata[0] = (unsigned long) h;
-	sh->irq = h->intr[h->intr_mode];
+	sh->irq = pci_irq_vector(h->pdev, 0);
 	sh->unique_id = sh->irq;
 	if (!shost_use_blk_mq(sh)) {
 		error = scsi_init_shared_tag_map(sh, sh->can_queue);
@@ -6527,6 +6584,17 @@ static int fill_cmd(struct CommandList *c, u8 cmd, struct ctlr_info *h,
 			c->Request.CDB[0] = HPSA_INQUIRY;
 			c->Request.CDB[4] = size & 0xFF;
 			break;
+		case RECEIVE_DIAGNOSTIC:
+			c->Request.CDBLen = 6;
+			c->Request.type_attr_dir =
+				TYPE_ATTR_DIR(cmd_type, ATTR_SIMPLE, XFER_READ);
+			c->Request.Timeout = 0;
+			c->Request.CDB[0] = cmd;
+			c->Request.CDB[1] = 1;
+			c->Request.CDB[2] = 1;
+			c->Request.CDB[3] = (size >> 8) & 0xFF;
+			c->Request.CDB[4] = size & 0xFF;
+			break;
 		case HPSA_REPORT_LOG:
 		case HPSA_REPORT_PHYS:
 			/* Talking to controller so It's a physical command
@@ -7272,67 +7340,61 @@ static int find_PCI_BAR_index(struct pci_dev *pdev, unsigned long pci_bar_addr)
 
 static void hpsa_disable_interrupt_mode(struct ctlr_info *h)
 {
-	if (h->msix_vector) {
-		if (h->pdev->msix_enabled)
-			pci_disable_msix(h->pdev);
-		h->msix_vector = 0;
-	} else if (h->msi_vector) {
-		if (h->pdev->msi_enabled)
-			pci_disable_msi(h->pdev);
-		h->msi_vector = 0;
+	pci_free_irq_vectors(h->pdev);
+	h->msix_vectors = 0;
+}
+
+static void hpsa_setup_reply_map(struct ctlr_info *h)
+{
+	const struct cpumask *mask;
+	unsigned int queue, cpu;
+
+	for (queue = 0; queue < h->msix_vectors; queue++) {
+		mask = pci_irq_get_affinity(h->pdev, queue);
+		if (!mask)
+			goto fallback;
+
+		for_each_cpu(cpu, mask)
+			h->reply_map[cpu] = queue;
 	}
+	return;
+
+fallback:
+	for_each_possible_cpu(cpu)
+		h->reply_map[cpu] = 0;
 }
 
 /* If MSI/MSI-X is supported by the kernel we will try to enable it on
  * controllers that are capable. If not, we use legacy INTx mode.
  */
-static void hpsa_interrupt_mode(struct ctlr_info *h)
+static int hpsa_interrupt_mode(struct ctlr_info *h)
 {
-#ifdef CONFIG_PCI_MSI
-	int err, i;
-	struct msix_entry hpsa_msix_entries[MAX_REPLY_QUEUES];
-
-	for (i = 0; i < MAX_REPLY_QUEUES; i++) {
-		hpsa_msix_entries[i].vector = 0;
-		hpsa_msix_entries[i].entry = i;
-	}
+	unsigned int flags = PCI_IRQ_LEGACY;
+	int ret;
 
 	/* Some boards advertise MSI but don't really support it */
-	if ((h->board_id == 0x40700E11) || (h->board_id == 0x40800E11) ||
-	    (h->board_id == 0x40820E11) || (h->board_id == 0x40830E11))
-		goto default_int_mode;
-	if (pci_find_capability(h->pdev, PCI_CAP_ID_MSIX)) {
-		dev_info(&h->pdev->dev, "MSI-X capable controller\n");
-		h->msix_vector = MAX_REPLY_QUEUES;
-		if (h->msix_vector > num_online_cpus())
-			h->msix_vector = num_online_cpus();
-		err = pci_enable_msix_range(h->pdev, hpsa_msix_entries,
-					    1, h->msix_vector);
-		if (err < 0) {
-			dev_warn(&h->pdev->dev, "MSI-X init failed %d\n", err);
-			h->msix_vector = 0;
-			goto single_msi_mode;
-		} else if (err < h->msix_vector) {
-			dev_warn(&h->pdev->dev, "only %d MSI-X vectors "
-			       "available\n", err);
+	switch (h->board_id) {
+	case 0x40700E11:
+	case 0x40800E11:
+	case 0x40820E11:
+	case 0x40830E11:
+		break;
+	default:
+		ret = pci_alloc_irq_vectors(h->pdev, 1, MAX_REPLY_QUEUES,
+				PCI_IRQ_MSIX | PCI_IRQ_AFFINITY);
+		if (ret > 0) {
+			h->msix_vectors = ret;
+			return 0;
 		}
-		h->msix_vector = err;
-		for (i = 0; i < h->msix_vector; i++)
-			h->intr[i] = hpsa_msix_entries[i].vector;
-		return;
+
+		flags |= PCI_IRQ_MSI;
+		break;
 	}
-single_msi_mode:
-	if (pci_find_capability(h->pdev, PCI_CAP_ID_MSI)) {
-		dev_info(&h->pdev->dev, "MSI capable controller\n");
-		if (!pci_enable_msi(h->pdev))
-			h->msi_vector = 1;
-		else
-			dev_warn(&h->pdev->dev, "MSI init failed\n");
-	}
-default_int_mode:
-#endif				/* CONFIG_PCI_MSI */
-	/* if we get here we're going to use the default interrupt mode */
-	h->intr[h->intr_mode] = h->pdev->irq;
+
+	ret = pci_alloc_irq_vectors(h->pdev, 1, 1, flags);
+	if (ret < 0)
+		return ret;
+	return 0;
 }
 
 static int hpsa_lookup_board_id(struct pci_dev *pdev, u32 *board_id)
@@ -7690,7 +7752,13 @@ static int hpsa_pci_init(struct ctlr_info *h)
 
 	pci_set_master(h->pdev);
 
-	hpsa_interrupt_mode(h);
+	err = hpsa_interrupt_mode(h);
+	if (err)
+		goto clean1;
+
+	/* setup mapping between CPU and reply queue */
+	hpsa_setup_reply_map(h);
+
 	err = hpsa_pci_find_memory_BAR(h->pdev, &h->paddr);
 	if (err)
 		goto clean2;	/* intmode+region, pci */
@@ -7726,6 +7794,7 @@ clean3:	/* vaddr, intmode+region, pci */
 	h->vaddr = NULL;
 clean2:	/* intmode+region, pci */
 	hpsa_disable_interrupt_mode(h);
+clean1:
 	/*
 	 * call pci_disable_device before pci_release_regions per
 	 * Documentation/PCI/pci.txt
@@ -7859,34 +7928,20 @@ clean_up:
 	return -ENOMEM;
 }
 
-static void hpsa_irq_affinity_hints(struct ctlr_info *h)
-{
-	int i, cpu;
-
-	cpu = cpumask_first(cpu_online_mask);
-	for (i = 0; i < h->msix_vector; i++) {
-		irq_set_affinity_hint(h->intr[i], get_cpu_mask(cpu));
-		cpu = cpumask_next(cpu, cpu_online_mask);
-	}
-}
-
 /* clear affinity hints and free MSI-X, MSI, or legacy INTx vectors */
 static void hpsa_free_irqs(struct ctlr_info *h)
 {
 	int i;
 
-	if (!h->msix_vector || h->intr_mode != PERF_MODE_INT) {
+	if (!h->msix_vectors || h->intr_mode != PERF_MODE_INT) {
 		/* Single reply queue, only one irq to free */
-		i = h->intr_mode;
-		irq_set_affinity_hint(h->intr[i], NULL);
-		free_irq(h->intr[i], &h->q[i]);
-		h->q[i] = 0;
+		free_irq(pci_irq_vector(h->pdev, 0), &h->q[h->intr_mode]);
+		h->q[h->intr_mode] = 0;
 		return;
 	}
 
-	for (i = 0; i < h->msix_vector; i++) {
-		irq_set_affinity_hint(h->intr[i], NULL);
-		free_irq(h->intr[i], &h->q[i]);
+	for (i = 0; i < h->msix_vectors; i++) {
+		free_irq(pci_irq_vector(h->pdev, i), &h->q[i]);
 		h->q[i] = 0;
 	}
 	for (; i < MAX_REPLY_QUEUES; i++)
@@ -7907,11 +7962,11 @@ static int hpsa_request_irqs(struct ctlr_info *h,
 	for (i = 0; i < MAX_REPLY_QUEUES; i++)
 		h->q[i] = (u8) i;
 
-	if (h->intr_mode == PERF_MODE_INT && h->msix_vector > 0) {
+	if (h->intr_mode == PERF_MODE_INT && h->msix_vectors > 0) {
 		/* If performant mode and MSI-X, use multiple reply queues */
-		for (i = 0; i < h->msix_vector; i++) {
+		for (i = 0; i < h->msix_vectors; i++) {
 			sprintf(h->intrname[i], "%s-msix%d", h->devname, i);
-			rc = request_irq(h->intr[i], msixhandler,
+			rc = request_irq(pci_irq_vector(h->pdev, i), msixhandler,
 					0, h->intrname[i],
 					&h->q[i]);
 			if (rc) {
@@ -7919,9 +7974,9 @@ static int hpsa_request_irqs(struct ctlr_info *h,
 
 				dev_err(&h->pdev->dev,
 					"failed to get irq %d for %s\n",
-				       h->intr[i], h->devname);
+				       pci_irq_vector(h->pdev, i), h->devname);
 				for (j = 0; j < i; j++) {
-					free_irq(h->intr[j], &h->q[j]);
+					free_irq(pci_irq_vector(h->pdev, j), &h->q[j]);
 					h->q[j] = 0;
 				}
 				for (; j < MAX_REPLY_QUEUES; j++)
@@ -7929,33 +7984,27 @@ static int hpsa_request_irqs(struct ctlr_info *h,
 				return rc;
 			}
 		}
-		hpsa_irq_affinity_hints(h);
 	} else {
 		/* Use single reply pool */
-		if (h->msix_vector > 0 || h->msi_vector) {
-			if (h->msix_vector)
-				sprintf(h->intrname[h->intr_mode],
-					"%s-msix", h->devname);
-			else
-				sprintf(h->intrname[h->intr_mode],
-					"%s-msi", h->devname);
-			rc = request_irq(h->intr[h->intr_mode],
+		if (h->msix_vectors > 0 || h->pdev->msi_enabled) {
+			sprintf(h->intrname[0], "%s-msi%s", h->devname,
+				h->msix_vectors ? "x" : "");
+			rc = request_irq(pci_irq_vector(h->pdev, 0),
 				msixhandler, 0,
-				h->intrname[h->intr_mode],
+				h->intrname[0],
 				&h->q[h->intr_mode]);
 		} else {
 			sprintf(h->intrname[h->intr_mode],
 				"%s-intx", h->devname);
-			rc = request_irq(h->intr[h->intr_mode],
+			rc = request_irq(pci_irq_vector(h->pdev, 0),
 				intxhandler, IRQF_SHARED,
-				h->intrname[h->intr_mode],
+				h->intrname[0],
 				&h->q[h->intr_mode]);
 		}
-		irq_set_affinity_hint(h->intr[h->intr_mode], NULL);
 	}
 	if (rc) {
 		dev_err(&h->pdev->dev, "failed to get irq %d for %s\n",
-		       h->intr[h->intr_mode], h->devname);
+		       pci_irq_vector(h->pdev, 0), h->devname);
 		hpsa_free_irqs(h);
 		return -ENODEV;
 	}
@@ -8078,6 +8127,10 @@ static void controller_lockup_detected(struct ctlr_info *h)
 	spin_unlock_irqrestore(&h->lock, flags);
 	dev_warn(&h->pdev->dev, "Controller lockup detected: 0x%08x after %d\n",
 			lockup_detected, h->heartbeat_sample_interval / HZ);
+	if (lockup_detected == 0xffff0000) {
+		dev_warn(&h->pdev->dev, "Telling controller to do a CHKPT\n");
+		writel(DOORBELL_GENERATE_CHKPT, h->vaddr + SA5_DOORBELL);
+	}
 	pci_disable_device(h->pdev);
 	fail_all_outstanding_cmds(h);
 }
@@ -8149,8 +8202,6 @@ static void hpsa_set_ioaccel_status(struct ctlr_info *h)
 		device = h->dev[i];
 
 		if (!device)
-			continue;
-		if (!device->scsi3addr)
 			continue;
 		if (!hpsa_vpd_page_supported(h, device->scsi3addr,
 						HPSA_VPD_LV_IOACCEL_STATUS))
@@ -8375,7 +8426,6 @@ static void hpsa_rescan_ctlr_worker(struct work_struct *work)
 	if (h->drv_req_rescan || hpsa_offline_devices_ready(h)) {
 		hpsa_perform_rescan(h);
 	} else if (h->discovery_polling) {
-		hpsa_disable_rld_caching(h);
 		if (hpsa_luns_changed(h)) {
 			dev_info(&h->pdev->dev,
 				"driver discovery polling rescan.\n");
@@ -8418,6 +8468,28 @@ static struct workqueue_struct *hpsa_create_controller_wq(struct ctlr_info *h,
 	return wq;
 }
 
+static void hpda_free_ctlr_info(struct ctlr_info *h)
+{
+	kfree(h->reply_map);
+	kfree(h);
+}
+
+static struct ctlr_info *hpda_alloc_ctlr_info(void)
+{
+	struct ctlr_info *h;
+
+	h = kzalloc(sizeof(*h), GFP_KERNEL);
+	if (!h)
+		return NULL;
+
+	h->reply_map = kzalloc(sizeof(*h->reply_map) * nr_cpu_ids, GFP_KERNEL);
+	if (!h->reply_map) {
+		kfree(h);
+		return NULL;
+	}
+	return h;
+}
+
 static int hpsa_init_one(struct pci_dev *pdev, const struct pci_device_id *ent)
 {
 	int dac, rc;
@@ -8455,7 +8527,7 @@ reinit_after_soft_reset:
 	 * the driver.  See comments in hpsa.h for more info.
 	 */
 	BUILD_BUG_ON(sizeof(struct CommandList) % COMMANDLIST_ALIGNMENT);
-	h = kzalloc(sizeof(*h), GFP_KERNEL);
+	h = hpda_alloc_ctlr_info();
 	if (!h) {
 		dev_err(&pdev->dev, "Failed to allocate controller head\n");
 		return -ENOMEM;
@@ -8818,6 +8890,8 @@ static void hpsa_remove_one(struct pci_dev *pdev)
 	destroy_workqueue(h->rescan_ctlr_wq);
 	destroy_workqueue(h->resubmit_wq);
 
+	hpsa_delete_sas_host(h);
+
 	/*
 	 * Call before disabling interrupts.
 	 * scsi_remove_host can trigger I/O operations especially
@@ -8852,9 +8926,7 @@ static void hpsa_remove_one(struct pci_dev *pdev)
 	h->lockup_detected = NULL;			/* init_one 2 */
 	/* (void) pci_disable_pcie_error_reporting(pdev); */	/* init_one 1 */
 
-	hpsa_delete_sas_host(h);
-
-	kfree(h);					/* init_one 1 */
+	hpda_free_ctlr_info(h);				/* init_one 1 */
 }
 
 static int hpsa_suspend(__attribute__((unused)) struct pci_dev *pdev,
@@ -9245,7 +9317,7 @@ static int hpsa_put_ctlr_into_performant_mode(struct ctlr_info *h)
 			return rc;
 	}
 
-	h->nreply_queues = h->msix_vector > 0 ? h->msix_vector : 1;
+	h->nreply_queues = h->msix_vectors > 0 ? h->msix_vectors : 1;
 	hpsa_get_max_perf_mode_cmds(h);
 	/* Performant mode ring buffer and supporting data structures */
 	h->reply_queue_size = h->max_commands * sizeof(u64);
@@ -9341,9 +9413,9 @@ static void hpsa_free_sas_phy(struct hpsa_sas_phy *hpsa_sas_phy)
 	struct sas_phy *phy = hpsa_sas_phy->phy;
 
 	sas_port_delete_phy(hpsa_sas_phy->parent_port->port, phy);
-	sas_phy_free(phy);
 	if (hpsa_sas_phy->added_to_port)
 		list_del(&hpsa_sas_phy->phy_list_entry);
+	sas_phy_delete(phy);
 	kfree(hpsa_sas_phy);
 }
 
@@ -9501,7 +9573,7 @@ static int hpsa_add_sas_host(struct ctlr_info *h)
 	struct hpsa_sas_port *hpsa_sas_port;
 	struct hpsa_sas_phy *hpsa_sas_phy;
 
-	parent_dev = &h->scsi_host->shost_gendev;
+	parent_dev = &h->scsi_host->shost_dev;
 
 	hpsa_sas_node = hpsa_alloc_sas_node(parent_dev);
 	if (!hpsa_sas_node)
@@ -9592,7 +9664,24 @@ hpsa_sas_get_linkerrors(struct sas_phy *phy)
 static int
 hpsa_sas_get_enclosure_identifier(struct sas_rphy *rphy, u64 *identifier)
 {
-	*identifier = 0;
+	struct Scsi_Host *shost = phy_to_shost(rphy);
+	struct ctlr_info *h;
+	struct hpsa_scsi_dev_t *sd;
+
+	if (!shost)
+		return -ENXIO;
+
+	h = shost_to_hba(shost);
+
+	if (!h)
+		return -ENXIO;
+
+	sd = hpsa_find_device_by_sas_rphy(h, rphy);
+	if (!sd)
+		return -ENXIO;
+
+	*identifier = sd->eli;
+
 	return 0;
 }
 
@@ -9631,14 +9720,6 @@ hpsa_sas_phy_speed(struct sas_phy *phy, struct sas_phy_linkrates *rates)
 	return -EINVAL;
 }
 
-/* SMP = Serial Management Protocol */
-static int
-hpsa_sas_smp_handler(struct Scsi_Host *shost, struct sas_rphy *rphy,
-struct request *req)
-{
-	return -EINVAL;
-}
-
 static struct sas_function_template hpsa_sas_transport_functions = {
 	.get_linkerrors = hpsa_sas_get_linkerrors,
 	.get_enclosure_identifier = hpsa_sas_get_enclosure_identifier,
@@ -9648,7 +9729,6 @@ static struct sas_function_template hpsa_sas_transport_functions = {
 	.phy_setup = hpsa_sas_phy_setup,
 	.phy_release = hpsa_sas_phy_release,
 	.set_phy_speed = hpsa_sas_phy_speed,
-	.smp_handler = hpsa_sas_smp_handler,
 };
 
 /*

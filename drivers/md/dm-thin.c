@@ -200,7 +200,13 @@ struct dm_thin_new_mapping;
 enum pool_mode {
 	PM_WRITE,		/* metadata may be changed */
 	PM_OUT_OF_DATA_SPACE,	/* metadata may be changed, though data may not be allocated */
+
+	/*
+	 * Like READ_ONLY, except may switch back to WRITE on metadata resize. Reported as READ_ONLY.
+	 */
+	PM_OUT_OF_METADATA_SPACE,
 	PM_READ_ONLY,		/* metadata may not be changed */
+
 	PM_FAIL,		/* all I/O fails */
 };
 
@@ -1480,7 +1486,37 @@ static void schedule_external_copy(struct thin_c *tc, dm_block_t virt_block,
 
 static void set_pool_mode(struct pool *pool, enum pool_mode new_mode);
 
-static void check_for_space(struct pool *pool)
+static void requeue_bios(struct pool *pool);
+
+static bool is_read_only_pool_mode(enum pool_mode mode)
+{
+	return (mode == PM_OUT_OF_METADATA_SPACE || mode == PM_READ_ONLY);
+}
+
+static bool is_read_only(struct pool *pool)
+{
+	return is_read_only_pool_mode(get_pool_mode(pool));
+}
+
+static void check_for_metadata_space(struct pool *pool)
+{
+	int r;
+	const char *ooms_reason = NULL;
+	dm_block_t nr_free;
+
+	r = dm_pool_get_free_metadata_block_count(pool->pmd, &nr_free);
+	if (r)
+		ooms_reason = "Could not get free metadata blocks";
+	else if (!nr_free)
+		ooms_reason = "No free metadata blocks";
+
+	if (ooms_reason && !is_read_only(pool)) {
+		DMERR("%s", ooms_reason);
+		set_pool_mode(pool, PM_OUT_OF_METADATA_SPACE);
+	}
+}
+
+static void check_for_data_space(struct pool *pool)
 {
 	int r;
 	dm_block_t nr_free;
@@ -1492,8 +1528,10 @@ static void check_for_space(struct pool *pool)
 	if (r)
 		return;
 
-	if (nr_free)
+	if (nr_free) {
 		set_pool_mode(pool, PM_WRITE);
+		requeue_bios(pool);
+	}
 }
 
 /*
@@ -1504,14 +1542,16 @@ static int commit(struct pool *pool)
 {
 	int r;
 
-	if (get_pool_mode(pool) >= PM_READ_ONLY)
+	if (get_pool_mode(pool) >= PM_OUT_OF_METADATA_SPACE)
 		return -EINVAL;
 
 	r = dm_pool_commit_metadata(pool->pmd);
 	if (r)
 		metadata_operation_failed(pool, "dm_pool_commit_metadata", r);
-	else
-		check_for_space(pool);
+	else {
+		check_for_metadata_space(pool);
+		check_for_data_space(pool);
+	}
 
 	return r;
 }
@@ -1570,8 +1610,24 @@ static int alloc_data_block(struct thin_c *tc, dm_block_t *result)
 
 	r = dm_pool_alloc_data_block(pool->pmd, result);
 	if (r) {
-		metadata_operation_failed(pool, "dm_pool_alloc_data_block", r);
+		if (r == -ENOSPC)
+			set_pool_mode(pool, PM_OUT_OF_DATA_SPACE);
+		else
+			metadata_operation_failed(pool, "dm_pool_alloc_data_block", r);
 		return r;
+	}
+
+	r = dm_pool_get_free_metadata_block_count(pool->pmd, &free_blocks);
+	if (r) {
+		metadata_operation_failed(pool, "dm_pool_get_free_metadata_block_count", r);
+		return r;
+	}
+
+	if (!free_blocks) {
+		/* Let's commit before we use up the metadata reserve. */
+		r = commit(pool);
+		if (r)
+			return r;
 	}
 
 	return 0;
@@ -1605,6 +1661,7 @@ static int should_error_unserviceable_bio(struct pool *pool)
 	case PM_OUT_OF_DATA_SPACE:
 		return pool->pf.error_if_no_space ? -ENOSPC : 0;
 
+	case PM_OUT_OF_METADATA_SPACE:
 	case PM_READ_ONLY:
 	case PM_FAIL:
 		return -EIO;
@@ -2566,8 +2623,9 @@ static void set_pool_mode(struct pool *pool, enum pool_mode new_mode)
 		error_retry_list(pool);
 		break;
 
+	case PM_OUT_OF_METADATA_SPACE:
 	case PM_READ_ONLY:
-		if (old_mode != new_mode)
+		if (!is_read_only_pool_mode(old_mode))
 			notify_of_pool_mode_change(pool, "read-only");
 		dm_pool_metadata_read_only(pool->pmd);
 		pool->process_bio = process_bio_read_only;
@@ -2605,6 +2663,8 @@ static void set_pool_mode(struct pool *pool, enum pool_mode new_mode)
 	case PM_WRITE:
 		if (old_mode != new_mode)
 			notify_of_pool_mode_change(pool, "write");
+		if (old_mode == PM_OUT_OF_DATA_SPACE)
+			cancel_delayed_work_sync(&pool->no_space_timeout);
 		pool->out_of_data_space = false;
 		pool->pf.error_if_no_space = pt->requested_pf.error_if_no_space;
 		dm_pool_metadata_read_write(pool->pmd);
@@ -3501,6 +3561,10 @@ static int maybe_resize_metadata_dev(struct dm_target *ti, bool *need_commit)
 		DMINFO("%s: growing the metadata device from %llu to %llu blocks",
 		       dm_device_name(pool->pool_md),
 		       sb_metadata_dev_size, metadata_dev_size);
+
+		if (get_pool_mode(pool) == PM_OUT_OF_METADATA_SPACE)
+			set_pool_mode(pool, PM_WRITE);
+
 		r = dm_pool_resize_metadata_dev(pool->pmd, metadata_dev_size);
 		if (r) {
 			metadata_operation_failed(pool, "dm_pool_resize_metadata_dev", r);
@@ -3804,7 +3868,7 @@ static int pool_message(struct dm_target *ti, unsigned argc, char **argv)
 	struct pool_c *pt = ti->private;
 	struct pool *pool = pt->pool;
 
-	if (get_pool_mode(pool) >= PM_READ_ONLY) {
+	if (get_pool_mode(pool) >= PM_OUT_OF_METADATA_SPACE) {
 		DMERR("%s: unable to service pool target messages in READ_ONLY or FAIL mode",
 		      dm_device_name(pool->pool_md));
 		return -EOPNOTSUPP;
@@ -3878,6 +3942,7 @@ static void pool_status(struct dm_target *ti, status_type_t type,
 	dm_block_t nr_blocks_data;
 	dm_block_t nr_blocks_metadata;
 	dm_block_t held_root;
+	enum pool_mode mode;
 	char buf[BDEVNAME_SIZE];
 	char buf2[BDEVNAME_SIZE];
 	struct pool_c *pt = ti->private;
@@ -3948,9 +4013,10 @@ static void pool_status(struct dm_target *ti, status_type_t type,
 		else
 			DMEMIT("- ");
 
-		if (pool->pf.mode == PM_OUT_OF_DATA_SPACE)
+		mode = get_pool_mode(pool);
+		if (mode == PM_OUT_OF_DATA_SPACE)
 			DMEMIT("out_of_data_space ");
-		else if (pool->pf.mode == PM_READ_ONLY)
+		else if (is_read_only_pool_mode(mode))
 			DMEMIT("ro ");
 		else
 			DMEMIT("rw ");
@@ -3995,20 +4061,6 @@ static int pool_iterate_devices(struct dm_target *ti,
 	struct pool_c *pt = ti->private;
 
 	return fn(ti, pt->data_dev, 0, ti->len, data);
-}
-
-static int pool_merge(struct dm_target *ti, struct bvec_merge_data *bvm,
-		      struct bio_vec *biovec, int max_size)
-{
-	struct pool_c *pt = ti->private;
-	struct request_queue *q = bdev_get_queue(pt->data_dev->bdev);
-
-	if (!q->merge_bvec_fn)
-		return max_size;
-
-	bvm->bi_bdev = pt->data_dev->bdev;
-
-	return min(max_size, q->merge_bvec_fn(q, bvm, biovec));
 }
 
 static void pool_io_hints(struct dm_target *ti, struct queue_limits *limits)
@@ -4087,7 +4139,6 @@ static struct target_type pool_target = {
 	.resume = pool_resume,
 	.message = pool_message,
 	.status = pool_status,
-	.merge = pool_merge,
 	.iterate_devices = pool_iterate_devices,
 	.io_hints = pool_io_hints,
 };
@@ -4414,21 +4465,6 @@ err:
 	DMEMIT("Error");
 }
 
-static int thin_merge(struct dm_target *ti, struct bvec_merge_data *bvm,
-		      struct bio_vec *biovec, int max_size)
-{
-	struct thin_c *tc = ti->private;
-	struct request_queue *q = bdev_get_queue(tc->pool_dev->bdev);
-
-	if (!q->merge_bvec_fn)
-		return max_size;
-
-	bvm->bi_bdev = tc->pool_dev->bdev;
-	bvm->bi_sector = dm_target_offset(ti, bvm->bi_sector);
-
-	return min(max_size, q->merge_bvec_fn(q, bvm, biovec));
-}
-
 static int thin_iterate_devices(struct dm_target *ti,
 				iterate_devices_callout_fn fn, void *data)
 {
@@ -4475,7 +4511,6 @@ static struct target_type thin_target = {
 	.presuspend = thin_presuspend,
 	.postsuspend = thin_postsuspend,
 	.status = thin_status,
-	.merge = thin_merge,
 	.iterate_devices = thin_iterate_devices,
 	.io_hints = thin_io_hints,
 };

@@ -14,6 +14,7 @@
 #include <linux/uprobes.h>
 #include <linux/key.h>
 #include <linux/context_tracking.h>
+#include <linux/livepatch.h>
 #include <asm/hw_breakpoint.h>
 #include <asm/uaccess.h>
 #include <asm/unistd.h>
@@ -165,6 +166,9 @@ void do_notify_resume(struct pt_regs *regs, unsigned long thread_info_flags)
 
 	if (thread_info_flags & _TIF_UPROBE)
 		uprobe_notify_resume(regs);
+
+	if (thread_info_flags & _TIF_PATCH_PENDING)
+		klp_update_patch_state(current);
 
 	if (thread_info_flags & _TIF_SIGPENDING)
 		do_signal(regs);

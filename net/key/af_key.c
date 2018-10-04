@@ -27,7 +27,6 @@
 #include <linux/proc_fs.h>
 #include <linux/init.h>
 #include <linux/slab.h>
-#include <linux/nospec.h>
 #include <net/net_namespace.h>
 #include <net/netns/generic.h>
 #include <net/xfrm.h>
@@ -486,7 +485,7 @@ static int parse_exthdrs(struct sk_buff *skb, const struct sadb_msg *hdr, void *
 	p += sizeof(*hdr);
 	while (len > 0) {
 		const struct sadb_ext *ehdr = (const struct sadb_ext *) p;
-		uint16_t ext_type, idx;
+		uint16_t ext_type;
 		int ext_len;
 
 		ext_len  = ehdr->sadb_ext_len;
@@ -498,16 +497,10 @@ static int parse_exthdrs(struct sk_buff *skb, const struct sadb_msg *hdr, void *
 			return -EINVAL;
 
 		if (ext_type <= SADB_EXT_MAX) {
-			int min;
-
-			ext_type = array_index_nospec(ext_type, SADB_EXT_MAX + 1);
-
-			min = (int) sadb_ext_min_len[ext_type];
+			int min = (int) sadb_ext_min_len[ext_type];
 			if (ext_len < min)
 				return -EINVAL;
-
-			idx = array_index_nospec(ext_type - 1, SADB_EXT_MAX);
-			if (ext_hdrs[idx] != NULL)
+			if (ext_hdrs[ext_type-1] != NULL)
 				return -EINVAL;
 			if (ext_type == SADB_EXT_ADDRESS_SRC ||
 			    ext_type == SADB_EXT_ADDRESS_DST ||
@@ -520,7 +513,7 @@ static int parse_exthdrs(struct sk_buff *skb, const struct sadb_msg *hdr, void *
 				if (verify_sec_ctx_len(p))
 					return -EINVAL;
 			}
-			ext_hdrs[idx] = (void *) p;
+			ext_hdrs[ext_type-1] = (void *) p;
 		}
 		p   += ext_len;
 		len -= ext_len;
@@ -2809,8 +2802,6 @@ static struct sadb_msg *pfkey_get_base_msg(struct sk_buff *skb, int *errp)
 			hdr = NULL;
 			*errp = -EMSGSIZE;
 		} else {
-			hdr->sadb_msg_type = array_index_nospec(hdr->sadb_msg_type,
-								SADB_MAX + 1);
 			*errp = 0;
 		}
 	}

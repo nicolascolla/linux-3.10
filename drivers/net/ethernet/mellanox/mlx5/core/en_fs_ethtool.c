@@ -393,8 +393,6 @@ static int validate_flow(struct mlx5e_priv *priv,
 	if (fs->ring_cookie >= priv->channels.params.num_channels &&
 	    fs->ring_cookie != RX_CLS_FLOW_DISC)
 		return -EINVAL;
-	fs->ring_cookie = array_index_nospec(fs->ring_cookie,
-					     priv->channels.params.num_channels);
 
 	switch (fs->flow_type & ~(FLOW_EXT | FLOW_MAC_EXT)) {
 	case ETHER_FLOW:

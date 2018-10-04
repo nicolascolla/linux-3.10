@@ -28,7 +28,6 @@
 #include <linux/module.h>
 #include <linux/math64.h>
 #include <linux/slab.h>
-#include <linux/nospec.h>
 #include <asm/processor.h>
 #include <asm/msr.h>
 #include <asm/page.h>
@@ -133,7 +132,6 @@ static inline bool kvm_apic_map_get_logical_dest(struct kvm_apic_map *map,
 		if (offset <= max_apic_id) {
 			u8 cluster_size = min(max_apic_id - offset + 1, 16U);
 
-			offset = array_index_nospec(offset, max_apic_id + 1);
 			*cluster = &map->phys_map[offset];
 			*mask = dest_id & (0xffff >> (16 - cluster_size));
 		} else {
@@ -267,9 +265,14 @@ static inline void kvm_apic_set_ldr(struct kvm_lapic *apic, u32 id)
 	recalculate_apic_map(apic->vcpu->kvm);
 }
 
+static inline u32 kvm_apic_calc_x2apic_ldr(u32 id)
+{
+	return ((id >> 4) << 16) | (1 << (id & 0xf));
+}
+
 static inline void kvm_apic_set_x2apic_id(struct kvm_lapic *apic, u32 id)
 {
-	u32 ldr = ((id >> 4) << 16) | (1 << (id & 0xf));
+	u32 ldr = kvm_apic_calc_x2apic_ldr(id);
 
 	WARN_ON_ONCE(id != apic->vcpu->vcpu_id);
 
@@ -817,10 +820,7 @@ static inline bool kvm_apic_map_get_dest_lapic(struct kvm *kvm,
 		if (irq->dest_id > map->max_apic_id) {
 			*bitmap = 0;
 		} else {
-			u32 idx = array_index_nospec(irq->dest_id,
-						     map->max_apic_id + 1);
-
-			*dst = &map->phys_map[idx];
+			*dst = &map->phys_map[irq->dest_id];
 			*bitmap = 1;
 		}
 		return true;
@@ -2206,6 +2206,7 @@ static int kvm_apic_state_fixup(struct kvm_vcpu *vcpu,
 {
 	if (apic_x2apic_mode(vcpu->arch.apic)) {
 		u32 *id = (u32 *)(s->regs + APIC_ID);
+		u32 *ldr = (u32 *)(s->regs + APIC_LDR);
 
 		if (vcpu->kvm->arch.x2apic_format) {
 			if (*id != vcpu->vcpu_id)
@@ -2216,6 +2217,10 @@ static int kvm_apic_state_fixup(struct kvm_vcpu *vcpu,
 			else
 				*id <<= 24;
 		}
+
+		/* In x2APIC mode, the LDR is fixed and based on the id */
+		if (set)
+			*ldr = kvm_apic_calc_x2apic_ldr(*id);
 	}
 
 	return 0;

@@ -237,6 +237,11 @@ static int read_object_code(u64 addr, size_t len, u8 cpumode,
 
 	thread__find_addr_map(thread, cpumode, MAP__FUNCTION, addr, &al);
 	if (!al.map || !al.map->dso) {
+		if (cpumode == PERF_RECORD_MISC_HYPERVISOR) {
+			pr_debug("Hypervisor address can not be resolved - skipping\n");
+			return 0;
+		}
+
 		pr_debug("thread__find_addr_map failed\n");
 		return -1;
 	}
@@ -403,15 +408,21 @@ static int process_events(struct machine *machine, struct perf_evlist *evlist,
 			  struct state *state)
 {
 	union perf_event *event;
+	struct perf_mmap *md;
 	int i, ret;
 
 	for (i = 0; i < evlist->nr_mmaps; i++) {
-		while ((event = perf_evlist__mmap_read(evlist, i)) != NULL) {
+		md = &evlist->mmap[i];
+		if (perf_mmap__read_init(md) < 0)
+			continue;
+
+		while ((event = perf_mmap__read_event(md)) != NULL) {
 			ret = process_event(machine, evlist, event, state);
-			perf_evlist__mmap_consume(evlist, i);
+			perf_mmap__consume(md);
 			if (ret < 0)
 				return ret;
 		}
+		perf_mmap__read_done(md);
 	}
 	return 0;
 }
@@ -633,7 +644,7 @@ static int do_test_code_reading(bool try_kcore)
 		break;
 	}
 
-	ret = perf_evlist__mmap(evlist, UINT_MAX, false);
+	ret = perf_evlist__mmap(evlist, UINT_MAX);
 	if (ret < 0) {
 		pr_debug("perf_evlist__mmap failed\n");
 		goto out_put;
@@ -673,7 +684,7 @@ out_err:
 	return err;
 }
 
-int test__code_reading(int subtest __maybe_unused)
+int test__code_reading(struct test *test __maybe_unused, int subtest __maybe_unused)
 {
 	int ret;
 

@@ -29,7 +29,6 @@
 #include <linux/interrupt.h>
 #include <linux/delay.h>
 #include <linux/kthread.h>
-#include <linux/nospec.h>
 #include <asm/div64.h>
 
 #include "cx23885.h"
@@ -1164,15 +1163,12 @@ static int vidioc_querycap(struct file *file, void  *priv,
 static int vidioc_enum_fmt_vid_cap(struct file *file, void  *priv,
 	struct v4l2_fmtdesc *f)
 {
-	u32 index;
-
 	if (unlikely(f->index >= ARRAY_SIZE(formats)))
 		return -EINVAL;
-	index = array_index_nospec(f->index, ARRAY_SIZE(formats));
 
-	strlcpy(f->description, formats[index].name,
+	strlcpy(f->description, formats[f->index].name,
 		sizeof(f->description));
-	f->pixelformat = formats[index].fourcc;
+	f->pixelformat = formats[f->index].fourcc;
 
 	return 0;
 }
@@ -1295,7 +1291,6 @@ int cx23885_enum_input(struct cx23885_dev *dev, struct v4l2_input *i)
 	n = i->index;
 	if (n >= MAX_CX23885_INPUT)
 		return -EINVAL;
-	n = array_index_nospec(n, MAX_CX23885_INPUT);
 
 	if (0 == INPUT(n)->type)
 		return -EINVAL;
@@ -1357,7 +1352,6 @@ int cx23885_set_input(struct file *file, void *priv, unsigned int i)
 		dprintk(1, "%s() -EINVAL\n", __func__);
 		return -EINVAL;
 	}
-	i = array_index_nospec(i, MAX_CX23885_INPUT);
 
 	if (INPUT(i)->type == 0)
 		return -EINVAL;

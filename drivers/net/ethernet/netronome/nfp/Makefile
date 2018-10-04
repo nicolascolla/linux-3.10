@@ -14,11 +14,13 @@ nfp-objs := \
 	    nfpcore/nfp_resource.o \
 	    nfpcore/nfp_rtsym.o \
 	    nfpcore/nfp_target.o \
+	    nfp_asm.o \
 	    nfp_app.o \
 	    nfp_app_nic.o \
 	    nfp_devlink.o \
 	    nfp_main.o \
 	    nfp_net_common.o \
+	    nfp_net_ctrl.o \
 	    nfp_net_debugdump.o \
 	    nfp_net_ethtool.o \
 	    nfp_net_main.o \
@@ -26,8 +28,6 @@ nfp-objs := \
 	    nfp_net_sriov.o \
 	    nfp_netvf_main.o \
 	    nfp_port.o \
-	    bpf/main.o \
-	    bpf/offload.o \
 	    nic/main.o
 
 ifeq ($(CONFIG_NFP_APP_FLOWER),y)
@@ -41,10 +41,16 @@ nfp-objs += \
 	    flower/tunnel_conf.o
 endif
 
-ifeq ($(CONFIG_BPF_SYSCALL),y)
-nfp-objs += \
-	    bpf/verifier.o \
-	    bpf/jit.o
-endif
+# RHEL7 - Omit BPF objects, because we are going
+#         to enable CONFIG_BPF_SYSCALL
+#
+# ifeq ($(CONFIG_BPF_SYSCALL),y)
+# nfp-objs += \
+#	    bpf/cmsg.o \
+#	    bpf/main.o \
+#	    bpf/offload.o \
+#	    bpf/verifier.o \
+#	    bpf/jit.o
+#endif
 
 nfp-$(CONFIG_NFP_DEBUG) += nfp_net_debugfs.o

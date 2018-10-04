@@ -16,7 +16,7 @@
 #include <linux/random.h>
 #include "nvmet.h"
 
-static struct nvmet_fabrics_ops *nvmet_transports[NVMF_TRTYPE_MAX];
+static const struct nvmet_fabrics_ops *nvmet_transports[NVMF_TRTYPE_MAX];
 static DEFINE_IDA(cntlid_ida);
 
 /*
@@ -53,6 +53,17 @@ u16 nvmet_copy_from_sgl(struct nvmet_req *req, off_t off, void *buf, size_t len)
 	if (sg_pcopy_to_buffer(req->sg, req->sg_cnt, buf, len, off) != len)
 		return NVME_SC_SGL_INVALID_DATA | NVME_SC_DNR;
 	return 0;
+}
+
+static unsigned int nvmet_max_nsid(struct nvmet_subsys *subsys)
+{
+	struct nvmet_ns *ns;
+
+	if (list_empty(&subsys->namespaces))
+		return 0;
+
+	ns = list_last_entry(&subsys->namespaces, struct nvmet_ns, dev_link);
+	return ns->nsid;
 }
 
 static u32 nvmet_async_event_result(struct nvmet_async_event *aen)
@@ -124,7 +135,7 @@ static void nvmet_add_async_event(struct nvmet_ctrl *ctrl, u8 event_type,
 	schedule_work(&ctrl->async_event_work);
 }
 
-int nvmet_register_transport(struct nvmet_fabrics_ops *ops)
+int nvmet_register_transport(const struct nvmet_fabrics_ops *ops)
 {
 	int ret = 0;
 
@@ -139,7 +150,7 @@ int nvmet_register_transport(struct nvmet_fabrics_ops *ops)
 }
 EXPORT_SYMBOL_GPL(nvmet_register_transport);
 
-void nvmet_unregister_transport(struct nvmet_fabrics_ops *ops)
+void nvmet_unregister_transport(const struct nvmet_fabrics_ops *ops)
 {
 	down_write(&nvmet_config_sem);
 	nvmet_transports[ops->type] = NULL;
@@ -149,7 +160,7 @@ EXPORT_SYMBOL_GPL(nvmet_unregister_transport);
 
 int nvmet_enable_port(struct nvmet_port *port)
 {
-	struct nvmet_fabrics_ops *ops;
+	const struct nvmet_fabrics_ops *ops;
 	int ret;
 
 	lockdep_assert_held(&nvmet_config_sem);
@@ -182,7 +193,7 @@ int nvmet_enable_port(struct nvmet_port *port)
 
 void nvmet_disable_port(struct nvmet_port *port)
 {
-	struct nvmet_fabrics_ops *ops;
+	const struct nvmet_fabrics_ops *ops;
 
 	lockdep_assert_held(&nvmet_config_sem);
 
@@ -332,6 +343,8 @@ void nvmet_ns_disable(struct nvmet_ns *ns)
 
 	ns->enabled = false;
 	list_del_rcu(&ns->dev_link);
+	if (ns->nsid == subsys->max_nsid)
+		subsys->max_nsid = nvmet_max_nsid(subsys);
 	mutex_unlock(&subsys->lock);
 
 	/*
@@ -485,7 +498,7 @@ int nvmet_sq_init(struct nvmet_sq *sq)
 EXPORT_SYMBOL_GPL(nvmet_sq_init);
 
 bool nvmet_req_init(struct nvmet_req *req, struct nvmet_cq *cq,
-		struct nvmet_sq *sq, struct nvmet_fabrics_ops *ops)
+		struct nvmet_sq *sq, const struct nvmet_fabrics_ops *ops)
 {
 	u8 flags = req->cmd->common.flags;
 	u16 status;
@@ -495,7 +508,9 @@ bool nvmet_req_init(struct nvmet_req *req, struct nvmet_cq *cq,
 	req->ops = ops;
 	req->sg = NULL;
 	req->sg_cnt = 0;
+	req->transfer_len = 0;
 	req->rsp->status = 0;
+	req->ns = NULL;
 
 	/* no support for fused commands yet */
 	if (unlikely(flags & (NVME_CMD_FUSE_FIRST | NVME_CMD_FUSE_SECOND))) {
@@ -541,42 +556,53 @@ EXPORT_SYMBOL_GPL(nvmet_req_init);
 void nvmet_req_uninit(struct nvmet_req *req)
 {
 	percpu_ref_put(&req->sq->ref);
+	if (req->ns)
+		nvmet_put_namespace(req->ns);
 }
 EXPORT_SYMBOL_GPL(nvmet_req_uninit);
 
+void nvmet_req_execute(struct nvmet_req *req)
+{
+	if (unlikely(req->data_len != req->transfer_len))
+		nvmet_req_complete(req, NVME_SC_SGL_INVALID_DATA | NVME_SC_DNR);
+	else
+		req->execute(req);
+}
+EXPORT_SYMBOL_GPL(nvmet_req_execute);
+
 static inline bool nvmet_cc_en(u32 cc)
 {
-	return cc & 0x1;
+	return (cc >> NVME_CC_EN_SHIFT) & 0x1;
 }
 
 static inline u8 nvmet_cc_css(u32 cc)
 {
-	return (cc >> 4) & 0x7;
+	return (cc >> NVME_CC_CSS_SHIFT) & 0x7;
 }
 
 static inline u8 nvmet_cc_mps(u32 cc)
 {
-	return (cc >> 7) & 0xf;
+	return (cc >> NVME_CC_MPS_SHIFT) & 0xf;
 }
 
 static inline u8 nvmet_cc_ams(u32 cc)
 {
-	return (cc >> 11) & 0x7;
+	return (cc >> NVME_CC_AMS_SHIFT) & 0x7;
 }
 
 static inline u8 nvmet_cc_shn(u32 cc)
 {
-	return (cc >> 14) & 0x3;
+	return (cc >> NVME_CC_SHN_SHIFT) & 0x3;
 }
 
 static inline u8 nvmet_cc_iosqes(u32 cc)
 {
-	return (cc >> 16) & 0xf;
+	return (cc >> NVME_CC_IOSQES_SHIFT) & 0xf;
 }
 
 static inline u8 nvmet_cc_iocqes(u32 cc)
 {
-	return (cc >> 20) & 0xf;
+	return (cc >> NVME_CC_IOCQES_SHIFT) & 0xf;
 }
 
 static void nvmet_start_ctrl(struct nvmet_ctrl *ctrl)
@@ -757,6 +783,7 @@ u16 nvmet_alloc_ctrl(const char *subsysnqn, const char *hostnqn,
 			hostnqn, subsysnqn);
 		req->rsp->result.u32 = IPO_IATTR_CONNECT_DATA(hostnqn);
 		up_read(&nvmet_config_sem);
+		status = NVME_SC_CONNECT_INVALID_HOST | NVME_SC_DNR;
 		goto out_put_subsystem;
 	}
 	up_read(&nvmet_config_sem);
@@ -804,7 +831,7 @@ u16 nvmet_alloc_ctrl(const char *subsysnqn, const char *hostnqn,
 		/* Don't accept keep-alive timeout for discovery controllers */
 		if (kato) {
 			status = NVME_SC_INVALID_FIELD | NVME_SC_DNR;
-			goto out_free_sqs;
+			goto out_remove_ida;
 		}
 
 		/*
@@ -834,6 +861,8 @@ u16 nvmet_alloc_ctrl(const char *subsysnqn, const char *hostnqn,
 	*ctrlp = ctrl;
 	return 0;
 
+out_remove_ida:
+	ida_simple_remove(&cntlid_ida, ctrl->cntlid);
 out_free_sqs:
 	kfree(ctrl->sqs);
 out_free_cqs:
@@ -851,21 +880,22 @@ static void nvmet_ctrl_free(struct kref *ref)
 	struct nvmet_ctrl *ctrl = container_of(ref, struct nvmet_ctrl, ref);
 	struct nvmet_subsys *subsys = ctrl->subsys;
 
-	nvmet_stop_keep_alive_timer(ctrl);
-
 	mutex_lock(&subsys->lock);
 	list_del(&ctrl->subsys_entry);
 	mutex_unlock(&subsys->lock);
+
+	nvmet_stop_keep_alive_timer(ctrl);
 
 	flush_work(&ctrl->async_event_work);
 	cancel_work_sync(&ctrl->fatal_err_work);
 
 	ida_simple_remove(&cntlid_ida, ctrl->cntlid);
-	nvmet_subsys_put(subsys);
 
 	kfree(ctrl->sqs);
 	kfree(ctrl->cqs);
 	kfree(ctrl);
+
+	nvmet_subsys_put(subsys);
 }
 
 void nvmet_ctrl_put(struct nvmet_ctrl *ctrl)

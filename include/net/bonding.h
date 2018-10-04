@@ -323,8 +323,15 @@ static inline bool bond_needs_speed_duplex(const struct bonding *bond)
 
 static inline bool bond_is_nondyn_tlb(const struct bonding *bond)
 {
-	return (BOND_MODE(bond) == BOND_MODE_TLB)  &&
-	       (bond->params.tlb_dynamic_lb == 0);
+	return (bond_is_lb(bond) && bond->params.tlb_dynamic_lb == 0);
+}
+
+static inline bool bond_mode_can_use_xmit_hash(const struct bonding *bond)
+{
+	return (BOND_MODE(bond) == BOND_MODE_8023AD ||
+		BOND_MODE(bond) == BOND_MODE_XOR ||
+		BOND_MODE(bond) == BOND_MODE_TLB ||
+		BOND_MODE(bond) == BOND_MODE_ALB);
 }
 
 static inline bool bond_mode_uses_xmit_hash(const struct bonding *bond)
@@ -651,6 +658,7 @@ struct net_device *bond_option_active_slave_get_rcu(struct bonding *bond);
 const char *bond_slave_link_status(s8 link);
 int bond_update_slave_arr(struct bonding *bond, struct slave *skipslave);
 void bond_slave_arr_work_rearm(struct bonding *bond, unsigned long delay);
+void bond_work_init_all(struct bonding *bond);
 
 #ifdef CONFIG_PROC_FS
 void bond_create_proc_entry(struct bonding *bond);

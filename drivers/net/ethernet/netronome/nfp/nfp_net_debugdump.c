@@ -127,13 +127,13 @@ struct nfp_dump_error {
 
 /* to track state through debug size calculation TLV traversal */
 struct nfp_level_size {
-	u32 requested_level;	/* input */
+	__be32 requested_level;	/* input */
 	u32 total_size;		/* output */
 };
 
 /* to track state during debug dump creation TLV traversal */
 struct nfp_dump_state {
-	u32 requested_level;	/* input param */
+	__be32 requested_level;	/* input param */
 	u32 dumped_size;	/* adds up to size of dumped data */
 	u32 buf_size;		/* size of buffer pointer to by p */
 	void *p;		/* current point in dump buffer */
@@ -341,7 +341,7 @@ nfp_calc_specific_level_size(struct nfp_pf *pf, struct nfp_dump_tl *dump_level,
 {
 	struct nfp_level_size *lev_sz = param;
 
-	if (be32_to_cpu(dump_level->type) != lev_sz->requested_level)
+	if (dump_level->type != lev_sz->requested_level)
 		return 0;
 
 	return nfp_traverse_tlvs(pf, dump_level->data,
@@ -355,7 +355,7 @@ s64 nfp_net_dump_calculate_size(struct nfp_pf *pf, struct nfp_dumpspec *spec,
 	struct nfp_level_size lev_sz;
 	int err;
 
-	lev_sz.requested_level = flag;
+	lev_sz.requested_level = cpu_to_be32(flag);
 	lev_sz.total_size = ALIGN8(sizeof(struct nfp_dump_prolog));
 
 	err = nfp_traverse_tlvs(pf, spec->data, spec->size, &lev_sz,
@@ -518,16 +518,15 @@ nfp_dump_csr_range(struct nfp_pf *pf, struct nfp_dumpspec_csr *spec_csr,
 	max_rd_addr = cpp_rd_addr + be32_to_cpu(spec_csr->cpp.dump_length);
 
 	while (cpp_rd_addr < max_rd_addr) {
-		if (is_xpb_read(&spec_csr->cpp.cpp_id))
-			bytes_read = nfp_xpb_readl(pf->cpp, cpp_rd_addr,
-						   (u32 *)dest);
-		else
+		if (is_xpb_read(&spec_csr->cpp.cpp_id)) {
+			err = nfp_xpb_readl(pf->cpp, cpp_rd_addr, (u32 *)dest);
+		} else {
 			bytes_read = nfp_cpp_read(pf->cpp, cpp_id, cpp_rd_addr,
 						  dest, reg_sz);
-		if (bytes_read != reg_sz) {
-			if (bytes_read >= 0)
-				bytes_read = -EIO;
-			dump_header->error = cpu_to_be32(bytes_read);
+			err = bytes_read == reg_sz ? 0 : -EIO;
+		}
+		if (err) {
+			dump_header->error = cpu_to_be32(err);
 			dump_header->error_offset = cpu_to_be32(cpp_rd_addr);
 			break;
 		}
@@ -555,8 +554,8 @@ nfp_read_indirect_csr(struct nfp_cpp *cpp,
 				   NFP_IND_ME_REFL_WR_SIG_INIT,
 				   cpp_params.token, cpp_params.island);
 	result = nfp_cpp_writel(cpp, cpp_id, csr_ctx_ptr_offs, context);
-	if (result != sizeof(context))
-		return result < 0 ? result : -EIO;
+	if (result)
+		return result;
 
 	cpp_id = nfp_get_numeric_cpp_id(&cpp_params);
 	result = nfp_cpp_read(cpp, cpp_id, csr_ctx_ptr_offs, dest, reg_sz);
@@ -641,8 +640,8 @@ nfp_dump_single_rtsym(struct nfp_pf *pf, struct nfp_dumpspec_rtsym *spec,
 	struct nfp_dump_rtsym *dump_header = dump->p;
 	struct nfp_dumpspec_cpp_isl_id cpp_params;
 	struct nfp_rtsym_table *rtbl = pf->rtbl;
+	u32 header_size, total_size, sym_size;
 	const struct nfp_rtsym *sym;
-	u32 header_size, total_size;
 	u32 tl_len, key_len;
 	int bytes_read;
 	u32 cpp_id;
@@ -658,9 +657,14 @@ nfp_dump_single_rtsym(struct nfp_pf *pf, struct nfp_dumpspec_rtsym *spec,
 	if (!sym)
 		return nfp_dump_error_tlv(&spec->tl, -ENOENT, dump);
 
+	if (sym->type == NFP_RTSYM_TYPE_ABS)
+		sym_size = sizeof(sym->addr);
+	else
+		sym_size = sym->size;
+
 	header_size =
 		ALIGN8(offsetof(struct nfp_dump_rtsym, rtsym) + key_len + 1);
-	total_size = header_size + ALIGN8(sym->size);
+	total_size = header_size + ALIGN8(sym_size);
 	dest = dump->p + header_size;
 
 	err = nfp_add_tlv(be32_to_cpu(spec->tl.type), total_size, dump);
@@ -670,9 +674,9 @@ nfp_dump_single_rtsym(struct nfp_pf *pf, struct nfp_dumpspec_rtsym *spec,
 	dump_header->padded_name_length =
 		header_size - offsetof(struct nfp_dump_rtsym, rtsym);
 	memcpy(dump_header->rtsym, spec->rtsym, key_len + 1);
+	dump_header->cpp.dump_length = cpu_to_be32(sym_size);
 
 	if (sym->type == NFP_RTSYM_TYPE_ABS) {
-		dump_header->cpp.dump_length = cpu_to_be32(sizeof(sym->addr));
 		*(u64 *)dest = sym->addr;
 	} else {
 		cpp_params.target = sym->target;
@@ -682,10 +686,9 @@ nfp_dump_single_rtsym(struct nfp_pf *pf, struct nfp_dumpspec_rtsym *spec,
 		cpp_id = nfp_get_numeric_cpp_id(&cpp_params);
 		dump_header->cpp.cpp_id = cpp_params;
 		dump_header->cpp.offset = cpu_to_be32(sym->addr);
-		dump_header->cpp.dump_length = cpu_to_be32(sym->size);
 		bytes_read = nfp_cpp_read(pf->cpp, cpp_id, sym->addr, dest,
-					  sym->size);
-		if (bytes_read != sym->size) {
+					  sym_size);
+		if (bytes_read != sym_size) {
 			if (bytes_read >= 0)
 				bytes_read = -EIO;
 			dump_header->error = cpu_to_be32(bytes_read);
@@ -754,7 +757,7 @@ nfp_dump_specific_level(struct nfp_pf *pf, struct nfp_dump_tl *dump_level,
 {
 	struct nfp_dump_state *dump = param;
 
-	if (be32_to_cpu(dump_level->type) != dump->requested_level)
+	if (dump_level->type != dump->requested_level)
 		return 0;
 
 	return nfp_traverse_tlvs(pf, dump_level->data,
@@ -774,7 +777,7 @@ static int nfp_dump_populate_prolog(struct nfp_dump_state *dump)
 	if (err)
 		return err;
 
-	prolog->dump_level = cpu_to_be32(dump->requested_level);
+	prolog->dump_level = dump->requested_level;
 
 	return 0;
 }
@@ -785,7 +788,7 @@ int nfp_net_dump_populate_buffer(struct nfp_pf *pf, struct nfp_dumpspec *spec,
 	struct nfp_dump_state dump;
 	int err;
 
-	dump.requested_level = dump_param->flag;
+	dump.requested_level = cpu_to_be32(dump_param->flag);
 	dump.dumped_size = 0;
 	dump.p = dest;
 	dump.buf_size = dump_param->len;

@@ -493,14 +493,12 @@ static int gfs2_iomap_alloc(struct inode *inode, struct iomap *iomap,
 {
 	struct gfs2_inode *ip = GFS2_I(inode);
 	struct gfs2_sbd *sdp = GFS2_SB(inode);
-	struct super_block *sb = sdp->sd_vfs;
 	struct buffer_head *dibh = mp->mp_bh[0];
 	u64 bn;
 	unsigned n, i, blks, alloced = 0, iblks = 0, branch_start = 0;
 	unsigned dblks = 0;
 	unsigned ptrs_per_blk;
 	const unsigned end_of_metadata = mp->mp_fheight - 1;
-	int ret;
 	enum alloc_state state;
 	__be64 *ptr;
 	__be64 zero_bn = 0;
@@ -609,15 +607,6 @@ static int gfs2_iomap_alloc(struct inode *inode, struct iomap *iomap,
 			iomap->flags |= IOMAP_F_NEW;
 			while (n-- > 0)
 				*ptr++ = cpu_to_be64(bn++);
-			if (flags & IOMAP_ZERO) {
-				ret = sb_issue_zeroout(sb, iomap->addr >> inode->i_blkbits,
-						       dblks, GFP_NOFS);
-				if (ret) {
-					fs_err(sdp,
-					       "Failed to zero data buffers\n");
-					flags &= ~IOMAP_ZERO;
-				}
-			}
 			break;
 		}
 	} while (iomap->addr == IOMAP_NULL_ADDR);
@@ -841,8 +830,6 @@ int gfs2_block_map(struct inode *inode, sector_t lblock,
 
 	if (create)
 		flags |= IOMAP_WRITE;
-	if (buffer_zeronew(bh_map))
-		flags |= IOMAP_ZERO;
 	ret = gfs2_iomap_begin(inode, (loff_t)lblock << inode->i_blkbits,
 			       bh_map->b_size, flags, &iomap);
 	if (ret) {
@@ -1289,6 +1276,7 @@ static bool mp_eq_to_hgt(struct metapath *mp, __u16 *nbof, unsigned int h)
 static int trunc_dealloc(struct gfs2_inode *ip, u64 newsize)
 {
 	struct gfs2_sbd *sdp = GFS2_SB(&ip->i_inode);
+	const u64 *arr = sdp->sd_heightsize;
 	struct metapath mp;
 	struct buffer_head *dibh, *bh;
 	struct gfs2_holder rd_gh;
@@ -1307,6 +1295,13 @@ static int trunc_dealloc(struct gfs2_inode *ip, u64 newsize)
 	else
 		lblock = (newsize - 1) >> sdp->sd_sb.sb_bsize_shift;
 
+	if ((lblock + 1) * sdp->sd_sb.sb_bsize > arr[ip->i_height]) {
+		/*
+		 * The truncate point lies beyond the allocated meta-data;
+		 * there is nothing to truncate.
+		 */
+		return 0;
+	}
 	memset(&mp, 0, sizeof(mp));
 	find_metapath(sdp, lblock, &mp, ip->i_height);
 
@@ -1707,7 +1702,7 @@ int gfs2_write_alloc_required(struct gfs2_inode *ip, u64 offset,
 	end_of_file = (i_size_read(&ip->i_inode) + sdp->sd_sb.sb_bsize - 1) >> shift;
 	lblock = offset >> shift;
 	lblock_stop = (offset + len + sdp->sd_sb.sb_bsize - 1) >> shift;
-	if (lblock_stop > end_of_file)
+	if (lblock_stop > end_of_file && ip != GFS2_I(sdp->sd_rindex))
 		return 1;
 
 	size = (lblock_stop - lblock) << shift;

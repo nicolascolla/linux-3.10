@@ -49,7 +49,6 @@
 #include <linux/slab.h>
 #include <linux/sort.h>
 #include <linux/bsearch.h>
-#include <linux/nospec.h>
 
 #include <asm/processor.h>
 #include <asm/io.h>
@@ -877,8 +876,6 @@ int __kvm_set_memory_region(struct kvm *kvm,
 		goto out;
 	if (as_id >= KVM_ADDRESS_SPACE_NUM || id >= KVM_MEM_SLOTS_NUM)
 		goto out;
-	as_id = array_index_nospec(as_id, KVM_ADDRESS_SPACE_NUM);
-
 	if (mem->guest_phys_addr + mem->memory_size < mem->guest_phys_addr)
 		goto out;
 
@@ -1125,7 +1122,6 @@ int kvm_get_dirty_log_protect(struct kvm *kvm,
 	id = (u16)log->slot;
 	if (as_id >= KVM_ADDRESS_SPACE_NUM || id >= KVM_USER_MEM_SLOTS)
 		goto out;
-	as_id = array_index_nospec(as_id, KVM_ADDRESS_SPACE_NUM);
 
 	slots = __kvm_memslots(kvm, as_id);
 	memslot = id_to_memslot(slots, id);
@@ -2807,7 +2803,6 @@ static int kvm_ioctl_create_device(struct kvm *kvm,
 
 	if (cd->type >= ARRAY_SIZE(kvm_device_ops_table))
 		return -ENODEV;
-	cd->type = array_index_nospec(cd->type, ARRAY_SIZE(kvm_device_ops_table));
 
 	ops = kvm_device_ops_table[cd->type];
 	if (ops == NULL)

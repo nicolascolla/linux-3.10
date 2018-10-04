@@ -1008,30 +1008,6 @@ static void gfs2_rgrp_in(struct gfs2_rgrpd *rgd, const void *buf)
 	rgd->rd_igeneration = be64_to_cpu(str->rg_igeneration);
 }
 
-static void gfs2_rgrp_out(struct gfs2_rgrpd *rgd, void *buf)
-{
-	struct gfs2_rgrp *str = buf;
-
-	str->rg_flags = cpu_to_be32(rgd->rd_flags & ~GFS2_RDF_MASK);
-	str->rg_free = cpu_to_be32(rgd->rd_free);
-	str->rg_dinodes = cpu_to_be32(rgd->rd_dinodes);
-	str->__pad = cpu_to_be32(0);
-	str->rg_igeneration = cpu_to_be64(rgd->rd_igeneration);
-	memset(&str->rg_reserved, 0, sizeof(str->rg_reserved));
-}
-
-static int gfs2_rgrp_lvb_valid(struct gfs2_rgrpd *rgd)
-{
-	struct gfs2_rgrp_lvb *rgl = rgd->rd_rgl;
-	struct gfs2_rgrp *str = (struct gfs2_rgrp *)rgd->rd_bits[0].bi_bh->b_data;
-
-	if (rgl->rl_flags != str->rg_flags || rgl->rl_free != str->rg_free ||
-	    rgl->rl_dinodes != str->rg_dinodes ||
-	    rgl->rl_igeneration != str->rg_igeneration)
-		return 0;
-	return 1;
-}
-
 static void gfs2_rgrp_ondisk2lvb(struct gfs2_rgrp_lvb *rgl, const void *buf)
 {
 	const struct gfs2_rgrp *str = buf;
@@ -1042,6 +1018,54 @@ static void gfs2_rgrp_ondisk2lvb(struct gfs2_rgrp_lvb *rgl, const void *buf)
 	rgl->rl_dinodes = str->rg_dinodes;
 	rgl->rl_igeneration = str->rg_igeneration;
 	rgl->__pad = 0UL;
+}
+
+static void gfs2_rgrp_out(struct gfs2_rgrpd *rgd, void *buf)
+{
+	struct gfs2_rgrp *str = buf;
+
+	str->rg_flags = cpu_to_be32(rgd->rd_flags & ~GFS2_RDF_MASK);
+	str->rg_free = cpu_to_be32(rgd->rd_free);
+	str->rg_dinodes = cpu_to_be32(rgd->rd_dinodes);
+	str->__pad = cpu_to_be32(0);
+	str->rg_igeneration = cpu_to_be64(rgd->rd_igeneration);
+	memset(&str->rg_reserved, 0, sizeof(str->rg_reserved));
+	gfs2_rgrp_ondisk2lvb(rgd->rd_rgl, buf);
+}
+
+static int gfs2_rgrp_lvb_valid(struct gfs2_rgrpd *rgd)
+{
+	struct gfs2_rgrp_lvb *rgl = rgd->rd_rgl;
+	struct gfs2_rgrp *str = (struct gfs2_rgrp *)rgd->rd_bits[0].bi_bh->b_data;
+	int valid = 1;
+
+	if (rgl->rl_flags != str->rg_flags) {
+		printk(KERN_WARNING "GFS2: rgd: %llu lvb flag mismatch %u/%u",
+		       (unsigned long long)rgd->rd_addr,
+		       be32_to_cpu(rgl->rl_flags), be32_to_cpu(str->rg_flags));
+		valid = 0;
+	}
+	if (rgl->rl_free != str->rg_free) {
+		printk(KERN_WARNING "GFS2: rgd: %llu lvb free mismatch %u/%u",
+		       (unsigned long long)rgd->rd_addr,
+		       be32_to_cpu(rgl->rl_free), be32_to_cpu(str->rg_free));
+		valid = 0;
+	}
+	if (rgl->rl_dinodes != str->rg_dinodes) {
+		printk(KERN_WARNING "GFS2: rgd: %llu lvb dinode mismatch %u/%u",
+		       (unsigned long long)rgd->rd_addr,
+		       be32_to_cpu(rgl->rl_dinodes),
+		       be32_to_cpu(str->rg_dinodes));
+		valid = 0;
+	}
+	if (rgl->rl_igeneration != str->rg_igeneration) {
+		printk(KERN_WARNING "GFS2: rgd: %llu lvb igen mismatch "
+		       "%llu/%llu", (unsigned long long)rgd->rd_addr,
+		       (unsigned long long)be64_to_cpu(rgl->rl_igeneration),
+		       (unsigned long long)be64_to_cpu(str->rg_igeneration));
+		valid = 0;
+	}
+	return valid;
 }
 
 static void update_rgrp_lvb_unlinked(struct gfs2_rgrpd *rgd, u32 change)
@@ -1126,7 +1150,7 @@ int gfs2_rgrp_bh_get(struct gfs2_rgrpd *rgd)
 		/* max out the rgrp allocation failure point */
 		rgd->rd_extfail_pt = rgd->rd_free;
 	}
-	if (be32_to_cpu(GFS2_MAGIC) != rgd->rd_rgl->rl_magic) {
+	if (cpu_to_be32(GFS2_MAGIC) != rgd->rd_rgl->rl_magic) {
 		rgd->rd_rgl->rl_unlinked = cpu_to_be32(count_unlinked(rgd));
 		gfs2_rgrp_ondisk2lvb(rgd->rd_rgl,
 				     rgd->rd_bits[0].bi_bh->b_data);
@@ -1160,13 +1184,13 @@ int update_rgrp_lvb(struct gfs2_rgrpd *rgd)
 	if (rgd->rd_flags & GFS2_RDF_UPTODATE)
 		return 0;
 
-	if (be32_to_cpu(GFS2_MAGIC) != rgd->rd_rgl->rl_magic)
+	if (cpu_to_be32(GFS2_MAGIC) != rgd->rd_rgl->rl_magic)
 		return gfs2_rgrp_bh_get(rgd);
 
 	rl_flags = be32_to_cpu(rgd->rd_rgl->rl_flags);
 	rl_flags &= ~GFS2_RDF_MASK;
 	rgd->rd_flags &= GFS2_RDF_MASK;
-	rgd->rd_flags |= (rl_flags | GFS2_RDF_UPTODATE | GFS2_RDF_CHECK);
+	rgd->rd_flags |= (rl_flags | GFS2_RDF_CHECK);
 	if (rgd->rd_rgl->rl_unlinked == 0)
 		rgd->rd_flags &= ~GFS2_RDF_CHECK;
 	rgd->rd_free = be32_to_cpu(rgd->rd_rgl->rl_free);
@@ -1367,7 +1391,6 @@ int gfs2_fitrim(struct file *filp, void __user *argp)
 				rgd->rd_flags |= GFS2_RGF_TRIMMED;
 				gfs2_trans_add_meta(rgd->rd_gl, bh);
 				gfs2_rgrp_out(rgd, bh->b_data);
-				gfs2_rgrp_ondisk2lvb(rgd->rd_rgl, bh->b_data);
 				gfs2_trans_end(sdp);
 			}
 		}
@@ -1937,7 +1960,6 @@ int gfs2_inplace_reserve(struct gfs2_inode *ip, struct gfs2_alloc_parms *ap)
 		return -EINVAL;
 	if (gfs2_rs_active(rs)) {
 		begin = rs->rs_rbm.rgd;
-		flags = 0; /* Yoda: Do or do not. There is no try */
 	} else if (ip->i_rgd && rgrp_contains_block(ip->i_rgd, ip->i_goal)) {
 		rs->rs_rbm.rgd = begin = ip->i_rgd;
 	} else {
@@ -2173,6 +2195,14 @@ int gfs2_rgrp_dump(struct seq_file *seq, const struct gfs2_glock *gl)
 		       (unsigned long long)rgd->rd_addr, rgd->rd_flags,
 		       rgd->rd_free, rgd->rd_free_clone, rgd->rd_dinodes,
 		       rgd->rd_reserved, rgd->rd_extfail_pt);
+	if (rgd->rd_sbd->sd_args.ar_rgrplvb) {
+		struct gfs2_rgrp_lvb *rgl = rgd->rd_rgl;
+
+		gfs2_print_dbg(seq, "  L: f:%02x b:%u i:%u\n",
+			       be32_to_cpu(rgl->rl_flags),
+			       be32_to_cpu(rgl->rl_free),
+			       be32_to_cpu(rgl->rl_dinodes));
+	}
 	spin_lock(&rgd->rd_rsspin);
 	for (n = rb_first(&rgd->rd_rstree); n; n = rb_next(&trs->rs_node)) {
 		trs = rb_entry(n, struct gfs2_blkreserv, rs_node);
@@ -2316,7 +2346,6 @@ int gfs2_alloc_blocks(struct gfs2_inode *ip, u64 *bn, unsigned int *nblocks,
 
 	gfs2_trans_add_meta(rbm.rgd->rd_gl, rbm.rgd->rd_bits[0].bi_bh);
 	gfs2_rgrp_out(rbm.rgd, rbm.rgd->rd_bits[0].bi_bh->b_data);
-	gfs2_rgrp_ondisk2lvb(rbm.rgd->rd_rgl, rbm.rgd->rd_bits[0].bi_bh->b_data);
 
 	gfs2_statfs_change(sdp, 0, -(s64)*nblocks, dinode ? 1 : 0);
 	if (dinode)
@@ -2357,7 +2386,6 @@ void __gfs2_free_blocks(struct gfs2_inode *ip, u64 bstart, u32 blen, int meta)
 	rgd->rd_flags &= ~GFS2_RGF_TRIMMED;
 	gfs2_trans_add_meta(rgd->rd_gl, rgd->rd_bits[0].bi_bh);
 	gfs2_rgrp_out(rgd, rgd->rd_bits[0].bi_bh->b_data);
-	gfs2_rgrp_ondisk2lvb(rgd->rd_rgl, rgd->rd_bits[0].bi_bh->b_data);
 
 	/* Directories keep their data in the metadata address space */
 	if (meta || ip->i_depth)
@@ -2394,7 +2422,6 @@ void gfs2_unlink_di(struct inode *inode)
 	trace_gfs2_block_alloc(ip, rgd, blkno, 1, GFS2_BLKST_UNLINKED);
 	gfs2_trans_add_meta(rgd->rd_gl, rgd->rd_bits[0].bi_bh);
 	gfs2_rgrp_out(rgd, rgd->rd_bits[0].bi_bh->b_data);
-	gfs2_rgrp_ondisk2lvb(rgd->rd_rgl, rgd->rd_bits[0].bi_bh->b_data);
 	update_rgrp_lvb_unlinked(rgd, 1);
 }
 
@@ -2415,7 +2442,6 @@ static void gfs2_free_uninit_di(struct gfs2_rgrpd *rgd, u64 blkno)
 
 	gfs2_trans_add_meta(rgd->rd_gl, rgd->rd_bits[0].bi_bh);
 	gfs2_rgrp_out(rgd, rgd->rd_bits[0].bi_bh->b_data);
-	gfs2_rgrp_ondisk2lvb(rgd->rd_rgl, rgd->rd_bits[0].bi_bh->b_data);
 	update_rgrp_lvb_unlinked(rgd, -1);
 
 	gfs2_statfs_change(sdp, 0, +1, -1);

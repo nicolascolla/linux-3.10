@@ -50,7 +50,6 @@
 #include <linux/stringify.h>
 #include <linux/sched.h>
 #include <linux/slab.h>
-#include <linux/nospec.h>
 #include <asm/uaccess.h>
 
 #include "common.h"
@@ -2072,12 +2071,10 @@ static int set_eeprom(struct net_device *dev, struct ethtool_eeprom *eeprom,
 		if (!buf)
 			return -ENOMEM;
 		err = t3_seeprom_read(adapter, aligned_offset, (__le32 *) buf);
-		if (!err && aligned_len > 4) {
-			barrier_nospec();
+		if (!err && aligned_len > 4)
 			err = t3_seeprom_read(adapter,
 					      aligned_offset + aligned_len - 4,
 					      (__le32 *) & buf[aligned_len - 4]);
-		}
 		if (err)
 			goto out;
 		memcpy(buf + (eeprom->offset & 3), data, eeprom->len);
@@ -2145,7 +2142,6 @@ static int cxgb_extension_ioctl(struct net_device *dev, void __user *useraddr)
 	struct adapter *adapter = pi->adapter;
 	u32 cmd;
 	int ret;
-	uint32_t qset_idx;
 
 	if (copy_from_user(&cmd, useraddr, sizeof(cmd)))
 		return -EFAULT;
@@ -2164,8 +2160,6 @@ static int cxgb_extension_ioctl(struct net_device *dev, void __user *useraddr)
 			return -EFAULT;
 		if (t.qset_idx >= SGE_QSETS)
 			return -EINVAL;
-		qset_idx = array_index_nospec(t.qset_idx, SGE_QSETS);
-
 		if (!in_range(t.intr_lat, 0, M_NEWTIMER) ||
 		    !in_range(t.cong_thres, 0, 255) ||
 		    !in_range(t.txq_size[0], MIN_TXQ_ENTRIES,
@@ -2202,9 +2196,8 @@ static int cxgb_extension_ioctl(struct net_device *dev, void __user *useraddr)
 			return -EINVAL;
 		if (t.qset_idx > q1 + nqsets - 1)
 			return -EINVAL;
-		qset_idx = array_index_nospec(qset_idx, q1 + nqsets);
 
-		q = &adapter->params.sge.qset[qset_idx];
+		q = &adapter->params.sge.qset[t.qset_idx];
 
 		if (t.rspq_size >= 0)
 			q->rspq_size = t.rspq_size;
@@ -2222,7 +2215,7 @@ static int cxgb_extension_ioctl(struct net_device *dev, void __user *useraddr)
 			q->cong_thres = t.cong_thres;
 		if (t.intr_lat >= 0) {
 			struct sge_qset *qs =
-				&adapter->sge.qs[qset_idx];
+				&adapter->sge.qs[t.qset_idx];
 
 			q->coalesce_usecs = t.intr_lat;
 			t3_update_qset_coalesce(qs, q);
@@ -2275,9 +2268,8 @@ static int cxgb_extension_ioctl(struct net_device *dev, void __user *useraddr)
 
 		if (t.qset_idx >= nqsets)
 			return -EINVAL;
-		qset_idx = array_index_nospec(t.qset_idx, nqsets);
 
-		q = &adapter->params.sge.qset[q1 + qset_idx];
+		q = &adapter->params.sge.qset[q1 + t.qset_idx];
 		t.rspq_size = q->rspq_size;
 		t.txq_size[0] = q->txq_size[0];
 		t.txq_size[1] = q->txq_size[1];
@@ -2291,7 +2283,7 @@ static int cxgb_extension_ioctl(struct net_device *dev, void __user *useraddr)
 		t.qnum = q1;
 
 		if (adapter->flags & USING_MSIX)
-			t.vector = adapter->msix_info[q1 + qset_idx + 1].vec;
+			t.vector = adapter->msix_info[q1 + t.qset_idx + 1].vec;
 		else
 			t.vector = adapter->pdev->irq;
 

@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0
 /*
  * drivers/usb/core/sysfs.c
  *
@@ -8,7 +9,6 @@
  * All of the sysfs file attributes for usb devices and interfaces.
  *
  * Released under the GPLv2 only.
- * SPDX-License-Identifier: GPL-2.0
  */
 
 
@@ -113,7 +113,7 @@ static ssize_t devspec_show(struct device *dev, struct device_attribute *attr,
 {
 	struct device_node *of_node = dev->of_node;
 
-	return sprintf(buf, "%s\n", of_node_full_name(of_node));
+	return sprintf(buf, "%pOF\n", of_node);
 }
 static DEVICE_ATTR_RO(devspec);
 #endif
@@ -654,7 +654,8 @@ static int add_power_attributes(struct device *dev)
 		if (udev->usb2_hw_lpm_capable == 1)
 			rc = sysfs_merge_group(&dev->kobj,
 					&usb2_hardware_lpm_attr_group);
-		if (udev->speed == USB_SPEED_SUPER &&
+		if ((udev->speed == USB_SPEED_SUPER ||
+		     udev->speed == USB_SPEED_SUPER_PLUS) &&
 				udev->lpm_capable == 1)
 			rc = sysfs_merge_group(&dev->kobj,
 					&usb3_hardware_lpm_attr_group);

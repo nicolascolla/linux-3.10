@@ -43,7 +43,6 @@
 #include <linux/fb.h>
 #include <linux/pci.h>
 #include <linux/efi.h>
-#include <linux/nospec.h>
 
 #include <linux/hyperv.h>
 
@@ -589,7 +588,6 @@ static int hvfb_setcolreg(unsigned regno, unsigned red, unsigned green,
 
 	if (regno > 15)
 		return -EINVAL;
-	regno = array_index_nospec(regno, 16);
 
 	pal[regno] = chan_to_field(red, &info->var.red)
 		| chan_to_field(green, &info->var.green)

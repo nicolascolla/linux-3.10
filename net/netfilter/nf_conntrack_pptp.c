@@ -26,7 +26,6 @@
 #include <linux/skbuff.h>
 #include <linux/in.h>
 #include <linux/tcp.h>
-#include <linux/nospec.h>
 
 #include <net/netfilter/nf_conntrack.h>
 #include <net/netfilter/nf_conntrack_core.h>
@@ -558,8 +557,7 @@ conntrack_pptp_help(struct sk_buff *skb, unsigned int protoff,
 
 	reqlen = datalen;
 	msg = ntohs(ctlh->messageType);
-	if (msg > 0 && msg <= PPTP_MSG_MAX &&
-	    reqlen < pptp_msg_size[array_index_nospec(msg, PPTP_MSG_MAX)])
+	if (msg > 0 && msg <= PPTP_MSG_MAX && reqlen < pptp_msg_size[msg])
 		return NF_ACCEPT;
 	if (reqlen > sizeof(*pptpReq))
 		reqlen = sizeof(*pptpReq);

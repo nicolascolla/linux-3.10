@@ -62,7 +62,6 @@
 #include <linux/netdevice.h>
 #include <linux/etherdevice.h>
 #include <linux/gsmmux.h>
-#include <linux/nospec.h>
 
 static int debug;
 module_param(debug, int, 0600);
@@ -1652,8 +1651,6 @@ static struct gsm_dlci *gsm_dlci_alloc(struct gsm_mux *gsm, int addr)
 		dlci->data = gsm_dlci_data;
 	else
 		dlci->data = gsm_dlci_command;
-
-	addr = array_index_nospec(addr, NUM_DLCI);
 	gsm->dlci[addr] = dlci;
 	return dlci;
 }
@@ -2899,15 +2896,11 @@ static int gsmtty_install(struct tty_driver *driver, struct tty_struct *tty)
 
 	if (mux >= MAX_MUX)
 		return -ENXIO;
-	mux = array_index_nospec(mux, MAX_MUX);
-
 	/* FIXME: we need to lock gsm_mux for lifetimes of ttys eventually */
 	if (gsm_mux[mux] == NULL)
 		return -EUNATCH;
 	if (line == 0 || line > 61)	/* 62/63 reserved */
 		return -ECHRNG;
-	line = array_index_nospec(line, 62);
-
 	gsm = gsm_mux[mux];
 	if (gsm->dead)
 		return -EL2HLT;

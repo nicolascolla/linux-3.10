@@ -17,7 +17,6 @@
  * this warranty disclaimer.
  */
 
-#include <linux/nospec.h>
 #include "decl.h"
 #include "ioctl.h"
 #include "main.h"
@@ -416,11 +415,9 @@ int mwifiex_process_uap_rx_packet(struct mwifiex_private *priv,
 	if (rx_pkt_type != PKT_TYPE_BAR && uap_rx_pd->priority < MAX_NUM_TID) {
 		spin_lock_irqsave(&priv->sta_list_spinlock, flags);
 		node = mwifiex_get_sta_entry(priv, ta);
-		if (node) {
-			u8 priority = array_index_nospec(uap_rx_pd->priority,
-							 MAX_NUM_TID);
-			node->rx_seq[priority] = le16_to_cpu(uap_rx_pd->seq_num);
-		}
+		if (node)
+			node->rx_seq[uap_rx_pd->priority] =
+						le16_to_cpu(uap_rx_pd->seq_num);
 		spin_unlock_irqrestore(&priv->sta_list_spinlock, flags);
 	}
 

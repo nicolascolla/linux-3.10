@@ -34,7 +34,6 @@
 #include <linux/i2c.h>
 #include <linux/swab.h>
 #include <linux/vmalloc.h>
-#include <linux/nospec.h>
 #include "ddbridge.h"
 
 #include "ddbridge-regs.h"
@@ -794,9 +793,10 @@ static void dvb_input_detach(struct ddb_input *input)
 			dvb_frontend_detach(input->fe);
 			input->fe = NULL;
 		}
+		/* fall-through */
 	case 4:
 		dvb_net_release(&input->dvbnet);
-
+		/* fall-through */
 	case 3:
 		dvbdemux->dmx.close(&dvbdemux->dmx);
 		dvbdemux->dmx.remove_frontend(&dvbdemux->dmx,
@@ -804,10 +804,10 @@ static void dvb_input_detach(struct ddb_input *input)
 		dvbdemux->dmx.remove_frontend(&dvbdemux->dmx,
 					      &input->mem_frontend);
 		dvb_dmxdev_release(&input->dmxdev);
-
+		/* fall-through */
 	case 2:
 		dvb_dmx_release(&input->demux);
-
+		/* fall-through */
 	case 1:
 		dvb_unregister_adapter(adap);
 	}
@@ -1433,7 +1433,7 @@ static int ddb_major;
 
 static int ddb_open(struct inode *inode, struct file *file)
 {
-	struct ddb *dev = ddbs[array_index_nospec(iminor(inode), 32)];
+	struct ddb *dev = ddbs[iminor(inode)];
 
 	file->private_data = dev;
 	return 0;

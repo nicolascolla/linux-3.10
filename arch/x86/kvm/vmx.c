@@ -157,31 +157,22 @@ module_param_named(preemption_timer, enable_preemption_timer, bool, S_IRUGO);
  * Time is measured based on a counter that runs at the same rate as the TSC,
  * refer SDM volume 3b section 21.6.13 & 22.1.3.
  */
-#define KVM_VMX_DEFAULT_PLE_GAP           128
-#define KVM_VMX_DEFAULT_PLE_WINDOW        4096
-#define KVM_VMX_DEFAULT_PLE_WINDOW_GROW   2
-#define KVM_VMX_DEFAULT_PLE_WINDOW_SHRINK 0
-#define KVM_VMX_DEFAULT_PLE_WINDOW_MAX    \
-		INT_MAX / KVM_VMX_DEFAULT_PLE_WINDOW_GROW
+static unsigned int ple_gap = KVM_DEFAULT_PLE_GAP;
 
-static int ple_gap = KVM_VMX_DEFAULT_PLE_GAP;
-module_param(ple_gap, int, S_IRUGO);
-
-static int ple_window = KVM_VMX_DEFAULT_PLE_WINDOW;
-module_param(ple_window, int, S_IRUGO);
+static unsigned int ple_window = KVM_VMX_DEFAULT_PLE_WINDOW;
+module_param(ple_window, uint, 0444);
 
 /* Default doubles per-vcpu window every exit. */
-static int ple_window_grow = KVM_VMX_DEFAULT_PLE_WINDOW_GROW;
-module_param(ple_window_grow, int, S_IRUGO);
+static unsigned int ple_window_grow = KVM_DEFAULT_PLE_WINDOW_GROW;
+module_param(ple_window_grow, uint, 0444);
 
 /* Default resets per-vcpu window every exit to ple_window. */
-static int ple_window_shrink = KVM_VMX_DEFAULT_PLE_WINDOW_SHRINK;
-module_param(ple_window_shrink, int, S_IRUGO);
+static unsigned int ple_window_shrink = KVM_DEFAULT_PLE_WINDOW_SHRINK;
+module_param(ple_window_shrink, uint, 0444);
 
 /* Default is to compute the maximum so we can never overflow. */
-static int ple_window_actual_max = KVM_VMX_DEFAULT_PLE_WINDOW_MAX;
-static int ple_window_max        = KVM_VMX_DEFAULT_PLE_WINDOW_MAX;
-module_param(ple_window_max, int, S_IRUGO);
+static unsigned int ple_window_max        = KVM_VMX_DEFAULT_PLE_WINDOW_MAX;
+module_param(ple_window_max, uint, 0444);
 
 extern const ulong vmx_return;
 
@@ -196,12 +187,14 @@ static enum vmx_l1d_flush_state __read_mostly vmentry_l1d_flush_param = VMENTER_
 
 static const struct {
 	const char *option;
-	enum vmx_l1d_flush_state cmd;
+	bool for_parse;
 } vmentry_l1d_param[] = {
-	{"auto",	VMENTER_L1D_FLUSH_AUTO},
-	{"never",	VMENTER_L1D_FLUSH_NEVER},
-	{"cond",	VMENTER_L1D_FLUSH_COND},
-	{"always",	VMENTER_L1D_FLUSH_ALWAYS},
+	[VMENTER_L1D_FLUSH_AUTO]	 = {"auto", true},
+	[VMENTER_L1D_FLUSH_NEVER]	 = {"never", true},
+	[VMENTER_L1D_FLUSH_COND]	 = {"cond", true},
+	[VMENTER_L1D_FLUSH_ALWAYS]	 = {"always", true},
+	[VMENTER_L1D_FLUSH_EPT_DISABLED] = {"EPT disabled", false},
+	[VMENTER_L1D_FLUSH_NOT_REQUIRED] = {"not required", false},
 };
 
 #define L1D_CACHE_ORDER 4
@@ -216,6 +209,16 @@ static int vmx_setup_l1d_flush(enum vmx_l1d_flush_state l1tf)
 		l1tf_vmx_mitigation = VMENTER_L1D_FLUSH_EPT_DISABLED;
 		return 0;
 	}
+
+       if (boot_cpu_has(X86_FEATURE_ARCH_CAPABILITIES)) {
+	       u64 msr;
+
+	       rdmsrl(MSR_IA32_ARCH_CAPABILITIES, msr);
+	       if (msr & ARCH_CAP_SKIP_VMENTRY_L1DFLUSH) {
+		       l1tf_vmx_mitigation = VMENTER_L1D_FLUSH_NOT_REQUIRED;
+		       return 0;
+	       }
+       }
 
 	/* If set to auto use the default l1tf mitigation method */
 	if (l1tf == VMENTER_L1D_FLUSH_AUTO) {
@@ -282,8 +285,9 @@ static int vmentry_l1d_flush_parse(const char *s)
 
 	if (s) {
 		for (i = 0; i < ARRAY_SIZE(vmentry_l1d_param); i++) {
-			if (sysfs_streq(s, vmentry_l1d_param[i].option))
-				return vmentry_l1d_param[i].cmd;
+			if (vmentry_l1d_param[i].for_parse &&
+			    sysfs_streq(s, vmentry_l1d_param[i].option))
+				return i;
 		}
 	}
 	return -EINVAL;
@@ -293,12 +297,12 @@ static int vmentry_l1d_flush_set(const char *s, const struct kernel_param *kp)
 {
 	int l1tf, ret;
 
-	if (!boot_cpu_has(X86_BUG_L1TF))
-		return 0;
-
 	l1tf = vmentry_l1d_flush_parse(s);
 	if (l1tf < 0)
 		return l1tf;
+
+	if (!boot_cpu_has(X86_BUG_L1TF))
+		return 0;
 
 	/*
 	 * Has vmx_init() run already? If not then this is the pre init
@@ -319,6 +323,9 @@ static int vmentry_l1d_flush_set(const char *s, const struct kernel_param *kp)
 
 static int vmentry_l1d_flush_get(char *s, const struct kernel_param *kp)
 {
+	if (WARN_ON_ONCE(l1tf_vmx_mitigation >= ARRAY_SIZE(vmentry_l1d_param)))
+		return sprintf(s, "???\n");
+
 	return sprintf(s, "%s", vmentry_l1d_param[l1tf_vmx_mitigation].option);
 }
 
@@ -2041,6 +2048,7 @@ static void clear_atomic_switch_msr(struct vcpu_vmx *vmx, unsigned msr)
 		}
 		break;
 	}
+
 	i = find_msr(&m->guest, msr);
 	if (i < 0)
 		goto skip_guest;
@@ -6602,40 +6610,14 @@ out:
 	return ret;
 }
 
-static int __grow_ple_window(int val)
-{
-	if (ple_window_grow < 1)
-		return ple_window;
-
-	val = min(val, ple_window_actual_max);
-
-	if (ple_window_grow < ple_window)
-		val *= ple_window_grow;
-	else
-		val += ple_window_grow;
-
-	return val;
-}
-
-static int __shrink_ple_window(int val, int modifier, int minimum)
-{
-	if (modifier < 1)
-		return ple_window;
-
-	if (modifier < ple_window)
-		val /= modifier;
-	else
-		val -= modifier;
-
-	return max(val, minimum);
-}
-
 static void grow_ple_window(struct kvm_vcpu *vcpu)
 {
 	struct vcpu_vmx *vmx = to_vmx(vcpu);
 	int old = vmx->ple_window;
 
-	vmx->ple_window = __grow_ple_window(old);
+	vmx->ple_window = __grow_ple_window(old, ple_window,
+					    ple_window_grow,
+					    ple_window_max);
 
 	if (vmx->ple_window != old)
 		vmx->ple_window_dirty = true;
@@ -6648,28 +6630,14 @@ static void shrink_ple_window(struct kvm_vcpu *vcpu)
 	struct vcpu_vmx *vmx = to_vmx(vcpu);
 	int old = vmx->ple_window;
 
-	vmx->ple_window = __shrink_ple_window(old,
-	                                      ple_window_shrink, ple_window);
+	vmx->ple_window = __shrink_ple_window(old, ple_window,
+					      ple_window_shrink,
+					      ple_window);
 
 	if (vmx->ple_window != old)
 		vmx->ple_window_dirty = true;
 
 	trace_kvm_ple_window_shrink(vcpu->vcpu_id, vmx->ple_window, old);
-}
-
-/*
- * ple_window_actual_max is computed to be one grow_ple_window() below
- * ple_window_max. (See __grow_ple_window for the reason.)
- * This prevents overflows, because ple_window_max is int.
- * ple_window_max effectively rounded down to a multiple of ple_window_grow in
- * this process.
- * ple_window_max is also prevented from setting vmx->ple_window < ple_window.
- */
-static void update_ple_window_actual_max(void)
-{
-	ple_window_actual_max =
-			__shrink_ple_window(max(ple_window_max, ple_window),
-			                    ple_window_grow, INT_MIN);
 }
 
 /*
@@ -6803,8 +6771,6 @@ static __init int hardware_setup(void)
 		vmx_enable_tdp();
 	else
 		kvm_disable_tdp();
-
-	update_ple_window_actual_max();
 
 	/*
 	 * Only enable PML when hardware supports PML feature, and both EPT
@@ -11201,7 +11167,7 @@ static void load_vmcs12_host_state(struct kvm_vcpu *vcpu,
 	 * (KVM doesn't change it)- no reason to call set_cr4_guest_host_mask();
 	 */
 	vcpu->arch.cr4_guest_owned_bits = ~vmcs_readl(CR4_GUEST_HOST_MASK);
-	kvm_set_cr4(vcpu, vmcs12->host_cr4);
+	vmx_set_cr4(vcpu, vmcs12->host_cr4);
 
 	nested_ept_uninit_mmu_context(vcpu);
 
@@ -12014,7 +11980,7 @@ static void vmx_cleanup_l1d_flush(void)
 	l1tf_vmx_mitigation = VMENTER_L1D_FLUSH_AUTO;
 }
 
-static void __exit vmx_exit(void)
+static void vmx_exit(void)
 {
 #ifdef CONFIG_KEXEC_CORE
 	RCU_INIT_POINTER(crash_vmclear_loaded_vmcss, NULL);

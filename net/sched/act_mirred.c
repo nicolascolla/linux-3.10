@@ -139,7 +139,6 @@ static int tcf_mirred_init(struct net *net, struct nlattr *nla,
 	m->tcf_action = parm->action;
 	m->tcfm_eaction = parm->eaction;
 	if (dev != NULL) {
-		m->tcfm_ifindex = parm->ifindex;
 		if (ret != ACT_P_CREATED)
 			dev_put(rcu_dereference_protected(m->tcfm_dev, 1));
 		dev_hold(dev);
@@ -246,13 +245,14 @@ static int tcf_mirred_dump(struct sk_buff *skb, struct tc_action *a, int bind,
 {
 	unsigned char *b = skb_tail_pointer(skb);
 	struct tcf_mirred *m = to_mirred(a);
+	struct net_device *dev = rtnl_dereference(m->tcfm_dev);
 	struct tc_mirred opt = {
 		.index   = m->tcf_index,
 		.action  = m->tcf_action,
 		.refcnt  = m->tcf_refcnt - ref,
 		.bindcnt = m->tcf_bindcnt - bind,
 		.eaction = m->tcfm_eaction,
-		.ifindex = m->tcfm_ifindex,
+		.ifindex = dev ? dev->ifindex : 0,
 	};
 	struct tcf_t t;
 
@@ -313,15 +313,11 @@ static struct notifier_block mirred_device_notifier = {
 	.notifier_call = mirred_device_event,
 };
 
-static int tcf_mirred_device(const struct tc_action *a, struct net *net,
-			     struct net_device **mirred_dev)
+static struct net_device *tcf_mirred_get_dev(const struct tc_action *a)
 {
-	int ifindex = tcf_mirred_ifindex(a);
+	struct tcf_mirred *m = to_mirred(a);
 
-	*mirred_dev = __dev_get_by_index(net, ifindex);
-	if (!*mirred_dev)
-		return -EINVAL;
-	return 0;
+	return rtnl_dereference(m->tcfm_dev);
 }
 
 static struct tc_action_ops act_mirred_ops = {
@@ -336,7 +332,7 @@ static struct tc_action_ops act_mirred_ops = {
 	.walk		=	tcf_mirred_walker,
 	.lookup		=	tcf_mirred_search,
 	.size		=	sizeof(struct tcf_mirred),
-	.get_dev	=	tcf_mirred_device,
+	.get_dev	=	tcf_mirred_get_dev,
 };
 
 static __net_init int mirred_init_net(struct net *net)

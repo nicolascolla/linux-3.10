@@ -23,7 +23,6 @@
 #include <linux/vmalloc.h>
 #include <linux/security.h>
 #include <linux/uio.h>
-#include <linux/nospec.h>
 #include <asm/uaccess.h>
 #include "internal.h"
 
@@ -70,7 +69,6 @@ SYSCALL_DEFINE5(add_key, const char __user *, _type,
 	ret = -EINVAL;
 	if (plen > 1024 * 1024 - 1)
 		goto error;
-	plen = array_index_nospec(plen, 1024 * 1024);
 
 	/* draw all the data into kernel space */
 	ret = key_get_type_from_user(type, _type, sizeof(type));

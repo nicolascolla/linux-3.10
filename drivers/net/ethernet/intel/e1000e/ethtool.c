@@ -29,7 +29,6 @@
 #include <linux/delay.h>
 #include <linux/vmalloc.h>
 #include <linux/pm_runtime.h>
-#include <linux/nospec.h>
 
 #include "e1000.h"
 
@@ -171,6 +170,7 @@ static int e1000_get_settings(struct net_device *netdev,
 		}
 	} else if (!pm_runtime_suspended(netdev->dev.parent)) {
 		u32 status = er32(STATUS);
+
 		if (status & E1000_STATUS_LU) {
 			if (status & E1000_STATUS_SPEED_1000)
 				speed = SPEED_1000;
@@ -599,14 +599,11 @@ static int e1000_set_eeprom(struct net_device *netdev,
 		ret_val = e1000_read_nvm(hw, first_word, 1, &eeprom_buff[0]);
 		ptr++;
 	}
-	if (((eeprom->offset + eeprom->len) & 1) && (!ret_val)) {
+	if (((eeprom->offset + eeprom->len) & 1) && (!ret_val))
 		/* need read/modify/write of last changed EEPROM word */
 		/* only the first byte of the word is being modified */
-		unsigned int idx = array_index_nospec(last_word - first_word,
-						      max_len);
 		ret_val = e1000_read_nvm(hw, last_word, 1,
-					 &eeprom_buff[idx]);
-	}
+					 &eeprom_buff[last_word - first_word]);
 
 	if (ret_val)
 		goto out;
@@ -805,6 +802,7 @@ static bool reg_set_and_check(struct e1000_adapter *adapter, u64 *data,
 			      int reg, u32 mask, u32 write)
 {
 	u32 val;
+
 	__ew32(&adapter->hw, reg, write & mask);
 	val = __er32(&adapter->hw, reg);
 	if ((write & mask) != (val & mask)) {
@@ -1752,6 +1750,7 @@ static int e1000_link_test(struct e1000_adapter *adapter, u64 *data)
 	*data = 0;
 	if (hw->phy.media_type == e1000_media_type_internal_serdes) {
 		int i = 0;
+
 		hw->mac.serdes_has_link = false;
 
 		/* On some blade server designs, link establishment

@@ -40,7 +40,6 @@
 #include <linux/net.h>
 #include <linux/fs.h>
 #include <linux/slab.h>
-#include <linux/nospec.h>
 #include <asm/uaccess.h>
 #include <linux/skbuff.h>
 #include <linux/netdevice.h>
@@ -218,6 +217,7 @@ static int __netlink_deliver_tap_skb(struct sk_buff *skb,
 		nskb->dev = dev;
 		nskb->protocol = htons((u16) sk->sk_protocol);
 
+		skb_reset_network_header(nskb);
 		ret = dev_queue_xmit(nskb);
 		if (unlikely(ret > 0))
 			ret = net_xmit_errno(ret);
@@ -485,6 +485,11 @@ static int netlink_insert(struct sock *sk, u32 portid)
 
 	err = __netlink_insert(table, sk);
 	if (err) {
+		/* In case the hashtable backend returns with -EBUSY
+		 * from here, it must not escape to the caller.
+		 */
+		if (unlikely(err == -EBUSY))
+			err = -EOVERFLOW;
 		if (err == -EEXIST)
 			err = -EADDRINUSE;
 		sock_put(sk);
@@ -572,7 +577,6 @@ static int netlink_create(struct net *net, struct socket *sock, int protocol,
 
 	if (protocol < 0 || protocol >= MAX_LINKS)
 		return -EPROTONOSUPPORT;
-	protocol = array_index_nospec(protocol, MAX_LINKS);
 
 	netlink_lock_table();
 #ifdef CONFIG_MODULES

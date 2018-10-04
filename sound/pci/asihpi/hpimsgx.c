@@ -21,7 +21,6 @@ Extended Message Function With Response Caching
 (C) Copyright AudioScience Inc. 2002
 *****************************************************************************/
 #define SOURCEFILE_NAME "hpimsgx.c"
-#include <linux/nospec.h>
 #include "hpi_internal.h"
 #include "hpi_version.h"
 #include "hpimsginit.h"
@@ -272,8 +271,6 @@ static void outstream_message(struct hpi_message *phm,
 			HPI_ERROR_INVALID_OBJ_INDEX);
 		return;
 	}
-	phm->obj_index = array_index_nospec(phm->obj_index,
-				aDAPTER_INFO[phm->adapter_index].num_outstreams);
 
 	switch (phm->function) {
 	case HPI_OSTREAM_OPEN:
@@ -296,8 +293,6 @@ static void instream_message(struct hpi_message *phm,
 			HPI_ERROR_INVALID_OBJ_INDEX);
 		return;
 	}
-	phm->obj_index = array_index_nospec(phm->obj_index,
-				aDAPTER_INFO[phm->adapter_index].num_instreams);
 
 	switch (phm->function) {
 	case HPI_ISTREAM_OPEN:
@@ -334,8 +329,6 @@ void hpi_send_recv_ex(struct hpi_message *phm, struct hpi_response *phr,
 			HPI_ERROR_BAD_ADAPTER_NUMBER);
 		return;
 	}
-	phm->adapter_index = array_index_nospec(phm->adapter_index,
-						HPI_MAX_ADAPTERS);
 
 	switch (phm->object) {
 	case HPI_OBJ_SUBSYSTEM:

@@ -30,7 +30,6 @@
 #include <linux/user_namespace.h>
 #include <linux/binfmts.h>
 #include <linux/personality.h>
-#include <linux/nospec.h>
 
 /*
  * If a non-root user executes a setuid-root binary in
@@ -1123,7 +1122,6 @@ static int cap_prctl_drop(unsigned long cap)
 		return -EPERM;
 	if (!cap_valid(cap))
 		return -EINVAL;
-	cap = array_index_nospec(cap, CAP_LAST_CAP + 1);
 
 	new = prepare_creds();
 	if (!new)
@@ -1154,7 +1152,6 @@ int cap_task_prctl(int option, unsigned long arg2, unsigned long arg3,
 	case PR_CAPBSET_READ:
 		if (!cap_valid(arg2))
 			return -EINVAL;
-		arg2 = array_index_nospec(arg2, CAP_LAST_CAP + 1);
 		return !!cap_raised(old->cap_bset, arg2);
 
 	case PR_CAPBSET_DROP:
@@ -1239,7 +1236,6 @@ int cap_task_prctl(int option, unsigned long arg2, unsigned long arg3,
 
 		if (((!cap_valid(arg3)) | arg4 | arg5))
 			return -EINVAL;
-		arg3 = array_index_nospec(arg3, CAP_LAST_CAP + 1);
 
 		if (arg2 == PR_CAP_AMBIENT_IS_SET) {
 			return !!cap_raised(current_cred()->cap_ambient, arg3);

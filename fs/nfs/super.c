@@ -332,7 +332,7 @@ struct file_system_type nfs4_fs_type = {
 	.name		= "nfs4",
 	.mount		= nfs_fs_mount,
 	.kill_sb	= nfs_kill_super,
-	.fs_flags	= FS_RENAME_DOES_D_MOVE|FS_BINARY_MOUNTDATA|FS_HAS_INVALIDATE_RANGE|FS_HAS_FO_EXTEND,
+	.fs_flags	= FS_RENAME_DOES_D_MOVE|FS_BINARY_MOUNTDATA|FS_HAS_INVALIDATE_RANGE,
 };
 MODULE_ALIAS_FS("nfs4");
 MODULE_ALIAS("nfs4");
@@ -1327,7 +1327,7 @@ static int nfs_parse_mount_options(char *raw,
 			mnt->options |= NFS_OPTION_MIGRATION;
 			break;
 		case Opt_nomigration:
-			mnt->options &= NFS_OPTION_MIGRATION;
+			mnt->options &= ~NFS_OPTION_MIGRATION;
 			break;
 
 		/*
@@ -1684,8 +1684,8 @@ static int nfs_verify_authflavors(struct nfs_parsed_mount_data *args,
 			rpc_authflavor_t *server_authlist, unsigned int count)
 {
 	rpc_authflavor_t flavor = RPC_AUTH_MAXFLAVOR;
+	bool found_auth_null = false;
 	unsigned int i;
-	int use_auth_null = false;
 
 	/*
 	 * If the sec= mount option is used, the specified flavor or AUTH_NULL
@@ -1694,6 +1694,10 @@ static int nfs_verify_authflavors(struct nfs_parsed_mount_data *args,
 	 * AUTH_NULL has a special meaning when it's in the server list - it
 	 * means that the server will ignore the rpc creds, so any flavor
 	 * can be used but still use the sec= that was specified.
+	 *
+	 * Note also that the MNT procedure in MNTv1 does not return a list
+	 * of supported security flavors. In this case, nfs_mount() fabricates
+	 * a security flavor list containing just AUTH_NULL.
 	 */
 	for (i = 0; i < count; i++) {
 		flavor = server_authlist[i];
@@ -1702,11 +1706,11 @@ static int nfs_verify_authflavors(struct nfs_parsed_mount_data *args,
 			goto out;
 
 		if (flavor == RPC_AUTH_NULL)
-			use_auth_null = true;
+			found_auth_null = true;
 	}
 
-	if (use_auth_null) {
-		flavor = RPC_AUTH_NULL;
+	if (found_auth_null) {
+		flavor = args->auth_info.flavors[0];
 		goto out;
 	}
 
@@ -2612,6 +2616,8 @@ struct dentry *nfs_fs_mount_common(struct nfs_server *server,
 		/* initial superblock/root creation */
 		mount_info->fill_super(s, mount_info);
 		nfs_get_cache_cookie(s, mount_info->parsed, mount_info->cloned);
+		if (!(server->flags & NFS_MOUNT_UNSHARED))
+			s->s_iflags |= SB_I_MULTIROOT;
 	}
 
 	mntroot = nfs_get_root(s, mount_info->mntfh, dev_name);

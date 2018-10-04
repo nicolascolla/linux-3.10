@@ -38,9 +38,9 @@
 
 #include "iw_cxgb4.h"
 
-int use_dsgl = 0;
+int use_dsgl = 1;
 module_param(use_dsgl, int, 0644);
-MODULE_PARM_DESC(use_dsgl, "Use DSGL for PBL/FastReg (default=0)");
+MODULE_PARM_DESC(use_dsgl, "Use DSGL for PBL/FastReg (default=1) (DEPRECATED)");
 
 #define T4_ULPTX_MIN_IO 32
 #define C4IW_MAX_INLINE_SIZE 96
@@ -81,8 +81,7 @@ static int _c4iw_write_mem_dma_aligned(struct c4iw_rdev *rdev, u32 addr,
 	}
 	set_wr_txq(skb, CPL_PRIORITY_CONTROL, 0);
 
-	req = (struct ulp_mem_io *)__skb_put(skb, wr_len);
-	memset(req, 0, wr_len);
+	req = __skb_put_zero(skb, wr_len);
 	INIT_ULPTX_WR(req, wr_len, 0, 0);
 	req->wr.wr_hi = cpu_to_be32(FW_WR_OP_V(FW_ULPTX_WR) |
 			(wr_waitp ? FW_WR_COMPL_F : 0));
@@ -141,8 +140,7 @@ static int _c4iw_write_mem_inline(struct c4iw_rdev *rdev, u32 addr, u32 len,
 		}
 		set_wr_txq(skb, CPL_PRIORITY_CONTROL, 0);
 
-		req = (struct ulp_mem_io *)__skb_put(skb, wr_len);
-		memset(req, 0, wr_len);
+		req = __skb_put_zero(skb, wr_len);
 		INIT_ULPTX_WR(req, wr_len, 0, 0);
 
 		if (i == (num_wqe-1)) {
@@ -238,7 +236,7 @@ static int write_adapter_mem(struct c4iw_rdev *rdev, u32 addr, u32 len,
 {
 	int ret;
 
-	if (!is_t5(rdev->lldi.adapter_type) || !use_dsgl) {
+	if (!rdev->lldi.ulptx_memwrite_dsgl || !use_dsgl) {
 		ret = _c4iw_write_mem_inline(rdev, addr, len, data, skb,
 					      wr_waitp);
 		goto out;
@@ -393,6 +391,9 @@ static int finish_mem_reg(struct c4iw_mr *mhp, u32 stag)
 	mhp->attr.stag = stag;
 	mmid = stag >> 8;
 	mhp->ibmr.rkey = mhp->ibmr.lkey = stag;
+	mhp->ibmr.length = mhp->attr.len;
+	mhp->ibmr.iova = mhp->attr.va_fbo;
+	mhp->ibmr.page_size = 1U << (mhp->attr.page_size + 12);
 	pr_debug("mmid 0x%x mhp %p\n", mmid, mhp);
 	return insert_handle(mhp->rhp, &mhp->rhp->mmidr, mhp, mmid);
 }
@@ -488,10 +489,10 @@ struct ib_mr *c4iw_get_dma_mr(struct ib_pd *pd, int acc)
 err_dereg_mem:
 	dereg_mem(&rhp->rdev, mhp->attr.stag, mhp->attr.pbl_size,
 		  mhp->attr.pbl_addr, mhp->dereg_skb, mhp->wr_waitp);
-err_free_wr_wait:
-	c4iw_put_wr_wait(mhp->wr_waitp);
 err_free_skb:
 	kfree_skb(mhp->dereg_skb);
+err_free_wr_wait:
+	c4iw_put_wr_wait(mhp->wr_waitp);
 err_free_mhp:
 	kfree(mhp);
 	return ERR_PTR(ret);
@@ -704,7 +705,7 @@ struct ib_mr *c4iw_alloc_mr(struct ib_pd *pd,
 	rhp = php->rhp;
 
 	if (mr_type != IB_MR_TYPE_MEM_REG ||
-	    max_num_sg > t4_max_fr_depth(&rhp->rdev.lldi.ulptx_memwrite_dsgl &&
+	    max_num_sg > t4_max_fr_depth(rhp->rdev.lldi.ulptx_memwrite_dsgl &&
 					 use_dsgl))
 		return ERR_PTR(-EINVAL);
 
@@ -773,7 +774,7 @@ static int c4iw_set_page(struct ib_mr *ibmr, u64 addr)
 {
 	struct c4iw_mr *mhp = to_c4iw_mr(ibmr);
 
-	if (unlikely(mhp->mpl_len == mhp->max_mpl_len))
+	if (unlikely(mhp->mpl_len == mhp->attr.pbl_size))
 		return -ENOMEM;
 
 	mhp->mpl[mhp->mpl_len++] = addr;

@@ -22,7 +22,6 @@
 #include <linux/kernel.h>
 #include <linux/slab.h>
 #include <linux/version.h>
-#include <linux/nospec.h>
 #include "pvrusb2-context.h"
 #include "pvrusb2-hdw.h"
 #include "pvrusb2.h"
@@ -234,7 +233,7 @@ static int pvr2_enum_input(struct file *file, void *priv, struct v4l2_input *vi)
 	tmp.index = vi->index;
 	if (vi->index >= fh->input_cnt)
 		return -EINVAL;
-	val = fh->input_map[array_index_nospec(vi->index, fh->input_cnt)];
+	val = fh->input_map[vi->index];
 	switch (val) {
 	case PVR2_CVAL_INPUT_TV:
 	case PVR2_CVAL_INPUT_DTV:
@@ -296,8 +295,6 @@ static int pvr2_s_input(struct file *file, void *priv, unsigned int inp)
 
 	if (inp >= fh->input_cnt)
 		return -EINVAL;
-	inp = array_index_nospec(inp, fh->input_cnt);
-
 	return pvr2_ctrl_set_value(
 			pvr2_hdw_get_ctrl_by_id(hdw, PVR2_CID_INPUT),
 			fh->input_map[inp]);

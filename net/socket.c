@@ -88,7 +88,6 @@
 #include <linux/magic.h>
 #include <linux/slab.h>
 #include <linux/xattr.h>
-#include <linux/nospec.h>
 
 #include <asm/uaccess.h>
 #include <asm/unistd.h>
@@ -2512,7 +2511,6 @@ SYSCALL_DEFINE2(socketcall, int, call, unsigned long __user *, args)
 
 	if (call < 1 || call > SYS_SENDMMSG)
 		return -EINVAL;
-	call = array_index_nospec(call, SYS_SENDMMSG + 1);
 
 	len = nargs[call];
 	if (len > sizeof(a))
@@ -2674,8 +2672,7 @@ EXPORT_SYMBOL(sock_unregister);
 
 bool sock_is_registered(int family)
 {
-	return family < NPROTO &&
-	       rcu_access_pointer(net_families[array_index_nospec(family, NPROTO)]);
+	return family < NPROTO && rcu_access_pointer(net_families[family]);
 }
 
 static int __init sock_init(void)

@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0
 /*
  * Opticon USB barcode to serial driver
  *
@@ -5,10 +6,6 @@
  * Copyright (C) 2011 Martin Jansen <martin.jansen@opticon.com>
  * Copyright (C) 2008 - 2009 Greg Kroah-Hartman <gregkh@suse.de>
  * Copyright (C) 2008 - 2009 Novell Inc.
- *
- *	This program is free software; you can redistribute it and/or
- *	modify it under the terms of the GNU General Public License version
- *	2 as published by the Free Software Foundation.
  */
 
 #include <linux/kernel.h>
@@ -367,16 +364,6 @@ static int opticon_ioctl(struct tty_struct *tty,
 	return -ENOIOCTLCMD;
 }
 
-static int opticon_startup(struct usb_serial *serial)
-{
-	if (!serial->num_bulk_in) {
-		dev_err(&serial->dev->dev, "no bulk in endpoint\n");
-		return -ENODEV;
-	}
-
-	return 0;
-}
-
 static int opticon_port_probe(struct usb_serial_port *port)
 {
 	struct opticon_private *priv;
@@ -408,8 +395,8 @@ static struct usb_serial_driver opticon_device = {
 	},
 	.id_table =		id_table,
 	.num_ports =		1,
+	.num_bulk_in =		1,
 	.bulk_in_size =		256,
-	.attach =		opticon_startup,
 	.port_probe =		opticon_port_probe,
 	.port_remove =		opticon_port_remove,
 	.open =			opticon_open,
@@ -430,4 +417,4 @@ static struct usb_serial_driver * const serial_drivers[] = {
 module_usb_serial_driver(serial_drivers, id_table);
 
 MODULE_DESCRIPTION(DRIVER_DESC);
-MODULE_LICENSE("GPL");
+MODULE_LICENSE("GPL v2");

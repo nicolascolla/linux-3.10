@@ -33,7 +33,6 @@
 #include <linux/init.h>
 #include <linux/device.h>
 #include <linux/suspend.h>
-#include <linux/nospec.h>
 #include <media/v4l2-common.h>
 #include <media/v4l2-ioctl.h>
 #include <media/v4l2-event.h>
@@ -921,9 +920,9 @@ static int get_ressource(struct au0828_fh *fh)
 /* This function ensures that video frames continue to be delivered even if
    the ITU-656 input isn't receiving any data (thereby preventing applications
    such as tvtime from hanging) */
-static void au0828_vid_buffer_timeout(unsigned long data)
+static void au0828_vid_buffer_timeout(struct timer_list *t)
 {
-	struct au0828_dev *dev = (struct au0828_dev *) data;
+	struct au0828_dev *dev = from_timer(dev, t, vid_timeout);
 	struct au0828_dmaqueue *dma_q = &dev->vidq;
 	struct au0828_buffer *buf;
 	unsigned char *vid_data;
@@ -945,9 +944,9 @@ static void au0828_vid_buffer_timeout(unsigned long data)
 	spin_unlock_irqrestore(&dev->slock, flags);
 }
 
-static void au0828_vbi_buffer_timeout(unsigned long data)
+static void au0828_vbi_buffer_timeout(struct timer_list *t)
 {
-	struct au0828_dev *dev = (struct au0828_dev *) data;
+	struct au0828_dev *dev = from_timer(dev, t, vbi_timeout);
 	struct au0828_dmaqueue *dma_q = &dev->vbiq;
 	struct au0828_buffer *buf;
 	unsigned char *vbi_data;
@@ -1407,8 +1406,6 @@ static int vidioc_enum_input(struct file *file, void *priv,
 
 	if (tmp >= AU0828_MAX_INPUT)
 		return -EINVAL;
-	tmp = array_index_nospec(tmp, AU0828_MAX_INPUT);
-
 	if (AUVI_INPUT(tmp).type == 0)
 		return -EINVAL;
 
@@ -1496,8 +1493,6 @@ static int vidioc_s_input(struct file *file, void *priv, unsigned int index)
 		index);
 	if (index >= AU0828_MAX_INPUT)
 		return -EINVAL;
-	index = array_index_nospec(index, AU0828_MAX_INPUT);
-
 	if (AUVI_INPUT(index).type == 0)
 		return -EINVAL;
 	dev->ctrl_input = index;
@@ -2012,13 +2007,8 @@ int au0828_analog_register(struct au0828_dev *dev,
 	INIT_LIST_HEAD(&dev->vbiq.active);
 	INIT_LIST_HEAD(&dev->vbiq.queued);
 
-	dev->vid_timeout.function = au0828_vid_buffer_timeout;
-	dev->vid_timeout.data = (unsigned long) dev;
-	init_timer(&dev->vid_timeout);
-
-	dev->vbi_timeout.function = au0828_vbi_buffer_timeout;
-	dev->vbi_timeout.data = (unsigned long) dev;
-	init_timer(&dev->vbi_timeout);
+	timer_setup(&dev->vid_timeout, au0828_vid_buffer_timeout, 0);
+	timer_setup(&dev->vbi_timeout, au0828_vbi_buffer_timeout, 0);
 
 	dev->width = NTSC_STD_W;
 	dev->height = NTSC_STD_H;

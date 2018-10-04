@@ -271,6 +271,20 @@ static inline __be32 tunnel_id_to_key32(__be64 tun_id)
 
 #ifdef CONFIG_INET
 
+static inline void ip_tunnel_init_flow(struct flowi4 *fl4,
+				       int proto,
+				       __be32 daddr, __be32 saddr,
+				       __be32 key, __u8 tos, int oif)
+{
+	memset(fl4, 0, sizeof(*fl4));
+	fl4->flowi4_oif = oif;
+	fl4->daddr = daddr;
+	fl4->saddr = saddr;
+	fl4->flowi4_tos = tos;
+	fl4->flowi4_proto = proto;
+	fl4->fl4_gre_key = key;
+}
+
 int ip_tunnel_init(struct net_device *dev);
 void ip_tunnel_uninit(struct net_device *dev);
 void  ip_tunnel_dellink(struct net_device *dev, struct list_head *head);
@@ -319,6 +333,17 @@ static inline u8 ip_tunnel_get_dsfield(const struct iphdr *iph,
 		return 0;
 }
 
+static inline u8 ip_tunnel_get_ttl(const struct iphdr *iph,
+				       const struct sk_buff *skb)
+{
+	if (skb->protocol == htons(ETH_P_IP))
+		return iph->ttl;
+	else if (skb->protocol == htons(ETH_P_IPV6))
+		return ((const struct ipv6hdr *)iph)->hop_limit;
+	else
+		return 0;
+}
+
 /* Propogate ECN bits out */
 static inline u8 ip_tunnel_ecn_encap(u8 tos, const struct iphdr *iph,
 				     const struct sk_buff *skb)
@@ -353,8 +378,11 @@ static inline int iptunnel_pull_offloads(struct sk_buff *skb)
 		err = skb_unclone(skb, GFP_ATOMIC);
 		if (unlikely(err))
 			return err;
-		skb_shinfo(skb)->gso_type &= ~(NETIF_F_GSO_ENCAP_ALL >>
+		/* RHEL only: Flags are in two ranges */
+		skb_shinfo(skb)->gso_type &= ~(NETIF_F_GSO1_ENCAP_ALL >>
 					       NETIF_F_GSO_SHIFT);
+		skb_shinfo(skb)->gso_type &= ~(NETIF_F_GSO2_ENCAP_ALL >>
+					       NETIF_F_GSO2_SHIFT);
 	}
 
 	skb->encapsulation = 0;

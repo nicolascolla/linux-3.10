@@ -133,6 +133,18 @@ void kfree(const void *);
 void kzfree(const void *);
 size_t ksize(const void *);
 
+#ifdef CONFIG_HAVE_HARDENED_USERCOPY_ALLOCATOR
+const char *__check_heap_object(const void *ptr, unsigned long n,
+				struct page *page);
+#else
+static inline const char *__check_heap_object(const void *ptr,
+					      unsigned long n,
+					      struct page *page)
+{
+	return NULL;
+}
+#endif
+
 /*
  * Some archs want to perform DMA into kmalloc caches and need a guaranteed
  * alignment larger than the alignment of a 64-bit integer.
@@ -482,6 +494,22 @@ extern void *__kmalloc_track_caller(size_t, gfp_t, unsigned long);
 #define kmalloc_track_caller(size, flags) \
 	__kmalloc(size, flags)
 #endif /* DEBUG_SLAB */
+
+static inline void *kmalloc_array_node(size_t n, size_t size, gfp_t flags,
+				       int node)
+{
+	if (size != 0 && n > SIZE_MAX / size)
+		return NULL;
+	if (__builtin_constant_p(n) && __builtin_constant_p(size))
+		return kmalloc_node(n * size, flags, node);
+	return __kmalloc_node(n * size, flags, node);
+}
+
+static inline void *kcalloc_node(size_t n, size_t size, gfp_t flags, int node)
+{
+	return kmalloc_array_node(n, size, flags | __GFP_ZERO, node);
+}
+
 
 #ifdef CONFIG_NUMA
 /*

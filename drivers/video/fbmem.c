@@ -32,7 +32,6 @@
 #include <linux/device.h>
 #include <linux/efi.h>
 #include <linux/fb.h>
-#include <linux/nospec.h>
 
 #include <asm/fb.h>
 
@@ -53,7 +52,6 @@ static struct fb_info *get_fb_info(unsigned int idx)
 
 	if (idx >= FB_MAX)
 		return ERR_PTR(-ENODEV);
-	idx = array_index_nospec(idx, FB_MAX);
 
 	mutex_lock(&registration_lock);
 	fb_info = registered_fb[idx];
@@ -1087,7 +1085,6 @@ static long do_fb_ioctl(struct fb_info *info, unsigned int cmd,
 	struct fb_cmap_user cmap;
 	struct fb_event event;
 	void __user *argp = (void __user *)arg;
-	u32 framebuffer;
 	long ret = 0;
 
 	switch (cmd) {
@@ -1175,10 +1172,9 @@ static long do_fb_ioctl(struct fb_info *info, unsigned int cmd,
 			return -EINVAL;
 		if (con2fb.framebuffer < 0 || con2fb.framebuffer >= FB_MAX)
 			return -EINVAL;
-		framebuffer = array_index_nospec(con2fb.framebuffer, FB_MAX);
-		if (!registered_fb[framebuffer])
+		if (!registered_fb[con2fb.framebuffer])
 			request_module("fb%d", con2fb.framebuffer);
-		if (!registered_fb[framebuffer]) {
+		if (!registered_fb[con2fb.framebuffer]) {
 			ret = -EINVAL;
 			break;
 		}

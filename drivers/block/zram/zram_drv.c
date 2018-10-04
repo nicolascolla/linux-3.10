@@ -30,7 +30,6 @@
 #include <linux/err.h>
 #include <linux/idr.h>
 #include <linux/sysfs.h>
-#include <linux/nospec.h>
 
 #include "zram_drv.h"
 
@@ -115,23 +114,22 @@ static inline int is_partial_io(struct bio_vec *bvec)
 /*
  * Check if request is within bounds and aligned on zram logical blocks.
  */
-static inline int valid_io_request_nospec(struct zram *zram,
-					  sector_t *start, unsigned int size)
+static inline int valid_io_request(struct zram *zram,
+		sector_t start, unsigned int size)
 {
 	u64 end, bound;
 
 	/* unaligned request */
-	if (unlikely(*start & (ZRAM_SECTOR_PER_LOGICAL_BLOCK - 1)))
+	if (unlikely(start & (ZRAM_SECTOR_PER_LOGICAL_BLOCK - 1)))
 		return 0;
 	if (unlikely(size & (ZRAM_LOGICAL_BLOCK_SIZE - 1)))
 		return 0;
 
-	end = *start + (size >> SECTOR_SHIFT);
+	end = start + (size >> SECTOR_SHIFT);
 	bound = zram->disksize >> SECTOR_SHIFT;
 	/* out of range range */
-	if (unlikely(*start >= bound || end > bound || *start > end))
+	if (unlikely(start >= bound || end > bound || start > end))
 		return 0;
-	*start = array_index_nospec(*start, bound);
 
 	/* I/O request is valid */
 	return 1;
@@ -874,8 +872,8 @@ static void zram_make_request(struct request_queue *queue, struct bio *bio)
 	if (unlikely(!zram_meta_get(zram)))
 		goto error;
 
-	if (!valid_io_request_nospec(zram, &bio->bi_sector,
-				     bio->bi_size)) {
+	if (!valid_io_request(zram, bio->bi_sector,
+					bio->bi_size)) {
 		atomic64_inc(&zram->stats.invalid_io);
 		goto put_zram;
 	}
@@ -1249,8 +1247,8 @@ static int zram_remove(struct zram *zram)
 
 	pr_info("Removed device: %s\n", zram->disk->disk_name);
 
-	blk_cleanup_queue(zram->disk->queue);
 	del_gendisk(zram->disk);
+	blk_cleanup_queue(zram->disk->queue);
 	put_disk(zram->disk);
 	kfree(zram);
 	return 0;

@@ -449,8 +449,7 @@ ef4_alloc_channel(struct ef4_nic *efx, int i, struct ef4_channel *old_channel)
 
 	rx_queue = &channel->rx_queue;
 	rx_queue->efx = efx;
-	setup_timer(&rx_queue->slow_fill, ef4_rx_slow_fill,
-		    (unsigned long)rx_queue);
+	timer_setup(&rx_queue->slow_fill, ef4_rx_slow_fill, 0);
 
 	return channel;
 }
@@ -489,8 +488,7 @@ ef4_copy_channel(const struct ef4_channel *old_channel)
 	rx_queue = &channel->rx_queue;
 	rx_queue->buffer = NULL;
 	memset(&rx_queue->rxd, 0, sizeof(rx_queue->rxd));
-	setup_timer(&rx_queue->slow_fill, ef4_rx_slow_fill,
-		    (unsigned long)rx_queue);
+	timer_setup(&rx_queue->slow_fill, ef4_rx_slow_fill, 0);
 
 	return channel;
 }
@@ -979,7 +977,7 @@ void ef4_mac_reconfigure(struct ef4_nic *efx)
 
 /* Push loopback/power/transmit disable settings to the PHY, and reconfigure
  * the MAC appropriately. All other PHY configuration changes are pushed
- * through phy_op->set_settings(), and pushed asynchronously to the MAC
+ * through phy_op->set_link_ksettings(), and pushed asynchronously to the MAC
  * through ef4_monitor().
  *
  * Callers must hold the mac_lock

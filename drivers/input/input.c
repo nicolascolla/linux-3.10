@@ -27,7 +27,6 @@
 #include <linux/device.h>
 #include <linux/mutex.h>
 #include <linux/rcupdate.h>
-#include <linux/nospec.h>
 #include "input-compat.h"
 
 MODULE_AUTHOR("Vojtech Pavlik <vojtech@suse.cz>");
@@ -230,9 +229,7 @@ static int input_handle_abs_event(struct input_dev *dev,
 	if (!is_mt_event) {
 		pold = &dev->absinfo[code].value;
 	} else if (mt) {
-		unsigned int idx = array_index_nospec(code - ABS_MT_FIRST,
-						ABS_MT_LAST - ABS_MT_FIRST + 1);
-		pold = &mt->slots[mt->slot].abs[idx];
+		pold = &mt->slots[mt->slot].abs[code - ABS_MT_FIRST];
 	} else {
 		/*
 		 * Bypass filtering for multi-touch events when
@@ -308,10 +305,8 @@ static int input_get_disposition(struct input_dev *dev,
 		break;
 
 	case EV_ABS:
-		if (is_event_supported(code, dev->absbit, ABS_MAX)) {
-			code = array_index_nospec(code, ABS_MAX + 1);
+		if (is_event_supported(code, dev->absbit, ABS_MAX))
 			disposition = input_handle_abs_event(dev, code, &value);
-		}
 
 		break;
 
@@ -346,13 +341,9 @@ static int input_get_disposition(struct input_dev *dev,
 		break;
 
 	case EV_REP:
-		if (code <= REP_MAX && value >= 0) {
-			code = array_index_nospec(code, REP_MAX + 1);
-
-			if (dev->rep[code] != value) {
-				dev->rep[code] = value;
-				disposition = INPUT_PASS_TO_ALL;
-			}
+		if (code <= REP_MAX && value >= 0 && dev->rep[code] != value) {
+			dev->rep[code] = value;
+			disposition = INPUT_PASS_TO_ALL;
 		}
 		break;
 
@@ -823,7 +814,6 @@ static int input_default_setkeycode(struct input_dev *dev,
 
 	if (index >= dev->keycodemax)
 		return -EINVAL;
-	index = array_index_nospec(index, dev->keycodemax);
 
 	if (dev->keycodesize < sizeof(ke->keycode) &&
 			(ke->keycode >> (dev->keycodesize * 8)))
@@ -1715,7 +1705,7 @@ static const struct dev_pm_ops input_dev_pm_ops = {
 };
 #endif /* CONFIG_PM */
 
-static struct device_type input_dev_type = {
+static const struct device_type input_dev_type = {
 	.groups		= input_dev_attr_groups,
 	.release	= input_dev_release,
 	.uevent		= input_dev_uevent,

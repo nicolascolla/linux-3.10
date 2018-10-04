@@ -26,7 +26,6 @@
 #include <linux/rtnetlink.h>
 #include <linux/sched.h>
 #include <linux/net.h>
-#include <linux/nospec.h>
 
 /*
  * Some useful ethtool_ops methods that're device independent.
@@ -74,6 +73,7 @@ static const char netdev_features_strings[NETDEV_FEATURE_COUNT][ETH_GSTRING_LEN]
 	[NETIF_F_LLTX_BIT] =             "tx-lockless",
 	[NETIF_F_NETNS_LOCAL_BIT] =      "netns-local",
 	[NETIF_F_GRO_BIT] =              "rx-gro",
+	[NETIF_F_GRO_HW_BIT] =           "rx-gro-hw",
 	[NETIF_F_LRO_BIT] =              "rx-lro",
 
 	[NETIF_F_TSO_BIT] =              "tx-tcp-segmentation",
@@ -360,6 +360,22 @@ static int __ethtool_set_flags(struct net_device *dev, u32 data)
 
 	return 0;
 }
+
+/* Given two link masks, AND them together and save the result in dst. */
+void ethtool_intersect_link_masks(struct ethtool_link_ksettings *dst,
+				  struct ethtool_link_ksettings *src)
+{
+	unsigned int size = BITS_TO_LONGS(__ETHTOOL_LINK_MODE_MASK_NBITS);
+	unsigned int idx = 0;
+
+	for (; idx < size; idx++) {
+		dst->link_modes.supported[idx] &=
+			src->link_modes.supported[idx];
+		dst->link_modes.advertising[idx] &=
+			src->link_modes.advertising[idx];
+	}
+}
+EXPORT_SYMBOL(ethtool_intersect_link_masks);
 
 void ethtool_convert_legacy_u32_to_link_mode(unsigned long *dst,
 					     u32 legacy_u32)
@@ -1010,6 +1026,15 @@ static noinline_for_stack int ethtool_get_rxnfc(struct net_device *dev,
 	if (copy_from_user(&info, useraddr, info_size))
 		return -EFAULT;
 
+	/* If FLOW_RSS was requested then user-space must be using the
+	 * new definition, as FLOW_RSS is newer.
+	 */
+	if (cmd == ETHTOOL_GRXFH && info.flow_type & FLOW_RSS) {
+		info_size = sizeof(info);
+		if (copy_from_user(&info, useraddr, info_size))
+			return -EFAULT;
+	}
+
 	if (info.cmd == ETHTOOL_GRXCLSRLALL) {
 		if (info.rule_cnt > 0) {
 			if (info.rule_cnt <= KMALLOC_MAX_SIZE / sizeof(u32))
@@ -1244,9 +1269,11 @@ static noinline_for_stack int ethtool_get_rxfh(struct net_device *dev,
 	user_key_size = rxfh.key_size;
 
 	/* Check that reserved fields are 0 for now */
-	if (rxfh.rss_context || rxfh.rsvd8[0] || rxfh.rsvd8[1] ||
-	    rxfh.rsvd8[2] || rxfh.rsvd32)
+	if (rxfh.rsvd8[0] || rxfh.rsvd8[1] || rxfh.rsvd8[2] || rxfh.rsvd32)
 		return -EINVAL;
+	/* Most drivers don't handle rss_context, check it's 0 as well */
+	if (rxfh.rss_context && !ops->get_rxfh_context)
+		return -EOPNOTSUPP;
 
 	rxfh.indir_size = dev_indir_size;
 	rxfh.key_size = dev_key_size;
@@ -1269,7 +1296,12 @@ static noinline_for_stack int ethtool_get_rxfh(struct net_device *dev,
 	if (user_key_size)
 		hkey = rss_config + indir_bytes;
 
-	ret = dev->ethtool_ops->get_rxfh(dev, indir, hkey, &dev_hfunc);
+	if (rxfh.rss_context)
+		ret = dev->ethtool_ops->get_rxfh_context(dev, indir, hkey,
+							 &dev_hfunc,
+							 rxfh.rss_context);
+	else
+		ret = dev->ethtool_ops->get_rxfh(dev, indir, hkey, &dev_hfunc);
 	if (ret)
 		goto out;
 
@@ -1299,6 +1331,7 @@ static noinline_for_stack int ethtool_set_rxfh(struct net_device *dev,
 	u8 *hkey = NULL;
 	u8 *rss_config;
 	u32 rss_cfg_offset = offsetof(struct ethtool_rxfh, rss_config[0]);
+	bool delete = false;
 
 	if (!ops->get_rxnfc || !ops->set_rxfh)
 		return -EOPNOTSUPP;
@@ -1312,9 +1345,11 @@ static noinline_for_stack int ethtool_set_rxfh(struct net_device *dev,
 		return -EFAULT;
 
 	/* Check that reserved fields are 0 for now */
-	if (rxfh.rss_context || rxfh.rsvd8[0] || rxfh.rsvd8[1] ||
-	    rxfh.rsvd8[2] || rxfh.rsvd32)
+	if (rxfh.rsvd8[0] || rxfh.rsvd8[1] || rxfh.rsvd8[2] || rxfh.rsvd32)
 		return -EINVAL;
+	/* Most drivers don't handle rss_context, check it's 0 as well */
+	if (rxfh.rss_context && !ops->set_rxfh_context)
+		return -EOPNOTSUPP;
 
 	/* If either indir, hash key or function is valid, proceed further.
 	 * Must request at least one change: indir size, hash key or function.
@@ -1339,7 +1374,8 @@ static noinline_for_stack int ethtool_set_rxfh(struct net_device *dev,
 	if (ret)
 		goto out;
 
-	/* rxfh.indir_size == 0 means reset the indir table to default.
+	/* rxfh.indir_size == 0 means reset the indir table to default (master
+	 * context) or delete the context (other RSS contexts).
 	 * rxfh.indir_size == ETH_RXFH_INDIR_NO_CHANGE means leave it unchanged.
 	 */
 	if (rxfh.indir_size &&
@@ -1352,9 +1388,13 @@ static noinline_for_stack int ethtool_set_rxfh(struct net_device *dev,
 		if (ret)
 			goto out;
 	} else if (rxfh.indir_size == 0) {
-		indir = (u32 *)rss_config;
-		for (i = 0; i < dev_indir_size; i++)
-			indir[i] = ethtool_rxfh_indir_default(i, rx_rings.data);
+		if (rxfh.rss_context == 0) {
+			indir = (u32 *)rss_config;
+			for (i = 0; i < dev_indir_size; i++)
+				indir[i] = ethtool_rxfh_indir_default(i, rx_rings.data);
+		} else {
+			delete = true;
+		}
 	}
 
 	if (rxfh.key_size) {
@@ -1367,15 +1407,25 @@ static noinline_for_stack int ethtool_set_rxfh(struct net_device *dev,
 		}
 	}
 
-	ret = ops->set_rxfh(dev, indir, hkey, rxfh.hfunc);
+	if (rxfh.rss_context)
+		ret = ops->set_rxfh_context(dev, indir, hkey, rxfh.hfunc,
+					    &rxfh.rss_context, delete);
+	else
+		ret = ops->set_rxfh(dev, indir, hkey, rxfh.hfunc);
 	if (ret)
 		goto out;
 
-	/* indicate whether rxfh was set to default */
-	if (rxfh.indir_size == 0)
-		dev->priv_flags &= ~IFF_RXFH_CONFIGURED;
-	else if (rxfh.indir_size != ETH_RXFH_INDIR_NO_CHANGE)
-		dev->priv_flags |= IFF_RXFH_CONFIGURED;
+	if (copy_to_user(useraddr + offsetof(struct ethtool_rxfh, rss_context),
+			 &rxfh.rss_context, sizeof(rxfh.rss_context)))
+		ret = -EFAULT;
+
+	if (!rxfh.rss_context) {
+		/* indicate whether rxfh was set to default */
+		if (rxfh.indir_size == 0)
+			dev->priv_flags &= ~IFF_RXFH_CONFIGURED;
+		else if (rxfh.indir_size != ETH_RXFH_INDIR_NO_CHANGE)
+			dev->priv_flags |= IFF_RXFH_CONFIGURED;
+	}
 
 out:
 	kfree(rss_config);
@@ -1680,13 +1730,22 @@ static int ethtool_get_ringparam(struct net_device *dev, void __user *useraddr)
 
 static int ethtool_set_ringparam(struct net_device *dev, void __user *useraddr)
 {
-	struct ethtool_ringparam ringparam;
+	struct ethtool_ringparam ringparam, max = { .cmd = ETHTOOL_GRINGPARAM };
 
-	if (!dev->ethtool_ops->set_ringparam)
+	if (!dev->ethtool_ops->set_ringparam || !dev->ethtool_ops->get_ringparam)
 		return -EOPNOTSUPP;
 
 	if (copy_from_user(&ringparam, useraddr, sizeof(ringparam)))
 		return -EFAULT;
+
+	dev->ethtool_ops->get_ringparam(dev, &max);
+
+	/* ensure new ring parameters are within the maximums */
+	if (ringparam.rx_pending > max.rx_max_pending ||
+	    ringparam.rx_mini_pending > max.rx_mini_max_pending ||
+	    ringparam.rx_jumbo_pending > max.rx_jumbo_max_pending ||
+	    ringparam.tx_pending > max.tx_max_pending)
+		return -EINVAL;
 
 	return dev->ethtool_ops->set_ringparam(dev, &ringparam);
 }
@@ -1726,15 +1785,6 @@ static noinline_for_stack int ethtool_set_channels(struct net_device *dev,
 	    (channels.combined_count > max.max_combined) ||
 	    (channels.other_count > max.max_other))
 		return -EINVAL;
-
-	channels.rx_count = array_index_nospec(channels.rx_count,
-					       max.max_rx + 1);
-	channels.tx_count = array_index_nospec(channels.tx_count,
-					       max.max_tx + 1);
-	channels.combined_count = array_index_nospec(channels.combined_count,
-					       max.max_combined + 1);
-	channels.other_count = array_index_nospec(channels.other_count,
-					       max.max_other + 1);
 
 	/* ensure the new Rx count fits within the configured Rx flow
 	 * indirection table settings */

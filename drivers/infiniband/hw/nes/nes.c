@@ -45,7 +45,6 @@
 #include <linux/if_arp.h>
 #include <linux/highmem.h>
 #include <linux/slab.h>
-#include <linux/nospec.h>
 #include <asm/io.h>
 #include <asm/irq.h>
 #include <asm/byteorder.h>
@@ -180,11 +179,16 @@ static int nes_inetaddr_event(struct notifier_block *notifier,
 					/* fall through */
 				case NETDEV_CHANGEADDR:
 					/* Add the address to the IP table */
-					if (upper_dev)
-						nesvnic->local_ipaddr =
-							((struct in_device *)upper_dev->ip_ptr)->ifa_list->ifa_address;
-					else
+					if (upper_dev) {
+						struct in_device *in;
+
+						rcu_read_lock();
+						in = __in_dev_get_rcu(upper_dev);
+						nesvnic->local_ipaddr = in->ifa_list->ifa_address;
+						rcu_read_unlock();
+					} else {
 						nesvnic->local_ipaddr = ifa->ifa_address;
+					}
 
 					nes_write_indexed(nesdev,
 							NES_IDX_DST_IP_ADDR+(0x10*PCI_FUNC(nesdev->pcidev->devfn)),
@@ -353,13 +357,11 @@ struct ib_qp *nes_get_qp(struct ib_device *device, int qpn)
 	struct nes_vnic *nesvnic = to_nesvnic(device);
 	struct nes_device *nesdev = nesvnic->nesdev;
 	struct nes_adapter *nesadapter = nesdev->nesadapter;
-	int idx;
 
 	if ((qpn < NES_FIRST_QPN) || (qpn >= (NES_FIRST_QPN + nesadapter->max_qp)))
 		return NULL;
 
-	idx = array_index_nospec(qpn - NES_FIRST_QPN, nesadapter->max_qp);
-	return &nesadapter->qp_table[idx]->ibqp;
+	return &nesadapter->qp_table[qpn - NES_FIRST_QPN]->ibqp;
 }
 
 
@@ -761,18 +763,18 @@ static void nes_remove(struct pci_dev *pcidev)
 	int netdev_index = 0;
 	unsigned long flags;
 
-		if (nesdev->netdev_count) {
-			netdev = nesdev->netdev[netdev_index];
-			if (netdev) {
-				netif_stop_queue(netdev);
-				unregister_netdev(netdev);
-				nes_netdev_destroy(netdev);
+	if (nesdev->netdev_count) {
+		netdev = nesdev->netdev[netdev_index];
+		if (netdev) {
+			netif_stop_queue(netdev);
+			unregister_netdev(netdev);
+			nes_netdev_destroy(netdev);
 
-				nesdev->netdev[netdev_index] = NULL;
-				nesdev->netdev_count--;
-				nesdev->nesadapter->netdev_count--;
-			}
+			nesdev->netdev[netdev_index] = NULL;
+			nesdev->netdev_count--;
+			nesdev->nesadapter->netdev_count--;
 		}
+	}
 
 	nes_notifiers_registered--;
 	if (nes_notifiers_registered == 0) {

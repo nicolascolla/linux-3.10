@@ -166,6 +166,7 @@ struct iscsi_cmd *iscsit_allocate_cmd(struct iscsi_conn *conn, int state)
 
 	cmd->se_cmd.map_tag = tag;
 	cmd->conn = conn;
+	cmd->data_direction = DMA_NONE;
 	INIT_LIST_HEAD(&cmd->i_conn_node);
 	INIT_LIST_HEAD(&cmd->datain_list);
 	INIT_LIST_HEAD(&cmd->cmd_r2t_list);
@@ -692,6 +693,8 @@ void iscsit_release_cmd(struct iscsi_cmd *cmd)
 	struct iscsi_session *sess;
 	struct se_cmd *se_cmd = &cmd->se_cmd;
 
+	WARN_ON(!list_empty(&cmd->i_conn_node));
+
 	if (cmd->conn)
 		sess = cmd->conn->sess;
 	else
@@ -710,19 +713,18 @@ void iscsit_release_cmd(struct iscsi_cmd *cmd)
 }
 EXPORT_SYMBOL(iscsit_release_cmd);
 
-void __iscsit_free_cmd(struct iscsi_cmd *cmd, bool scsi_cmd,
-		       bool check_queues)
+void __iscsit_free_cmd(struct iscsi_cmd *cmd, bool check_queues)
 {
 	struct iscsi_conn *conn = cmd->conn;
 
-	if (scsi_cmd) {
-		if (cmd->data_direction == DMA_TO_DEVICE) {
-			iscsit_stop_dataout_timer(cmd);
-			iscsit_free_r2ts_from_list(cmd);
-		}
-		if (cmd->data_direction == DMA_FROM_DEVICE)
-			iscsit_free_all_datain_reqs(cmd);
+	WARN_ON(!list_empty(&cmd->i_conn_node));
+
+	if (cmd->data_direction == DMA_TO_DEVICE) {
+		iscsit_stop_dataout_timer(cmd);
+		iscsit_free_r2ts_from_list(cmd);
 	}
+	if (cmd->data_direction == DMA_FROM_DEVICE)
+		iscsit_free_all_datain_reqs(cmd);
 
 	if (conn && check_queues) {
 		iscsit_remove_cmd_from_immediate_queue(cmd, conn);
@@ -735,50 +737,18 @@ void __iscsit_free_cmd(struct iscsi_cmd *cmd, bool scsi_cmd,
 
 void iscsit_free_cmd(struct iscsi_cmd *cmd, bool shutdown)
 {
-	struct se_cmd *se_cmd = NULL;
+	struct se_cmd *se_cmd = cmd->se_cmd.se_tfo ? &cmd->se_cmd : NULL;
 	int rc;
-	bool op_scsi = false;
-	/*
-	 * Determine if a struct se_cmd is associated with
-	 * this struct iscsi_cmd.
-	 */
-	switch (cmd->iscsi_opcode) {
-	case ISCSI_OP_SCSI_CMD:
-		op_scsi = true;
-		/*
-		 * Fallthrough
-		 */
-	case ISCSI_OP_SCSI_TMFUNC:
-		se_cmd = &cmd->se_cmd;
-		__iscsit_free_cmd(cmd, op_scsi, shutdown);
+
+	__iscsit_free_cmd(cmd, shutdown);
+	if (se_cmd) {
 		rc = transport_generic_free_cmd(se_cmd, shutdown);
 		if (!rc && shutdown && se_cmd->se_sess) {
-			__iscsit_free_cmd(cmd, op_scsi, shutdown);
+			__iscsit_free_cmd(cmd, shutdown);
 			target_put_sess_cmd(se_cmd);
 		}
-		break;
-	case ISCSI_OP_REJECT:
-		/*
-		 * Handle special case for REJECT when iscsi_add_reject*() has
-		 * overwritten the original iscsi_opcode assignment, and the
-		 * associated cmd->se_cmd needs to be released.
-		 */
-		if (cmd->se_cmd.se_tfo != NULL) {
-			se_cmd = &cmd->se_cmd;
-			__iscsit_free_cmd(cmd, true, shutdown);
-
-			rc = transport_generic_free_cmd(&cmd->se_cmd, shutdown);
-			if (!rc && shutdown && se_cmd->se_sess) {
-				__iscsit_free_cmd(cmd, true, shutdown);
-				target_put_sess_cmd(se_cmd);
-			}
-			break;
-		}
-		/* Fall-through */
-	default:
-		__iscsit_free_cmd(cmd, false, shutdown);
+	} else {
 		iscsit_release_cmd(cmd);
-		break;
 	}
 }
 EXPORT_SYMBOL(iscsit_free_cmd);
@@ -1383,33 +1353,6 @@ int tx_data(
 	return iscsit_do_tx_data(conn, &c);
 }
 
-static bool sockaddr_equal(struct sockaddr_storage *x, struct sockaddr_storage *y)
-{
-	switch (x->ss_family) {
-	case AF_INET: {
-		struct sockaddr_in *sinx = (struct sockaddr_in *)x;
-		struct sockaddr_in *siny = (struct sockaddr_in *)y;
-		if (sinx->sin_addr.s_addr != siny->sin_addr.s_addr)
-			return false;
-		if (sinx->sin_port != siny->sin_port)
-			return false;
-		break;
-	}
-	case AF_INET6: {
-		struct sockaddr_in6 *sinx = (struct sockaddr_in6 *)x;
-		struct sockaddr_in6 *siny = (struct sockaddr_in6 *)y;
-		if (!ipv6_addr_equal(&sinx->sin6_addr, &siny->sin6_addr))
-			return false;
-		if (sinx->sin6_port != siny->sin6_port)
-			return false;
-		break;
-	}
-	default:
-		return false;
-	}
-	return true;
-}
-
 void iscsit_collect_login_stats(
 	struct iscsi_conn *conn,
 	u8 status_class,
@@ -1426,13 +1369,6 @@ void iscsit_collect_login_stats(
 	ls = &tiqn->login_stats;
 
 	spin_lock(&ls->lock);
-	if (sockaddr_equal(&conn->login_sockaddr, &ls->last_intr_fail_sockaddr) &&
-	    ((get_jiffies_64() - ls->last_fail_time) < 10)) {
-		/* We already have the failure info for this login */
-		spin_unlock(&ls->lock);
-		return;
-	}
-
 	if (status_class == ISCSI_STATUS_CLS_SUCCESS)
 		ls->accepts++;
 	else if (status_class == ISCSI_STATUS_CLS_REDIRECT) {
@@ -1477,10 +1413,10 @@ struct iscsi_tiqn *iscsit_snmp_get_tiqn(struct iscsi_conn *conn)
 {
 	struct iscsi_portal_group *tpg;
 
-	if (!conn || !conn->sess)
+	if (!conn)
 		return NULL;
 
-	tpg = conn->sess->tpg;
+	tpg = conn->tpg;
 	if (!tpg)
 		return NULL;
 

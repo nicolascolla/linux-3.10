@@ -31,7 +31,6 @@
 #include <linux/if_vlan.h>
 #include <linux/prefetch.h>
 #include <linux/random.h>
-#include <linux/nospec.h>
 #if IS_ENABLED(CONFIG_VLAN_8021Q)
 #define BCM_VLAN 1
 #endif
@@ -390,7 +389,6 @@ static int cnic_iscsi_nl_msg_recv(struct cnic_dev *dev, u32 msg_type,
 		l5_cid = (u32) path_resp->handle;
 		if (l5_cid >= MAX_CM_SK_TBL_SZ)
 			break;
-		l5_cid = array_index_nospec(l5_cid, MAX_CM_SK_TBL_SZ);
 
 		if (!rcu_access_pointer(cp->ulp_ops[CNIC_ULP_L4])) {
 			rc = -ENODEV;
@@ -1280,7 +1278,7 @@ static int cnic_alloc_bnx2x_resc(struct cnic_dev *dev)
 
 	ret = cnic_alloc_dma(dev, kwq_16_dma, pages, 0);
 	if (ret)
-		return -ENOMEM;
+		goto error;
 
 	n = CNIC_PAGE_SIZE / CNIC_KWQ16_DATA_SIZE;
 	for (i = 0, j = 0; i < cp->max_cid_space; i++) {

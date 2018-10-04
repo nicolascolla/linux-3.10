@@ -86,16 +86,26 @@ static int ceph_statfs(struct dentry *dentry, struct kstatfs *buf)
 	 */
 	buf->f_bsize = 1 << CEPH_BLOCK_SHIFT;
 	buf->f_frsize = 1 << CEPH_BLOCK_SHIFT;
-	buf->f_blocks = le64_to_cpu(st.kb) >> (CEPH_BLOCK_SHIFT-10);
-	buf->f_bfree = le64_to_cpu(st.kb_avail) >> (CEPH_BLOCK_SHIFT-10);
-	buf->f_bavail = le64_to_cpu(st.kb_avail) >> (CEPH_BLOCK_SHIFT-10);
+
+	/*
+	 * By default use root quota for stats; fallback to overall filesystem
+	 * usage if using 'noquotadf' mount option or if the root dir doesn't
+	 * have max_bytes quota set.
+	 */
+	if (ceph_test_mount_opt(fsc, NOQUOTADF) ||
+	    !ceph_quota_update_statfs(fsc, buf)) {
+		buf->f_blocks = le64_to_cpu(st.kb) >> (CEPH_BLOCK_SHIFT-10);
+		buf->f_bfree = le64_to_cpu(st.kb_avail) >> (CEPH_BLOCK_SHIFT-10);
+		buf->f_bavail = le64_to_cpu(st.kb_avail) >> (CEPH_BLOCK_SHIFT-10);
+	}
 
 	buf->f_files = le64_to_cpu(st.num_objects);
 	buf->f_ffree = -1;
 	buf->f_namelen = NAME_MAX;
 
-	/* leave fsid little-endian, regardless of host endianness */
-	fsid = *(u64 *)(&monmap->fsid) ^ *((u64 *)&monmap->fsid + 1);
+	/* Must convert the fsid, for consistent values across arches */
+	fsid = le64_to_cpu(*(__le64 *)(&monmap->fsid)) ^
+	       le64_to_cpu(*((__le64 *)&monmap->fsid + 1));
 	buf->f_fsid.val[0] = fsid & 0xffffffff;
 	buf->f_fsid.val[1] = fsid >> 32;
 
@@ -156,7 +166,9 @@ enum {
 #ifdef CONFIG_CEPH_FS_POSIX_ACL
 	Opt_acl,
 #endif
-	Opt_noacl
+	Opt_noacl,
+	Opt_quotadf,
+	Opt_noquotadf,
 };
 
 static match_table_t fsopt_tokens = {
@@ -190,6 +202,8 @@ static match_table_t fsopt_tokens = {
 	{Opt_acl, "acl"},
 #endif
 	{Opt_noacl, "noacl"},
+	{Opt_quotadf, "quotadf"},
+	{Opt_noquotadf, "noquotadf"},
 	{-1, NULL}
 };
 
@@ -228,6 +242,7 @@ static int parse_fsopt_token(char *c, void *private)
 			return -ENOMEM;
 		break;
 	case Opt_mds_namespace:
+		kfree(fsopt->mds_namespace);
 		fsopt->mds_namespace = kstrndup(argstr[0].from,
 						argstr[0].to-argstr[0].from,
 						GFP_KERNEL);
@@ -316,6 +331,12 @@ static int parse_fsopt_token(char *c, void *private)
 		break;
 	case Opt_norequire_active_mds:
 		fsopt->flags |= CEPH_MOUNT_OPT_MOUNTWAIT;
+		break;
+	case Opt_quotadf:
+		fsopt->flags &= ~CEPH_MOUNT_OPT_NOQUOTADF;
+		break;
+	case Opt_noquotadf:
+		fsopt->flags |= CEPH_MOUNT_OPT_NOQUOTADF;
 		break;
 #ifdef CONFIG_CEPH_FS_POSIX_ACL
 	case Opt_acl:
@@ -497,6 +518,8 @@ static int ceph_show_options(struct seq_file *m, struct dentry *root)
 		seq_puts(m, ",nodcache");
 	if (fsopt->flags & CEPH_MOUNT_OPT_NOPOOLPERM)
 		seq_puts(m, ",nopoolperm");
+	if (fsopt->flags & CEPH_MOUNT_OPT_NOQUOTADF)
+		seq_puts(m, ",noquotadf");
 
 #ifdef CONFIG_CEPH_FS_POSIX_ACL
 	if (fsopt->sb_flags & MS_POSIXACL)
@@ -664,6 +687,7 @@ struct kmem_cache *ceph_cap_cachep;
 struct kmem_cache *ceph_cap_flush_cachep;
 struct kmem_cache *ceph_dentry_cachep;
 struct kmem_cache *ceph_file_cachep;
+struct kmem_cache *ceph_dir_file_cachep;
 
 static void ceph_inode_init_once(void *foo)
 {
@@ -681,8 +705,7 @@ static int __init init_caches(void)
 	if (!ceph_inode_cachep)
 		return -ENOMEM;
 
-	ceph_cap_cachep = KMEM_CACHE(ceph_cap,
-				     SLAB_RECLAIM_ACCOUNT|SLAB_MEM_SPREAD);
+	ceph_cap_cachep = KMEM_CACHE(ceph_cap, SLAB_MEM_SPREAD);
 	if (!ceph_cap_cachep)
 		goto bad_cap;
 	ceph_cap_flush_cachep = KMEM_CACHE(ceph_cap_flush,
@@ -700,8 +723,14 @@ static int __init init_caches(void)
 	if (!ceph_file_cachep)
 		goto bad_file;
 
+	ceph_dir_file_cachep = KMEM_CACHE(ceph_dir_file_info, SLAB_MEM_SPREAD);
+	if (!ceph_dir_file_cachep)
+		goto bad_dir_file;
+
 	return 0;
 
+bad_dir_file:
+	kmem_cache_destroy(ceph_file_cachep);
 bad_file:
 	kmem_cache_destroy(ceph_dentry_cachep);
 bad_dentry:
@@ -725,6 +754,7 @@ static void destroy_caches(void)
 	kmem_cache_destroy(ceph_cap_flush_cachep);
 	kmem_cache_destroy(ceph_dentry_cachep);
 	kmem_cache_destroy(ceph_file_cachep);
+	kmem_cache_destroy(ceph_dir_file_cachep);
 }
 
 
@@ -817,7 +847,6 @@ static struct dentry *ceph_real_mount(struct ceph_fs_client *fsc)
 	int err;
 	unsigned long started = jiffies;  /* note the start time */
 	struct dentry *root;
-	int first = 0;   /* first vfsmount for this super_block */
 
 	dout("mount start %p\n", fsc);
 	mutex_lock(&fsc->client->mount_mutex);
@@ -835,17 +864,17 @@ static struct dentry *ceph_real_mount(struct ceph_fs_client *fsc)
 			path = fsc->mount_options->server_path + 1;
 			dout("mount opening path %s\n", path);
 		}
+
+		err = ceph_fs_debugfs_init(fsc);
+		if (err < 0)
+			goto out;
+
 		root = open_root_dentry(fsc, path, started);
 		if (IS_ERR(root)) {
 			err = PTR_ERR(root);
 			goto out;
 		}
 		fsc->sb->s_root = dget(root);
-		first = 1;
-
-		err = ceph_fs_debugfs_init(fsc);
-		if (err < 0)
-			goto fail;
 	} else {
 		root = dget(fsc->sb->s_root);
 	}
@@ -855,11 +884,6 @@ static struct dentry *ceph_real_mount(struct ceph_fs_client *fsc)
 	mutex_unlock(&fsc->client->mount_mutex);
 	return root;
 
-fail:
-	if (first) {
-		dput(fsc->sb->s_root);
-		fsc->sb->s_root = NULL;
-	}
 out:
 	mutex_unlock(&fsc->client->mount_mutex);
 	return ERR_PTR(err);

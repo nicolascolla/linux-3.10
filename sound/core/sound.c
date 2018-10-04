@@ -31,7 +31,6 @@
 #include <sound/initval.h>
 #include <linux/kmod.h>
 #include <linux/mutex.h>
-#include <linux/nospec.h>
 
 static int major = CONFIG_SND_MAJOR;
 int snd_major;
@@ -113,8 +112,6 @@ void *snd_lookup_minor_data(unsigned int minor, int type)
 
 	if (minor >= ARRAY_SIZE(snd_minors))
 		return NULL;
-	minor = array_index_nospec(minor, ARRAY_SIZE(snd_minors));
-
 	mutex_lock(&sound_mutex);
 	mreg = snd_minors[minor];
 	if (mreg && mreg->type == type) {
@@ -132,13 +129,11 @@ EXPORT_SYMBOL(snd_lookup_minor_data);
 static struct snd_minor *autoload_device(unsigned int minor)
 {
 	int dev;
-
 	mutex_unlock(&sound_mutex); /* release lock temporarily */
 	dev = SNDRV_MINOR_DEVICE(minor);
 	if (dev == SNDRV_MINOR_CONTROL) {
 		/* /dev/aloadC? */
-		int card = array_index_nospec(SNDRV_MINOR_CARD(minor),
-					      SNDRV_CARDS);
+		int card = SNDRV_MINOR_CARD(minor);
 		if (snd_cards[card] == NULL)
 			snd_request_card(card);
 	} else if (dev == SNDRV_MINOR_GLOBAL) {
@@ -146,7 +141,6 @@ static struct snd_minor *autoload_device(unsigned int minor)
 		snd_request_other(minor);
 	}
 	mutex_lock(&sound_mutex); /* reacuire lock */
-	minor = array_index_nospec(minor, SNDRV_OS_MINORS);
 	return snd_minors[minor];
 }
 #else /* !CONFIG_MODULES */
@@ -162,8 +156,6 @@ static int snd_open(struct inode *inode, struct file *file)
 
 	if (minor >= ARRAY_SIZE(snd_minors))
 		return -ENODEV;
-	minor = array_index_nospec(minor, ARRAY_SIZE(snd_minors));
-
 	mutex_lock(&sound_mutex);
 	mptr = snd_minors[minor];
 	if (mptr == NULL) {

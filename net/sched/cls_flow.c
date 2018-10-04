@@ -503,8 +503,11 @@ static int flow_change(struct net *net, struct sk_buff *in_skb,
 			perturb_period = nla_get_u32(tb[TCA_FLOW_PERTURB]) * HZ;
 		}
 
-		if (TC_H_MAJ(baseclass) == 0)
-			baseclass = TC_H_MAKE(tp->q->handle, baseclass);
+		if (TC_H_MAJ(baseclass) == 0) {
+			struct Qdisc *q = tcf_block_q(tp->chain->block);
+
+			baseclass = TC_H_MAKE(q->handle, baseclass);
+		}
 		if (TC_H_MIN(baseclass) == 0)
 			baseclass = TC_H_MAKE(baseclass, 1);
 
@@ -517,7 +520,7 @@ static int flow_change(struct net *net, struct sk_buff *in_skb,
 	setup_deferrable_timer(&fnew->perturb_timer, flow_perturbation,
 			       (unsigned long)fnew);
 
-	netif_keep_dst(qdisc_dev(tp->q));
+	tcf_block_netif_keep_dst(tp->chain->block);
 
 	if (tb[TCA_FLOW_KEYS]) {
 		fnew->keymask = keymask;

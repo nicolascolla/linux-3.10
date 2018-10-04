@@ -2325,11 +2325,11 @@ got_data:
 
 	{
 		char cap_str_2[10], cap_str_10[10];
-		u64 sz = (u64)sdkp->capacity << ilog2(sector_size);
 
-		string_get_size(sz, STRING_UNITS_2, cap_str_2,
-				sizeof(cap_str_2));
-		string_get_size(sz, STRING_UNITS_10, cap_str_10,
+		string_get_size(sdkp->capacity, sector_size,
+				STRING_UNITS_2, cap_str_2, sizeof(cap_str_2));
+		string_get_size(sdkp->capacity, sector_size,
+				STRING_UNITS_10, cap_str_10,
 				sizeof(cap_str_10));
 
 		if (sdkp->first_scan || old_capacity != sdkp->capacity) {
@@ -3047,6 +3047,7 @@ static int sd_probe(struct device *dev)
 	int index;
 	int error;
 
+	scsi_autopm_get_device(sdp);
 	error = -ENODEV;
 	if (sdp->type != TYPE_DISK && sdp->type != TYPE_MOD && sdp->type != TYPE_RBC)
 		goto out;
@@ -3124,6 +3125,7 @@ static int sd_probe(struct device *dev)
  out_free:
 	kfree(sdkp);
  out:
+	scsi_autopm_put_device(sdp);
 	return error;
 }
 

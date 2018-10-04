@@ -8,7 +8,6 @@
 
 #include <linux/workqueue.h>
 #include <linux/kthread.h>
-#include <linux/nospec.h>
 #include <asm/unaligned.h>
 #include <net/tcp.h>
 #include <target/target_core_base.h>
@@ -167,7 +166,7 @@ cxgbit_cpl_tx_data_iso(struct sk_buff *skb, struct cxgbit_iso_info *iso_info)
 	unsigned int fslice = !!(iso_info->flags & CXGBIT_ISO_FSLICE);
 	unsigned int lslice = !!(iso_info->flags & CXGBIT_ISO_LSLICE);
 
-	cpl = (struct cpl_tx_data_iso *)__skb_push(skb, sizeof(*cpl));
+	cpl = __skb_push(skb, sizeof(*cpl));
 
 	cpl->op_to_scsi = htonl(CPL_TX_DATA_ISO_OP_V(CPL_TX_DATA_ISO) |
 			CPL_TX_DATA_ISO_FIRST_V(fslice) |
@@ -214,8 +213,7 @@ cxgbit_tx_data_wr(struct cxgbit_sock *csk, struct sk_buff *skb, u32 dlen,
 	if (cxgbit_is_ofld_imm(skb))
 		immlen += dlen;
 
-	req = (struct fw_ofld_tx_data_wr *)__skb_push(skb,
-							hdr_size);
+	req = __skb_push(skb, hdr_size);
 	req->op_to_immdlen = cpu_to_be32(FW_WR_OP_V(opcode) |
 					FW_WR_COMPL_V(compl) |
 					FW_WR_IMMDLEN_V(immlen));
@@ -684,6 +682,7 @@ static int cxgbit_set_iso_npdu(struct cxgbit_sock *csk)
 	struct iscsi_param *param;
 	u32 mrdsl, mbl;
 	u32 max_npdu, max_iso_npdu;
+	u32 max_iso_payload;
 
 	if (conn->login->leading_connection) {
 		param = iscsi_find_param_from_key(MAXBURSTLENGTH,
@@ -702,8 +701,10 @@ static int cxgbit_set_iso_npdu(struct cxgbit_sock *csk)
 	mrdsl = conn_ops->MaxRecvDataSegmentLength;
 	max_npdu = mbl / mrdsl;
 
-	max_iso_npdu = CXGBIT_MAX_ISO_PAYLOAD /
-			(ISCSI_HDR_LEN + mrdsl +
+	max_iso_payload = rounddown(CXGBIT_MAX_ISO_PAYLOAD, csk->emss);
+
+	max_iso_npdu = max_iso_payload /
+		       (ISCSI_HDR_LEN + mrdsl +
 			cxgbit_digest_len[csk->submode]);
 
 	csk->max_iso_npdu = min(max_npdu, max_iso_npdu);
@@ -773,6 +774,9 @@ static int cxgbit_set_params(struct iscsi_conn *conn)
 	if (conn_ops->MaxRecvDataSegmentLength > cdev->mdsl)
 		conn_ops->MaxRecvDataSegmentLength = cdev->mdsl;
 
+	if (cxgbit_set_digest(csk))
+		return -1;
+
 	if (conn->login->leading_connection) {
 		param = iscsi_find_param_from_key(ERRORRECOVERYLEVEL,
 						  conn->param_list);
@@ -796,7 +800,7 @@ static int cxgbit_set_params(struct iscsi_conn *conn)
 			if (is_t5(cdev->lldi.adapter_type))
 				goto enable_ddp;
 			else
-				goto enable_digest;
+				return 0;
 		}
 
 		if (test_bit(CDEV_ISO_ENABLE, &cdev->flags)) {
@@ -812,10 +816,6 @@ enable_ddp:
 			set_bit(CSK_DDP_ENABLE, &csk->com.flags);
 		}
 	}
-
-enable_digest:
-	if (cxgbit_set_digest(csk))
-		return -1;
 
 	return 0;
 }
@@ -1472,8 +1472,7 @@ cxgbit_lro_skb_merge(struct cxgbit_sock *csk, struct sk_buff *skb, u8 pdu_idx)
 		hpdu_cb->hdr = pdu_cb->hdr;
 		hpdu_cb->hlen = pdu_cb->hlen;
 
-		memcpy(&hssi->frags[hfrag_idx],
-		       &ssi->frags[array_index_nospec(pdu_cb->hfrag_idx, MAX_SKB_FRAGS)],
+		memcpy(&hssi->frags[hfrag_idx], &ssi->frags[pdu_cb->hfrag_idx],
 		       sizeof(skb_frag_t));
 
 		get_page(skb_frag_page(&hssi->frags[hfrag_idx]));
@@ -1496,7 +1495,7 @@ cxgbit_lro_skb_merge(struct cxgbit_sock *csk, struct sk_buff *skb, u8 pdu_idx)
 		len = 0;
 		for (i = 0; i < pdu_cb->nr_dfrags; dfrag_idx++, i++) {
 			memcpy(&hssi->frags[dfrag_idx],
-			       &ssi->frags[array_index_nospec(pdu_cb->dfrag_idx + i, MAX_SKB_FRAGS)],
+			       &ssi->frags[pdu_cb->dfrag_idx + i],
 			       sizeof(skb_frag_t));
 
 			get_page(skb_frag_page(&hssi->frags[dfrag_idx]));

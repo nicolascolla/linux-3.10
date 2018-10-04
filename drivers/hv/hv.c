@@ -49,9 +49,6 @@ struct hv_context hv_context = {
  */
 int hv_init(void)
 {
-	if (!hv_is_hypercall_page_setup())
-		return -ENOTSUPP;
-
 	hv_context.cpu_context = alloc_percpu(struct hv_per_cpu_context);
 	if (!hv_context.cpu_context)
 		return -ENOMEM;
@@ -156,7 +153,7 @@ int hv_synic_alloc(void)
 	int cpu;
 
 	hv_context.hv_numa_map = kzalloc(sizeof(struct cpumask) * nr_node_ids,
-					 GFP_ATOMIC);
+					 GFP_KERNEL);
 	if (hv_context.hv_numa_map == NULL) {
 		pr_err("Unable to allocate NUMA map\n");
 		goto err;
@@ -237,7 +234,7 @@ void hv_clockevents_bind(int cpu)
 }
 
 /*
- * hv_synic_init - Initialize the Synthethic Interrupt Controller.
+ * hv_synic_init - Initialize the Synthetic Interrupt Controller.
  *
  * If it is already initialized by another entity (ie x2v shim), we need to
  * retrieve the initialized message and event pages.  Otherwise, we create and
@@ -272,7 +269,6 @@ int hv_synic_init(unsigned int cpu)
 	hv_get_synint_state(HV_X64_MSR_SINT0 + VMBUS_MESSAGE_SINT,
 			    shared_sint.as_uint64);
 
-	shared_sint.as_uint64 = 0;
 	shared_sint.vector = HYPERVISOR_CALLBACK_VECTOR;
 	shared_sint.masked = false;
 	if (ms_hyperv.hints & HV_X64_DEPRECATING_AEOI_RECOMMENDED)

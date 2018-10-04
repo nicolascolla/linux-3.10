@@ -17,7 +17,6 @@
  * this warranty disclaimer.
  */
 
-#include <linux/nospec.h>
 #include <uapi/linux/ipv6.h>
 #include <net/ndisc.h>
 #include "decl.h"
@@ -192,7 +191,7 @@ int mwifiex_process_sta_rx_packet(struct mwifiex_private *priv,
 	int ret = 0;
 	struct rxpd *local_rx_pd;
 	struct rx_packet_hdr *rx_pkt_hdr;
-	u8 ta[ETH_ALEN], priority;
+	u8 ta[ETH_ALEN];
 	u16 rx_pkt_type, rx_pkt_offset, rx_pkt_length, seq_num;
 	struct mwifiex_sta_node *sta_ptr;
 
@@ -233,7 +232,6 @@ int mwifiex_process_sta_rx_packet(struct mwifiex_private *priv,
 		return ret;
 	}
 
-	priority = array_index_nospec(local_rx_pd->priority, MAX_NUM_TID);
 	if (mwifiex_queuing_ra_based(priv) ||
 	    (ISSUPP_TDLS_ENABLED(priv->adapter->fw_cap_info) &&
 	     local_rx_pd->flags & MWIFIEX_RXPD_FLAGS_TDLS_PACKET)) {
@@ -242,7 +240,7 @@ int mwifiex_process_sta_rx_packet(struct mwifiex_private *priv,
 		    local_rx_pd->priority < MAX_NUM_TID) {
 			sta_ptr = mwifiex_get_sta_entry(priv, ta);
 			if (sta_ptr)
-				sta_ptr->rx_seq[priority] =
+				sta_ptr->rx_seq[local_rx_pd->priority] =
 					      le16_to_cpu(local_rx_pd->seq_num);
 			mwifiex_auto_tdls_update_peer_signal(priv, ta,
 							     local_rx_pd->snr,
@@ -250,7 +248,7 @@ int mwifiex_process_sta_rx_packet(struct mwifiex_private *priv,
 		}
 	} else {
 		if (rx_pkt_type != PKT_TYPE_BAR)
-			priv->rx_seq[priority] = seq_num;
+			priv->rx_seq[local_rx_pd->priority] = seq_num;
 		memcpy(ta, priv->curr_bss_params.bss_descriptor.mac_address,
 		       ETH_ALEN);
 	}

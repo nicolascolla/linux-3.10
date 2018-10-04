@@ -101,7 +101,7 @@ static int init_pgtable(struct kimage *image, unsigned long start_pgtable)
 	struct x86_mapping_info info = {
 		.alloc_pgt_page	= alloc_pgt_page,
 		.context	= image,
-		.pmd_flag	= __PAGE_KERNEL_LARGE_EXEC,
+		.page_flag      = __PAGE_KERNEL_LARGE_EXEC,
 		.kernpg_flag	= _KERNPG_TABLE_NOENC,
 	};
 	unsigned long mstart, mend;
@@ -111,6 +111,9 @@ static int init_pgtable(struct kimage *image, unsigned long start_pgtable)
 
 	level4p = (pgd_t *)__va(start_pgtable);
 	clear_page(level4p);
+	if (direct_gbpages)
+		info.direct_gbpages = true;
+
 	for (i = 0; i < nr_pfn_mapped; i++) {
 		mstart = pfn_mapped[i].start << PAGE_SHIFT;
 		mend   = pfn_mapped[i].end << PAGE_SHIFT;

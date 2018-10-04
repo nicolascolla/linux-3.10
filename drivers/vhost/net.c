@@ -18,7 +18,6 @@
 #include <linux/file.h>
 #include <linux/slab.h>
 #include <linux/vmalloc.h>
-#include <linux/nospec.h>
 
 #include <linux/net.h>
 #include <linux/if_packet.h>
@@ -1054,8 +1053,6 @@ static long vhost_net_set_backend(struct vhost_net *n, unsigned index, int fd)
 		r = -ENOBUFS;
 		goto err;
 	}
-	index = array_index_nospec(index, VHOST_NET_VQ_MAX);
-
 	vq = &n->vqs[index].vq;
 	nvq = &n->vqs[index];
 	mutex_lock(&vq->mutex);

@@ -47,7 +47,7 @@
 #include <linux/interrupt.h>
 #include <linux/pci.h>
 #include <linux/ethtool.h>
-#include <linux/nospec.h>
+#include <linux/firmware.h>
 
 #include "nfpcore/nfp.h"
 #include "nfpcore/nfp_nsp.h"
@@ -179,7 +179,8 @@ static const struct nfp_et_stat nfp_mac_et_stats[] = {
 
 #define NN_ET_GLOBAL_STATS_LEN ARRAY_SIZE(nfp_net_et_stats)
 #define NN_ET_SWITCH_STATS_LEN 9
-#define NN_ET_RVEC_GATHER_STATS 7
+#define NN_RVEC_GATHER_STATS	8
+#define NN_RVEC_PER_Q_STATS	3
 
 static void nfp_net_get_nspinfo(struct nfp_app *app, char *version)
 {
@@ -330,7 +331,7 @@ nfp_net_get_link_ksettings(struct net_device *netdev,
 	    ls >= ARRAY_SIZE(ls_to_ethtool))
 		return 0;
 
-	cmd->base.speed = ls_to_ethtool[sts];
+	cmd->base.speed = ls_to_ethtool[ls];
 	cmd->base.duplex = DUPLEX_FULL;
 
 	return 0;
@@ -351,7 +352,7 @@ nfp_net_set_link_ksettings(struct net_device *netdev,
 		return -EOPNOTSUPP;
 
 	if (netif_running(netdev)) {
-		netdev_warn(netdev, "Changing settings not allowed on an active interface. It may cause the port to be disabled until reboot.\n");
+		netdev_warn(netdev, "Changing settings not allowed on an active interface. It may cause the port to be disabled until driver reload.\n");
 		return -EBUSY;
 	}
 
@@ -451,7 +452,7 @@ static unsigned int nfp_vnic_get_sw_stats_count(struct net_device *netdev)
 {
 	struct nfp_net *nn = netdev_priv(netdev);
 
-	return NN_ET_RVEC_GATHER_STATS + nn->dp.num_r_vecs * 3;
+	return NN_RVEC_GATHER_STATS + nn->dp.num_r_vecs * NN_RVEC_PER_Q_STATS;
 }
 
 static u8 *nfp_vnic_get_sw_stats_strings(struct net_device *netdev, u8 *data)
@@ -468,6 +469,7 @@ static u8 *nfp_vnic_get_sw_stats_strings(struct net_device *netdev, u8 *data)
 	data = nfp_pr_et(data, "hw_rx_csum_ok");
 	data = nfp_pr_et(data, "hw_rx_csum_inner_ok");
 	data = nfp_pr_et(data, "hw_rx_csum_err");
+	data = nfp_pr_et(data, "rx_replace_buf_alloc_fail");
 	data = nfp_pr_et(data, "hw_tx_csum");
 	data = nfp_pr_et(data, "hw_tx_inner_csum");
 	data = nfp_pr_et(data, "tx_gather");
@@ -478,9 +480,9 @@ static u8 *nfp_vnic_get_sw_stats_strings(struct net_device *netdev, u8 *data)
 
 static u64 *nfp_vnic_get_sw_stats(struct net_device *netdev, u64 *data)
 {
-	u64 gathered_stats[NN_ET_RVEC_GATHER_STATS] = {};
+	u64 gathered_stats[NN_RVEC_GATHER_STATS] = {};
 	struct nfp_net *nn = netdev_priv(netdev);
-	u64 tmp[NN_ET_RVEC_GATHER_STATS];
+	u64 tmp[NN_RVEC_GATHER_STATS];
 	unsigned int i, j;
 
 	for (i = 0; i < nn->dp.num_r_vecs; i++) {
@@ -492,25 +494,26 @@ static u64 *nfp_vnic_get_sw_stats(struct net_device *netdev, u64 *data)
 			tmp[0] = nn->r_vecs[i].hw_csum_rx_ok;
 			tmp[1] = nn->r_vecs[i].hw_csum_rx_inner_ok;
 			tmp[2] = nn->r_vecs[i].hw_csum_rx_error;
+			tmp[3] = nn->r_vecs[i].rx_replace_buf_alloc_fail;
 		} while (u64_stats_fetch_retry(&nn->r_vecs[i].rx_sync, start));
 
 		do {
 			start = u64_stats_fetch_begin(&nn->r_vecs[i].tx_sync);
 			data[1] = nn->r_vecs[i].tx_pkts;
 			data[2] = nn->r_vecs[i].tx_busy;
-			tmp[3] = nn->r_vecs[i].hw_csum_tx;
-			tmp[4] = nn->r_vecs[i].hw_csum_tx_inner;
-			tmp[5] = nn->r_vecs[i].tx_gather;
-			tmp[6] = nn->r_vecs[i].tx_lso;
+			tmp[4] = nn->r_vecs[i].hw_csum_tx;
+			tmp[5] = nn->r_vecs[i].hw_csum_tx_inner;
+			tmp[6] = nn->r_vecs[i].tx_gather;
+			tmp[7] = nn->r_vecs[i].tx_lso;
 		} while (u64_stats_fetch_retry(&nn->r_vecs[i].tx_sync, start));
 
-		data += 3;
+		data += NN_RVEC_PER_Q_STATS;
 
-		for (j = 0; j < NN_ET_RVEC_GATHER_STATS; j++)
+		for (j = 0; j < NN_RVEC_GATHER_STATS; j++)
 			gathered_stats[j] += tmp[j];
 	}
 
-	for (j = 0; j < NN_ET_RVEC_GATHER_STATS; j++)
+	for (j = 0; j < NN_RVEC_GATHER_STATS; j++)
 		*data++ = gathered_stats[j];
 
 	return data;
@@ -807,8 +810,6 @@ static u32 ethtool_flow_to_nfp_flag(u32 flow_type)
 
 	if (flow_type >= ARRAY_SIZE(xlate_ethtool_to_nfp))
 		return 0;
-	flow_type = array_index_nospec(flow_type,
-				       ARRAY_SIZE(xlate_ethtool_to_nfp));
 
 	return xlate_ethtool_to_nfp[flow_type];
 }
@@ -1269,6 +1270,57 @@ static int nfp_net_set_channels(struct net_device *netdev,
 	return nfp_net_set_num_rings(nn, total_rx, total_tx);
 }
 
+static int
+nfp_net_flash_device(struct net_device *netdev, struct ethtool_flash *flash)
+{
+	const struct firmware *fw;
+	struct nfp_app *app;
+	struct nfp_nsp *nsp;
+	struct device *dev;
+	int err;
+
+	if (flash->region != ETHTOOL_FLASH_ALL_REGIONS)
+		return -EOPNOTSUPP;
+
+	app = nfp_app_from_netdev(netdev);
+	if (!app)
+		return -EOPNOTSUPP;
+
+	dev = &app->pdev->dev;
+
+	nsp = nfp_nsp_open(app->cpp);
+	if (IS_ERR(nsp)) {
+		err = PTR_ERR(nsp);
+		dev_err(dev, "Failed to access the NSP: %d\n", err);
+		return err;
+	}
+
+	err = request_firmware_direct(&fw, flash->data, dev);
+	if (err)
+		goto exit_close_nsp;
+
+	dev_info(dev, "Please be patient while writing flash image: %s\n",
+		 flash->data);
+	dev_hold(netdev);
+	rtnl_unlock();
+
+	err = nfp_nsp_write_flash(nsp, fw);
+	if (err < 0) {
+		dev_err(dev, "Flash write failed: %d\n", err);
+		goto exit_rtnl_lock;
+	}
+	dev_info(dev, "Finished writing flash image\n");
+
+exit_rtnl_lock:
+	rtnl_lock();
+	dev_put(netdev);
+	release_firmware(fw);
+
+exit_close_nsp:
+	nfp_nsp_close(nsp);
+	return err;
+}
+
 static const struct ethtool_ops nfp_net_ethtool_ops = {
 	.get_drvinfo		= nfp_net_get_drvinfo,
 	.get_link		= ethtool_op_get_link,
@@ -1279,6 +1331,7 @@ static const struct ethtool_ops nfp_net_ethtool_ops = {
 	.get_sset_count		= nfp_net_get_sset_count,
 	.get_rxnfc		= nfp_net_get_rxnfc,
 	.set_rxnfc		= nfp_net_set_rxnfc,
+	.flash_device		= nfp_net_flash_device,
 	.get_rxfh_indir_size	= nfp_net_get_rxfh_indir_size,
 	.get_rxfh_key_size	= nfp_net_get_rxfh_key_size,
 	.get_rxfh		= nfp_net_get_rxfh,
@@ -1304,6 +1357,7 @@ const struct ethtool_ops nfp_port_ethtool_ops = {
 	.get_strings		= nfp_port_get_strings,
 	.get_ethtool_stats	= nfp_port_get_stats,
 	.get_sset_count		= nfp_port_get_sset_count,
+	.flash_device		= nfp_net_flash_device,
 	.set_dump		= nfp_app_set_dump,
 	.get_dump_flag		= nfp_app_get_dump_flag,
 	.get_dump_data		= nfp_app_get_dump_data,

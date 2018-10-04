@@ -13,7 +13,6 @@
 #include <linux/printk.h>
 #include <linux/slab.h>
 #include <linux/sunrpc/bc_xprt.h>
-#include <linux/nospec.h>
 #include "nfs4_fs.h"
 #include "callback.h"
 #include "internal.h"
@@ -107,7 +106,6 @@ static __be32 decode_string(struct xdr_stream *xdr, unsigned int *len, const cha
 static __be32 decode_fh(struct xdr_stream *xdr, struct nfs_fh *fh)
 {
 	__be32 *p;
-	unsigned short size;
 
 	p = read_buf(xdr, 4);
 	if (unlikely(p == NULL))
@@ -115,13 +113,11 @@ static __be32 decode_fh(struct xdr_stream *xdr, struct nfs_fh *fh)
 	fh->size = ntohl(*p);
 	if (fh->size > NFS4_FHSIZE)
 		return htonl(NFS4ERR_BADHANDLE);
-	size = array_index_nospec(fh->size, NFS4_FHSIZE + 1);
-
-	p = read_buf(xdr, size);
+	p = read_buf(xdr, fh->size);
 	if (unlikely(p == NULL))
 		return htonl(NFS4ERR_RESOURCE);
-	memcpy(&fh->data[0], p, size);
-	memset(&fh->data[size], 0, sizeof(fh->data) - size);
+	memcpy(&fh->data[0], p, fh->size);
+	memset(&fh->data[fh->size], 0, sizeof(fh->data) - fh->size);
 	return 0;
 }
 
@@ -973,7 +969,7 @@ static __be32 nfs4_callback_compound(struct svc_rqst *rqstp, void *argp, void *r
 	if (hdr_arg.minorversion == 0) {
 		cps.clp = nfs4_find_client_ident(SVC_NET(rqstp), hdr_arg.cb_ident);
 		if (!cps.clp || !check_gss_callback_principal(cps.clp, rqstp))
-			return rpc_drop_reply;
+			goto out_invalidcred;
 	}
 
 	cps.minorversion = hdr_arg.minorversion;
@@ -1001,6 +997,10 @@ static __be32 nfs4_callback_compound(struct svc_rqst *rqstp, void *argp, void *r
 	nfs_put_client(cps.clp);
 	dprintk("%s: done, status = %u\n", __func__, ntohl(status));
 	return rpc_success;
+
+out_invalidcred:
+	pr_warn_ratelimited("NFS: NFSv4 callback contains invalid cred\n");
+	return rpc_autherr_badcred;
 }
 
 /*

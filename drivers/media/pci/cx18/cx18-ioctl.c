@@ -22,7 +22,6 @@
  *  02111-1307  USA
  */
 
-#include <linux/nospec.h>
 #include "cx18-driver.h"
 #include "cx18-io.h"
 #include "cx18-version.h"
@@ -554,7 +553,7 @@ static int cx18_enum_fmt_vid_cap(struct file *file, void *fh,
 
 	if (fmt->index > ARRAY_SIZE(formats) - 1)
 		return -EINVAL;
-	*fmt = formats[array_index_nospec(fmt->index, ARRAY_SIZE(formats))];
+	*fmt = formats[fmt->index];
 	return 0;
 }
 

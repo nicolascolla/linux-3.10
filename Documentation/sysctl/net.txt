@@ -43,11 +43,24 @@ Values :
 	1 - enable the JIT
 	2 - enable the JIT and ask the compiler to emit traces on kernel log.
 
+bpf_jit_harden
+--------------
+
+This enables hardening for the Berkeley Packet Filter Just in Time compiler.
+Supported are eBPF JIT backends. Enabling hardening trades off performance,
+but can mitigate JIT spraying.
+Values :
+	0 - disable JIT hardening (default value)
+	1 - enable JIT hardening for unprivileged users only
+	2 - enable JIT hardening for all users
+
 dev_weight
 --------------
 
 The maximum number of packets that kernel can handle on a NAPI interrupt,
-it's a Per-CPU variable.
+it's a Per-CPU variable. For drivers that support LRO or GRO_HW, a hardware
+aggregated packet is counted as one packet in this context.
+
 Default: 64
 
 dev_weight_rx_bias

@@ -10,7 +10,6 @@
 #define DRV_VERSION "1.0.0-ko"
 #define pr_fmt(fmt) DRV_NAME ": " fmt
 
-#include <linux/nospec.h>
 #include "cxgbit.h"
 
 #ifdef CONFIG_CHELSIO_T4_DCB
@@ -447,6 +446,7 @@ cxgbit_uld_lro_rx_handler(void *hndl, const __be64 *rsp,
 	case CPL_RX_ISCSI_DDP:
 	case CPL_FW4_ACK:
 		lro_flush = false;
+		/* fall through */
 	case CPL_ABORT_RPL_RSS:
 	case CPL_PASS_ESTABLISH:
 	case CPL_PEER_CLOSE:
@@ -511,9 +511,8 @@ cxgbit_uld_lro_rx_handler(void *hndl, const __be64 *rsp,
 		 cdev, op, rpl->ot.opcode_tid,
 		 ntohl(rpl->ot.opcode_tid), skb);
 
-	if (op < NUM_CPL_CMDS &&
-	    cxgbit_cplhandlers[array_index_nospec(op, NUM_CPL_CMDS)]) {
-		cxgbit_cplhandlers[array_index_nospec(op, NUM_CPL_CMDS)](cdev, skb);
+	if (op < NUM_CPL_CMDS && cxgbit_cplhandlers[op]) {
+		cxgbit_cplhandlers[op](cdev, skb);
 	} else {
 		pr_err("No handler for opcode 0x%x.\n", op);
 		__kfree_skb(skb);

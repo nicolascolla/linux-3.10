@@ -53,7 +53,6 @@
 #include <linux/delay.h>
 #include <linux/compat.h>
 #include <linux/poll.h>
-#include <linux/nospec.h>
 
 #include <linux/io.h>
 #include <linux/uaccess.h>
@@ -815,7 +814,7 @@ _ctl_do_mpt_command(struct MPT3SAS_ADAPTER *ioc, struct mpt3_ioctl_command karg,
 		if (mpi_request->Function == MPI2_FUNCTION_SCSI_IO_REQUEST)
 			ioc->put_smid_scsi_io(ioc, smid, device_handle);
 		else
-			ioc->put_smid_default(ioc, smid);
+			mpt3sas_base_put_smid_default(ioc, smid);
 		break;
 	}
 	case MPI2_FUNCTION_SCSI_TASK_MGMT:
@@ -852,7 +851,7 @@ _ctl_do_mpt_command(struct MPT3SAS_ADAPTER *ioc, struct mpt3_ioctl_command karg,
 		    tm_request->DevHandle));
 		ioc->build_sg_mpi(ioc, psge, data_out_dma, data_out_sz,
 		    data_in_dma, data_in_sz);
-		ioc->put_smid_hi_priority(ioc, smid, 0);
+		mpt3sas_base_put_smid_hi_priority(ioc, smid, 0);
 		break;
 	}
 	case MPI2_FUNCTION_SMP_PASSTHROUGH:
@@ -883,7 +882,7 @@ _ctl_do_mpt_command(struct MPT3SAS_ADAPTER *ioc, struct mpt3_ioctl_command karg,
 		}
 		ioc->build_sg(ioc, psge, data_out_dma, data_out_sz, data_in_dma,
 		    data_in_sz);
-		ioc->put_smid_default(ioc, smid);
+		mpt3sas_base_put_smid_default(ioc, smid);
 		break;
 	}
 	case MPI2_FUNCTION_SATA_PASSTHROUGH:
@@ -898,7 +897,7 @@ _ctl_do_mpt_command(struct MPT3SAS_ADAPTER *ioc, struct mpt3_ioctl_command karg,
 		}
 		ioc->build_sg(ioc, psge, data_out_dma, data_out_sz, data_in_dma,
 		    data_in_sz);
-		ioc->put_smid_default(ioc, smid);
+		mpt3sas_base_put_smid_default(ioc, smid);
 		break;
 	}
 	case MPI2_FUNCTION_FW_DOWNLOAD:
@@ -906,7 +905,7 @@ _ctl_do_mpt_command(struct MPT3SAS_ADAPTER *ioc, struct mpt3_ioctl_command karg,
 	{
 		ioc->build_sg(ioc, psge, data_out_dma, data_out_sz, data_in_dma,
 		    data_in_sz);
-		ioc->put_smid_default(ioc, smid);
+		mpt3sas_base_put_smid_default(ioc, smid);
 		break;
 	}
 	case MPI2_FUNCTION_TOOLBOX:
@@ -921,7 +920,7 @@ _ctl_do_mpt_command(struct MPT3SAS_ADAPTER *ioc, struct mpt3_ioctl_command karg,
 			ioc->build_sg_mpi(ioc, psge, data_out_dma, data_out_sz,
 				data_in_dma, data_in_sz);
 		}
-		ioc->put_smid_default(ioc, smid);
+		mpt3sas_base_put_smid_default(ioc, smid);
 		break;
 	}
 	case MPI2_FUNCTION_SAS_IO_UNIT_CONTROL:
@@ -940,7 +939,7 @@ _ctl_do_mpt_command(struct MPT3SAS_ADAPTER *ioc, struct mpt3_ioctl_command karg,
 	default:
 		ioc->build_sg_mpi(ioc, psge, data_out_dma, data_out_sz,
 		    data_in_dma, data_in_sz);
-		ioc->put_smid_default(ioc, smid);
+		mpt3sas_base_put_smid_default(ioc, smid);
 		break;
 	}
 
@@ -1438,7 +1437,6 @@ _ctl_diag_register_2(struct MPT3SAS_ADAPTER *ioc,
 			ioc->name, __func__, buffer_type);
 		return -EPERM;
 	}
-	buffer_type = array_index_nospec(buffer_type, MPI2_DIAG_BUF_TYPE_COUNT);
 
 	if (ioc->diag_buffer_status[buffer_type] &
 	    MPT3_DIAG_BUFFER_IS_REGISTERED) {
@@ -1524,7 +1522,7 @@ _ctl_diag_register_2(struct MPT3SAS_ADAPTER *ioc,
 			cpu_to_le32(ioc->product_specific[buffer_type][i]);
 
 	init_completion(&ioc->ctl_cmds.done);
-	ioc->put_smid_default(ioc, smid);
+	mpt3sas_base_put_smid_default(ioc, smid);
 	wait_for_completion_timeout(&ioc->ctl_cmds.done,
 	    MPT3_IOCTL_DEFAULT_TIMEOUT*HZ);
 
@@ -1681,7 +1679,6 @@ _ctl_diag_unregister(struct MPT3SAS_ADAPTER *ioc, void __user *arg)
 			ioc->name, __func__, buffer_type);
 		return -EPERM;
 	}
-	buffer_type = array_index_nospec(buffer_type, MPI2_DIAG_BUF_TYPE_COUNT);
 
 	if ((ioc->diag_buffer_status[buffer_type] &
 	    MPT3_DIAG_BUFFER_IS_REGISTERED) == 0) {
@@ -1757,7 +1754,6 @@ _ctl_diag_query(struct MPT3SAS_ADAPTER *ioc, void __user *arg)
 			ioc->name, __func__, buffer_type);
 		return -EPERM;
 	}
-	buffer_type = array_index_nospec(buffer_type, MPI2_DIAG_BUF_TYPE_COUNT);
 
 	if ((ioc->diag_buffer_status[buffer_type] &
 	    MPT3_DIAG_BUFFER_IS_REGISTERED) == 0) {
@@ -1873,7 +1869,7 @@ mpt3sas_send_diag_release(struct MPT3SAS_ADAPTER *ioc, u8 buffer_type,
 	mpi_request->VP_ID = 0;
 
 	init_completion(&ioc->ctl_cmds.done);
-	ioc->put_smid_default(ioc, smid);
+	mpt3sas_base_put_smid_default(ioc, smid);
 	wait_for_completion_timeout(&ioc->ctl_cmds.done,
 	    MPT3_IOCTL_DEFAULT_TIMEOUT*HZ);
 
@@ -1950,7 +1946,6 @@ _ctl_diag_release(struct MPT3SAS_ADAPTER *ioc, void __user *arg)
 			ioc->name, __func__, buffer_type);
 		return -EPERM;
 	}
-	buffer_type = array_index_nospec(buffer_type, MPI2_DIAG_BUF_TYPE_COUNT);
 
 	if ((ioc->diag_buffer_status[buffer_type] &
 	    MPT3_DIAG_BUFFER_IS_REGISTERED) == 0) {
@@ -2042,7 +2037,6 @@ _ctl_diag_read_buffer(struct MPT3SAS_ADAPTER *ioc, void __user *arg)
 			ioc->name, __func__, buffer_type);
 		return -EPERM;
 	}
-	buffer_type = array_index_nospec(buffer_type, MPI2_DIAG_BUF_TYPE_COUNT);
 
 	if (karg.unique_id != ioc->unique_id[buffer_type]) {
 		pr_err(MPT3SAS_FMT
@@ -2142,7 +2136,7 @@ _ctl_diag_read_buffer(struct MPT3SAS_ADAPTER *ioc, void __user *arg)
 	mpi_request->VP_ID = 0;
 
 	init_completion(&ioc->ctl_cmds.done);
-	ioc->put_smid_default(ioc, smid);
+	mpt3sas_base_put_smid_default(ioc, smid);
 	wait_for_completion_timeout(&ioc->ctl_cmds.done,
 	    MPT3_IOCTL_DEFAULT_TIMEOUT*HZ);
 

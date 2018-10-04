@@ -21,7 +21,6 @@
 #include <linux/module.h>
 #include <linux/slab.h>
 #include <linux/hid-roccat.h>
-#include <linux/nospec.h>
 #include "hid-ids.h"
 #include "hid-roccat-common.h"
 #include "hid-roccat-kovaplus.h"
@@ -289,7 +288,6 @@ static ssize_t kovaplus_sysfs_set_actual_profile(struct device *dev,
 
 	if (profile >= 5)
 		return -EINVAL;
-	profile = array_index_nospec(profile, 5);
 
 	mutex_lock(&kovaplus->kovaplus_lock);
 	retval = kovaplus_set_actual_profile(usb_dev, profile);

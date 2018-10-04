@@ -130,13 +130,16 @@ EXPORT_SYMBOL_GPL(af_alg_release);
 void af_alg_release_parent(struct sock *sk)
 {
 	struct alg_sock *ask = alg_sk(sk);
-	bool last;
+	unsigned int nokey = ask->nokey_refcnt;
+	bool last = nokey && !ask->refcnt;
 
 	sk = ask->parent;
 	ask = alg_sk(sk);
 
 	lock_sock(sk);
-	last = !--ask->refcnt;
+	ask->nokey_refcnt -= nokey;
+	if (!last)
+		last = !--ask->refcnt;
 	release_sock(sk);
 
 	if (last)
@@ -179,7 +182,7 @@ static int alg_bind(struct socket *sock, struct sockaddr *uaddr, int addr_len)
 
 	err = -EBUSY;
 	lock_sock(sk);
-	if (ask->refcnt)
+	if (ask->refcnt | ask->nokey_refcnt)
 		goto unlock;
 
 	swap(ask->type, type);
@@ -259,8 +262,8 @@ int af_alg_accept(struct sock *sk, struct socket *newsock)
 	struct alg_sock *ask = alg_sk(sk);
 	const struct af_alg_type *type;
 	struct sock *sk2;
+	unsigned int nokey;
 	int err;
-	bool nokey;
 
 	lock_sock(sk);
 	type = ask->type;
@@ -291,8 +294,10 @@ int af_alg_accept(struct sock *sk, struct socket *newsock)
 
 	if (nokey || !ask->refcnt++)
 		sock_hold(sk);
+	ask->nokey_refcnt += nokey;
 	alg_sk(sk2)->parent = sk;
 	alg_sk(sk2)->type = type;
+	alg_sk(sk2)->nokey_refcnt = nokey;
 
 	newsock->ops = type->ops;
 	newsock->state = SS_CONNECTED;

@@ -39,7 +39,6 @@
 #include <linux/hwmon.h>
 #include <linux/hwmon-sysfs.h>
 #include <linux/err.h>
-#include <linux/nospec.h>
 
 /*
  * Insmod parameters
@@ -363,7 +362,6 @@ static ssize_t set_enable(struct device *dev, struct device_attribute *devattr,
 
 	if (mode > 2)
 		return -EINVAL;
-	mode = array_index_nospec(mode, 3);
 
 	mutex_lock(&data->update_lock);
 

@@ -182,7 +182,7 @@ config BLK_DEV_DM_BUILTIN
 config BLK_DEV_DM
 	tristate "Device mapper support"
 	select BLK_DEV_DM_BUILTIN
-	select DAX
+	depends on DAX || DAX=n
 	---help---
 	  Device-mapper is a low level volume manager.  It works by allowing
 	  people to specify mappings for ranges of logical sectors.  Various
@@ -453,6 +453,22 @@ config DM_SWITCH
 
 	  To compile this code as a module, choose M here: the module will
 	  be called dm-switch.
+
+	  If unsure, say N.
+
+config DM_LOG_WRITES
+	tristate "Log writes target support"
+	depends on BLK_DEV_DM
+	---help---
+	  This device-mapper target takes two devices, one device to use
+	  normally, one to log all write operations done to the first device.
+	  This is for use by file system developers wishing to verify that
+	  their fs is writing a consitent file system at all times by allowing
+	  them to replay the log in a variety of ways and to check the
+	  contents.
+
+	  To compile this code as a module, choose M here: the module will
+	  be called dm-log-writes.
 
 	  If unsure, say N.
 

@@ -347,7 +347,7 @@ static void crypto_wait_for_test(struct crypto_larval *larval)
 		crypto_alg_tested(larval->alg.cra_driver_name, 0);
 	}
 
-	err = wait_for_completion_interruptible(&larval->completion);
+	err = wait_for_completion_killable(&larval->completion);
 	WARN_ON(err);
 
 out:
@@ -537,9 +537,6 @@ int crypto_register_instance(struct crypto_template *tmpl,
 	inst->alg.cra_module = tmpl->module;
 	inst->alg.cra_flags |= CRYPTO_ALG_INSTANCE;
 
-	if (unlikely(!crypto_mod_get(&inst->alg)))
-		return -EAGAIN;
-
 	down_write(&crypto_alg_sem);
 
 	larval = __crypto_register_alg(&inst->alg);
@@ -557,14 +554,9 @@ unlock:
 		goto err;
 
 	crypto_wait_for_test(larval);
-
-	/* Remove instance if test failed */
-	if (!(inst->alg.cra_flags & CRYPTO_ALG_TESTED))
-		crypto_unregister_instance(inst);
 	err = 0;
 
 err:
-	crypto_mod_put(&inst->alg);
 	return err;
 }
 EXPORT_SYMBOL_GPL(crypto_register_instance);

@@ -363,6 +363,17 @@ static int shm_split(struct vm_area_struct *vma, unsigned long addr)
 	return 0;
 }
 
+static unsigned long shm_pagesize(struct vm_area_struct *vma)
+{
+	struct file *file = vma->vm_file;
+	struct shm_file_data *sfd = shm_file_data(file);
+
+	if (sfd->vm_ops->pagesize)
+		return sfd->vm_ops->pagesize(vma);
+
+	return PAGE_SIZE;
+}
+
 #ifdef CONFIG_NUMA
 static int shm_set_policy(struct vm_area_struct *vma, struct mempolicy *new)
 {
@@ -476,6 +487,7 @@ static const struct vm_operations_struct shm_vm_ops = {
 	.close	= shm_close,	/* callback for when the vm-area is released */
 	.fault	= shm_fault,
 	.split	= shm_split,
+	.pagesize = shm_pagesize,
 #if defined(CONFIG_NUMA)
 	.set_policy = shm_set_policy,
 	.get_policy = shm_get_policy,
@@ -891,20 +903,21 @@ static int shmctl_nolock(struct ipc_namespace *ns, int shmid,
 		goto out;
 	}
 	case SHM_STAT:
+	case SHM_STAT_ANY:
 	case IPC_STAT:
 	{
 		struct shmid64_ds tbuf;
 		int result;
 
 		rcu_read_lock();
-		if (cmd == SHM_STAT) {
+		if (cmd == SHM_STAT || cmd == SHM_STAT_ANY) {
 			shp = shm_obtain_object(ns, shmid);
 			if (IS_ERR(shp)) {
 				err = PTR_ERR(shp);
 				goto out_unlock;
 			}
 			result = shp->shm_perm.id;
-		} else {
+		} else { /* IPC_STAT */
 			shp = shm_obtain_object_check(ns, shmid);
 			if (IS_ERR(shp)) {
 				err = PTR_ERR(shp);
@@ -913,9 +926,20 @@ static int shmctl_nolock(struct ipc_namespace *ns, int shmid,
 			result = 0;
 		}
 
-		err = -EACCES;
-		if (ipcperms(ns, &shp->shm_perm, S_IRUGO))
-			goto out_unlock;
+		/*
+		 * Semantically SHM_STAT_ANY ought to be identical to
+		 * that functionality provided by the /proc/sysvipc/
+		 * interface. As such, only audit these calls and
+		 * do not do traditional S_IRUGO permission checks on
+		 * the ipc object.
+		 */
+		if (cmd == SHM_STAT_ANY)
+			audit_ipc_obj(&shp->shm_perm);
+		else {
+			err = -EACCES;
+			if (ipcperms(ns, &shp->shm_perm, S_IRUGO))
+				goto out_unlock;
+		}
 
 		err = security_shm_shmctl(shp, cmd);
 		if (err)
@@ -964,6 +988,7 @@ SYSCALL_DEFINE3(shmctl, int, shmid, int, cmd, struct shmid_ds __user *, buf)
 	case IPC_INFO:
 	case SHM_INFO:
 	case SHM_STAT:
+	case SHM_STAT_ANY:
 	case IPC_STAT:
 		return shmctl_nolock(ns, shmid, cmd, version, buf);
 	case IPC_RMID:

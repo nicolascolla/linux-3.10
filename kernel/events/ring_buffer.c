@@ -368,7 +368,7 @@ void *perf_aux_output_begin(struct perf_output_handle *handle,
 	if (WARN_ON_ONCE(local_xchg(&rb->aux_nest, 1)))
 		goto err_put;
 
-	aux_head = local_read(&rb->aux_head);
+	aux_head = rb->aux_head;
 
 	handle->rb = rb;
 	handle->event = event;
@@ -383,7 +383,7 @@ void *perf_aux_output_begin(struct perf_output_handle *handle,
 	 */
 	if (!rb->aux_overwrite) {
 		aux_tail = ACCESS_ONCE(rb->user_page->aux_tail);
-		handle->wakeup = local_read(&rb->aux_wakeup) + rb->aux_watermark;
+		handle->wakeup = rb->aux_wakeup + rb->aux_watermark;
 		if (aux_head - aux_tail < perf_aux_size(rb))
 			handle->size = CIRC_SPACE(aux_head, aux_tail, perf_aux_size(rb));
 
@@ -412,6 +412,20 @@ err:
 
 	return NULL;
 }
+EXPORT_SYMBOL_GPL(perf_aux_output_begin);
+
+static bool __always_inline rb_need_aux_wakeup(struct ring_buffer *rb)
+{
+	if (rb->aux_overwrite)
+		return false;
+
+	if (rb->aux_head - rb->aux_wakeup >= rb->aux_watermark) {
+		rb->aux_wakeup = rounddown(rb->aux_head, rb->aux_watermark);
+		return true;
+	}
+
+	return false;
+}
 
 /*
  * Commit the data written by hardware into the ring buffer by adjusting
@@ -434,12 +448,12 @@ void perf_aux_output_end(struct perf_output_handle *handle, unsigned long size)
 		handle->aux_flags |= PERF_AUX_FLAG_OVERWRITE;
 
 		aux_head = handle->head;
-		local_set(&rb->aux_head, aux_head);
+		rb->aux_head = aux_head;
 	} else {
 		handle->aux_flags &= ~PERF_AUX_FLAG_OVERWRITE;
 
-		aux_head = local_read(&rb->aux_head);
-		local_add(size, &rb->aux_head);
+		aux_head = rb->aux_head;
+		rb->aux_head += size;
 	}
 
 	if (size || handle->aux_flags) {
@@ -451,12 +465,9 @@ void perf_aux_output_end(struct perf_output_handle *handle, unsigned long size)
 		                     handle->aux_flags);
 	}
 
-	aux_head = rb->user_page->aux_head = local_read(&rb->aux_head);
-
-	if (aux_head - local_read(&rb->aux_wakeup) >= rb->aux_watermark) {
+	rb->user_page->aux_head = rb->aux_head;
+	if (rb_need_aux_wakeup(rb))
 		wakeup = true;
-		local_add(rb->aux_watermark, &rb->aux_wakeup);
-	}
 
 	if (wakeup) {
 		if (handle->aux_flags & PERF_AUX_FLAG_TRUNCATED)
@@ -471,6 +482,7 @@ void perf_aux_output_end(struct perf_output_handle *handle, unsigned long size)
 	rb_free_aux(rb);
 	ring_buffer_put(rb);
 }
+EXPORT_SYMBOL_GPL(perf_aux_output_end);
 
 /*
  * Skip over a given number of bytes in the AUX buffer, due to, for example,
@@ -479,26 +491,24 @@ void perf_aux_output_end(struct perf_output_handle *handle, unsigned long size)
 int perf_aux_output_skip(struct perf_output_handle *handle, unsigned long size)
 {
 	struct ring_buffer *rb = handle->rb;
-	unsigned long aux_head;
 
 	if (size > handle->size)
 		return -ENOSPC;
 
-	local_add(size, &rb->aux_head);
+	rb->aux_head += size;
 
-	aux_head = rb->user_page->aux_head = local_read(&rb->aux_head);
-	if (aux_head - local_read(&rb->aux_wakeup) >= rb->aux_watermark) {
+	rb->user_page->aux_head = rb->aux_head;
+	if (rb_need_aux_wakeup(rb)) {
 		perf_output_wakeup(handle);
-		local_add(rb->aux_watermark, &rb->aux_wakeup);
-		handle->wakeup = local_read(&rb->aux_wakeup) +
-				 rb->aux_watermark;
+		handle->wakeup = rb->aux_wakeup + rb->aux_watermark;
 	}
 
-	handle->head = aux_head;
+	handle->head = rb->aux_head;
 	handle->size -= size;
 
 	return 0;
 }
+EXPORT_SYMBOL_GPL(perf_aux_output_skip);
 
 void *perf_get_aux(struct perf_output_handle *handle)
 {
@@ -508,6 +518,7 @@ void *perf_get_aux(struct perf_output_handle *handle)
 
 	return handle->rb->aux_priv;
 }
+EXPORT_SYMBOL_GPL(perf_get_aux);
 
 #define PERF_AUX_GFP	(GFP_KERNEL | __GFP_ZERO | __GFP_NOWARN | __GFP_NORETRY)
 

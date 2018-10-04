@@ -266,6 +266,7 @@ struct qib_chip_specific {
 	u64 rpkts; /* total packets received (sample result) */
 	u64 xmit_wait; /* # of ticks no data sent (sample result) */
 	struct timer_list pma_timer;
+	struct qib_pportdata *ppd;
 	char emsgbuf[128];
 	char bitsmsgbuf[64];
 	u8 pma_sample_status;
@@ -749,7 +750,6 @@ static void qib_handle_6120_hwerrors(struct qib_devdata *dd, char *msg,
 	u32 bits, ctrl;
 	int isfatal = 0;
 	char *bitsmsg;
-	int log_idx;
 
 	hwerrs = qib_read_kreg64(dd, kr_hwerrstatus);
 	if (!hwerrs)
@@ -770,11 +770,6 @@ static void qib_handle_6120_hwerrors(struct qib_devdata *dd, char *msg,
 		       hwerrs & ~HWE_MASK(PowerOnBISTFailed));
 
 	hwerrs &= dd->cspec->hwerrmask;
-
-	/* We log some errors to EEPROM, check if we have any of those. */
-	for (log_idx = 0; log_idx < QIB_EEP_LOG_CNT; ++log_idx)
-		if (hwerrs & dd->eep_st_masks[log_idx].hwerrs_to_log)
-			qib_inc_eeprom_err(dd, log_idx, 1);
 
 	/*
 	 * Make sure we get this much out, unless told to be quiet,
@@ -1005,7 +1000,6 @@ static void handle_6120_errors(struct qib_devdata *dd, u64 errs)
 	char *msg;
 	u64 ignore_this_time = 0;
 	u64 iserr = 0;
-	int log_idx;
 	struct qib_pportdata *ppd = dd->pport;
 	u64 mask;
 
@@ -1016,10 +1010,6 @@ static void handle_6120_errors(struct qib_devdata *dd, u64 errs)
 	/* do these first, they are most important */
 	if (errs & ERR_MASK(HardwareErr))
 		qib_handle_6120_hwerrors(dd, msg, sizeof(dd->cspec->emsgbuf));
-	else
-		for (log_idx = 0; log_idx < QIB_EEP_LOG_CNT; ++log_idx)
-			if (errs & dd->eep_st_masks[log_idx].errs_to_log)
-				qib_inc_eeprom_err(dd, log_idx, 1);
 
 	if (errs & ~IB_E_BITSEXTANT)
 		qib_dev_err(dd,
@@ -2647,9 +2637,9 @@ static void qib_chk_6120_errormask(struct qib_devdata *dd)
  * need traffic_wds done the way it is
  * called from add_timer
  */
-static void qib_get_6120_faststats(unsigned long opaque)
+static void qib_get_6120_faststats(struct timer_list *t)
 {
-	struct qib_devdata *dd = (struct qib_devdata *) opaque;
+	struct qib_devdata *dd = from_timer(dd, t, stats_timer);
 	struct qib_pportdata *ppd = dd->pport;
 	unsigned long flags;
 	u64 traffic_wds;
@@ -2937,10 +2927,10 @@ static int qib_6120_set_loopback(struct qib_pportdata *ppd, const char *what)
 	return ret;
 }
 
-static void pma_6120_timer(unsigned long data)
+static void pma_6120_timer(struct timer_list *t)
 {
-	struct qib_pportdata *ppd = (struct qib_pportdata *)data;
-	struct qib_chip_specific *cs = ppd->dd->cspec;
+	struct qib_chip_specific *cs = from_timer(cs, t, pma_timer);
+	struct qib_pportdata *ppd = cs->ppd;
 	struct qib_ibport *ibp = &ppd->ibport_data;
 	unsigned long flags;
 
@@ -3205,6 +3195,7 @@ static int init_6120_variables(struct qib_devdata *dd)
 	dd->num_pports = 1;
 
 	dd->cspec = (struct qib_chip_specific *)(ppd + dd->num_pports);
+	dd->cspec->ppd = ppd;
 	ppd->cpspec = NULL; /* not used in this chip */
 
 	spin_lock_init(&dd->cspec->kernel_tid_lock);
@@ -3242,20 +3233,6 @@ static int init_6120_variables(struct qib_devdata *dd)
 	if (qib_unordered_wc())
 		dd->flags |= QIB_PIO_FLUSH_WC;
 
-	/*
-	 * EEPROM error log 0 is TXE Parity errors. 1 is RXE Parity.
-	 * 2 is Some Misc, 3 is reserved for future.
-	 */
-	dd->eep_st_masks[0].hwerrs_to_log = HWE_MASK(TXEMemParityErr);
-
-	/* Ignore errors in PIO/PBC on systems with unordered write-combining */
-	if (qib_unordered_wc())
-		dd->eep_st_masks[0].hwerrs_to_log &= ~TXE_PIO_PARITY;
-
-	dd->eep_st_masks[1].hwerrs_to_log = HWE_MASK(RXEMemParityErr);
-
-	dd->eep_st_masks[2].errs_to_log = ERR_MASK(ResetNegated);
-
 	ret = qib_init_pportdata(ppd, dd, 0, 1);
 	if (ret)
 		goto bail;
@@ -3289,11 +3266,8 @@ static int init_6120_variables(struct qib_devdata *dd)
 	dd->rhdrhead_intr_off = 1ULL << 32;
 
 	/* setup the stats timer; the add_timer is done at end of init */
-	setup_timer(&dd->stats_timer, qib_get_6120_faststats,
-		    (unsigned long)dd);
-
-	setup_timer(&dd->cspec->pma_timer, pma_6120_timer,
-		    (unsigned long)ppd);
+	timer_setup(&dd->stats_timer, qib_get_6120_faststats, 0);
+	timer_setup(&dd->cspec->pma_timer, pma_6120_timer, 0);
 
 	dd->ureg_align = qib_read_kreg32(dd, kr_palign);
 

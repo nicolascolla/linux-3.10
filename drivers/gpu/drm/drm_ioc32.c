@@ -30,7 +30,6 @@
 #include <linux/compat.h>
 #include <linux/ratelimit.h>
 #include <linux/export.h>
-#include <linux/nospec.h>
 
 #include <drm/drmP.h>
 #include "drm_legacy.h"
@@ -965,7 +964,6 @@ long drm_compat_ioctl(struct file *filp, unsigned int cmd, unsigned long arg)
 	 */
 	if (nr >= ARRAY_SIZE(drm_compat_ioctls))
 		return drm_ioctl(filp, cmd, arg);
-	nr = array_index_nospec(nr, ARRAY_SIZE(drm_compat_ioctls));
 
 	fn = drm_compat_ioctls[nr].fn;
 	if (!fn)

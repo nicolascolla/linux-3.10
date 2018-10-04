@@ -40,7 +40,6 @@
 #include <linux/ratelimit.h>
 #include <linux/seccomp.h>
 #include <linux/if_vlan.h>
-#include <linux/nospec.h>
 
 /* No hurry in this branch
  *
@@ -546,7 +545,6 @@ int sk_chk_filter(struct sock_filter *filter, unsigned int flen)
 	};
 	int pc;
 	bool anc_found;
-	unsigned int idx;
 
 	if (flen == 0 || flen > BPF_MAXINSNS)
 		return -EINVAL;
@@ -632,8 +630,7 @@ int sk_chk_filter(struct sock_filter *filter, unsigned int flen)
 	}
 
 	/* last instruction must be a RET code */
-	idx = array_index_nospec(flen - 1, BPF_MAXINSNS);
-	switch (filter[idx].code) {
+	switch (filter[flen - 1].code) {
 	case BPF_S_RET_K:
 	case BPF_S_RET_A:
 		return check_load_and_stores(filter, flen);
@@ -895,3 +892,16 @@ out:
 	release_sock(sk);
 	return ret;
 }
+
+int xdp_do_redirect(struct net_device *dev, struct xdp_buff *xdp,
+		   struct bpf_prog *prog)
+{
+	return -EOPNOTSUPP;
+}
+EXPORT_SYMBOL_GPL(xdp_do_redirect);
+
+void xdp_do_flush_map(void)
+{
+	return;
+}
+EXPORT_SYMBOL_GPL(xdp_do_flush_map);

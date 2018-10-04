@@ -158,6 +158,20 @@ static inline void init_timer_on_stack_key(struct timer_list *timer,
 #define setup_deferrable_timer_on_stack(timer, fn, data)		\
 	__setup_timer_on_stack((timer), (fn), (data), TIMER_DEFERRABLE)
 
+#define TIMER_DATA_TYPE		unsigned long
+#define TIMER_FUNC_TYPE		void (*)(TIMER_DATA_TYPE)
+
+static inline void timer_setup(struct timer_list *timer,
+			       void (*callback)(struct timer_list *),
+			       unsigned int flags)
+{
+	__setup_timer(timer, (TIMER_FUNC_TYPE)callback,
+		      (TIMER_DATA_TYPE)timer, flags);
+}
+
+#define from_timer(var, callback_timer, timer_fieldname) \
+	container_of(callback_timer, typeof(*var), timer_fieldname)
+
 /**
  * timer_pending - is a timer pending?
  * @timer: the timer in question
@@ -248,6 +262,15 @@ extern void init_timers(void);
 extern void run_local_timers(void);
 struct hrtimer;
 extern enum hrtimer_restart it_real_fn(struct hrtimer *);
+
+#if defined(CONFIG_SMP) && defined(CONFIG_NO_HZ_COMMON)
+#include <linux/sysctl.h>
+
+extern unsigned int sysctl_timer_migration;
+int timer_migration_handler(struct ctl_table *table, int write,
+			    void __user *buffer, size_t *lenp,
+			    loff_t *ppos);
+#endif
 
 unsigned long __round_jiffies(unsigned long j, int cpu);
 unsigned long __round_jiffies_relative(unsigned long j, int cpu);

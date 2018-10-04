@@ -25,7 +25,6 @@
 #include <linux/slab.h>
 #include <linux/interrupt.h>
 #include <linux/kernel.h>
-#include <linux/nospec.h>
 
 #include "xfrm_hash.h"
 
@@ -314,7 +313,6 @@ static struct xfrm_mode *xfrm_get_mode(unsigned int encap, int family)
 
 	if (unlikely(encap >= XFRM_MODE_MAX))
 		return NULL;
-	encap = array_index_nospec(encap, XFRM_MODE_MAX);
 
 retry:
 	afinfo = xfrm_state_get_afinfo(family);
@@ -344,6 +342,7 @@ static void xfrm_state_gc_destroy(struct xfrm_state *x)
 {
 	tasklet_hrtimer_cancel(&x->mtimer);
 	del_timer_sync(&x->rtimer);
+	kfree(x->aead);
 	kfree(x->aalg);
 	kfree(x->ealg);
 	kfree(x->calg);
@@ -1861,7 +1860,6 @@ int xfrm_user_policy(struct sock *sk, int optname, u8 __user *optval, int optlen
 	rcu_read_unlock();
 
 	if (err >= 0) {
-		err = array_index_nospec(err, 2);
 		xfrm_sk_policy_insert(sk, err, pol);
 		xfrm_pol_put(pol);
 		err = 0;
@@ -1936,8 +1934,6 @@ static struct xfrm_state_afinfo *xfrm_state_get_afinfo(unsigned int family)
 	struct xfrm_state_afinfo *afinfo;
 	if (unlikely(family >= NPROTO))
 		return NULL;
-	family = array_index_nospec(family, NPROTO);
-
 	rcu_read_lock();
 	afinfo = rcu_dereference(xfrm_state_afinfo[family]);
 	if (unlikely(!afinfo))

@@ -29,7 +29,6 @@
 #include <linux/usb.h>
 #include <linux/usb/usbnet.h>
 #include <linux/gfp.h>
-#include <linux/nospec.h>
 
 
 /*
@@ -116,15 +115,13 @@ static int genelink_rx_fixup(struct usbnet *dev, struct sk_buff *skb)
 				   size);
 			return 0;
 		}
-		size = array_index_nospec(size, GL_MAX_PACKET_LEN + 1);
 
 		// allocate the skb for the individual packet
 		gl_skb = alloc_skb(size, GFP_ATOMIC);
 		if (gl_skb) {
 
 			// copy the packet data to the new skb
-			memcpy(skb_put(gl_skb, size),
-					packet->packet_data, size);
+			skb_put_data(gl_skb, packet->packet_data, size);
 			usbnet_skb_return(dev, gl_skb);
 		}
 
@@ -177,7 +174,7 @@ genelink_tx_fixup(struct usbnet *dev, struct sk_buff *skb, gfp_t flags)
 	}
 
 	// attach the packet count to the header
-	packet_count = (__le32 *) skb_push(skb, (4 + 4*1));
+	packet_count = skb_push(skb, (4 + 4 * 1));
 	packet_len = packet_count + 1;
 
 	*packet_count = cpu_to_le32(1);

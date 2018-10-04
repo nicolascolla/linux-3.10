@@ -33,7 +33,6 @@
 #include <linux/khugepaged.h>
 #include <linux/uprobes.h>
 #include <linux/rbtree_augmented.h>
-#include <linux/sched/sysctl.h>
 #include <linux/notifier.h>
 #include <linux/memory.h>
 #include <linux/userfaultfd_k.h>
@@ -1478,9 +1477,29 @@ unsigned long do_mmap(struct file *file, unsigned long addr,
 
 	if (file) {
 		struct inode *inode = file_inode(file);
+		struct file_operations_extend *fop = get_fo_extend(file);
+		unsigned long mmap_supported_flags = 0;
+		unsigned long flags_mask;
+
+		if (fop)
+			mmap_supported_flags = fop->mmap_supported_flags;
+
+		flags_mask = LEGACY_MAP_MASK | mmap_supported_flags;
 
 		switch (flags & MAP_TYPE) {
 		case MAP_SHARED:
+			/*
+			 * Force use of MAP_SHARED_VALIDATE with non-legacy
+			 * flags. E.g. MAP_SYNC is dangerous to use with
+			 * MAP_SHARED as you don't know which consistency model
+			 * you will get. We silently ignore unsupported flags
+			 * with MAP_SHARED to preserve backward compatibility.
+			 */
+			flags &= LEGACY_MAP_MASK;
+			/* fall through */
+		case MAP_SHARED_VALIDATE:
+			if (flags & ~flags_mask)
+				return -EOPNOTSUPP;
 			if ((prot&PROT_WRITE) && !(file->f_mode&FMODE_WRITE))
 				return -EACCES;
 
@@ -1823,7 +1842,7 @@ out:
 					vma == get_gate_vma(current->mm)))
 			mm->locked_vm += (len >> PAGE_SHIFT);
 		else
-			vma->vm_flags &= ~VM_LOCKED;
+			vma->vm_flags &= VM_LOCKED_CLEAR_MASK;
 	}
 
 	if (file)
@@ -2539,7 +2558,7 @@ find_extend_vma(struct mm_struct *mm, unsigned long addr)
 	if (!prev || expand_stack(prev, addr))
 		return NULL;
 	if (prev->vm_flags & VM_LOCKED)
-		__mlock_vma_pages_range(prev, addr, prev->vm_end, NULL);
+		populate_vma_page_range(prev, addr, prev->vm_end, NULL);
 	return prev;
 }
 #else
@@ -2566,7 +2585,7 @@ find_extend_vma(struct mm_struct * mm, unsigned long addr)
 	if (expand_stack(vma, addr))
 		return NULL;
 	if (vma->vm_flags & VM_LOCKED)
-		__mlock_vma_pages_range(vma, addr, start, NULL);
+		populate_vma_page_range(vma, addr, start, NULL);
 	return vma;
 }
 #endif
@@ -2654,11 +2673,11 @@ detach_vmas_to_be_unmapped(struct mm_struct *mm, struct vm_area_struct *vma,
 }
 
 /*
- * __split_vma() bypasses sysctl_max_map_count checking.  We use this on the
- * munmap path where it doesn't make sense to fail.
+ * __split_vma() bypasses sysctl_max_map_count checking.  We use this where it
+ * has already been checked or doesn't make sense to fail.
  */
-static int __split_vma(struct mm_struct * mm, struct vm_area_struct * vma,
-	      unsigned long addr, int new_below)
+int __split_vma(struct mm_struct *mm, struct vm_area_struct *vma,
+		unsigned long addr, int new_below)
 {
 	struct mempolicy *pol;
 	struct vm_area_struct *new;

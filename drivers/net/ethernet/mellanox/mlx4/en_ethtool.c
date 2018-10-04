@@ -39,7 +39,6 @@
 #include <linux/in.h>
 #include <net/ip.h>
 #include <linux/bitmap.h>
-#include <linux/nospec.h>
 
 #include "mlx4_en.h"
 #include "en_port.h"
@@ -196,6 +195,10 @@ static const char main_strings[][ETH_GSTRING_LEN] = {
 	"tx_prio_7_packets", "tx_prio_7_bytes",
 	"tx_novlan_packets", "tx_novlan_bytes",
 
+	/* xdp statistics */
+	"rx_xdp_drop",
+	"rx_xdp_tx",
+	"rx_xdp_tx_full",
 };
 
 static const char mlx4_en_test_names[][ETH_GSTRING_LEN]= {
@@ -342,7 +345,7 @@ static int mlx4_en_get_sset_count(struct net_device *dev, int sset)
 	case ETH_SS_STATS:
 		return bitmap_iterator_count(&it) +
 			(priv->tx_ring_num[TX] * 2) +
-			(priv->rx_ring_num * 3);
+			(priv->rx_ring_num * (3 + NUM_XDP_STATS));
 	case ETH_SS_TEST:
 		return MLX4_EN_NUM_SELF_TEST - !(priv->mdev->dev->caps.flags
 					& MLX4_DEV_CAP_FLAG_UC_LOOPBACK) * 2;
@@ -404,6 +407,10 @@ static void mlx4_en_get_ethtool_stats(struct net_device *dev,
 		if (bitmap_iterator_test(&it))
 			data[index++] = ((unsigned long *)&priv->pkstats)[i];
 
+	for (i = 0; i < NUM_XDP_STATS; i++, bitmap_iterator_inc(&it))
+		if (bitmap_iterator_test(&it))
+			data[index++] = ((unsigned long *)&priv->xdp_stats)[i];
+
 	for (i = 0; i < priv->tx_ring_num[TX]; i++) {
 		data[index++] = priv->tx_ring[TX][i]->packets;
 		data[index++] = priv->tx_ring[TX][i]->bytes;
@@ -412,6 +419,9 @@ static void mlx4_en_get_ethtool_stats(struct net_device *dev,
 		data[index++] = priv->rx_ring[i]->packets;
 		data[index++] = priv->rx_ring[i]->bytes;
 		data[index++] = priv->rx_ring[i]->dropped;
+		data[index++] = priv->rx_ring[i]->xdp_drop;
+		data[index++] = priv->rx_ring[i]->xdp_tx;
+		data[index++] = priv->rx_ring[i]->xdp_tx_full;
 	}
 	spin_unlock_bh(&priv->stats_lock);
 
@@ -474,6 +484,12 @@ static void mlx4_en_get_strings(struct net_device *dev,
 				strcpy(data + (index++) * ETH_GSTRING_LEN,
 				       main_strings[strings]);
 
+		for (i = 0; i < NUM_XDP_STATS; i++, strings++,
+		     bitmap_iterator_inc(&it))
+			if (bitmap_iterator_test(&it))
+				strcpy(data + (index++) * ETH_GSTRING_LEN,
+				       main_strings[strings]);
+
 		for (i = 0; i < priv->tx_ring_num[TX]; i++) {
 			sprintf(data + (index++) * ETH_GSTRING_LEN,
 				"tx%d_packets", i);
@@ -487,6 +503,12 @@ static void mlx4_en_get_strings(struct net_device *dev,
 				"rx%d_bytes", i);
 			sprintf(data + (index++) * ETH_GSTRING_LEN,
 				"rx%d_dropped", i);
+			sprintf(data + (index++) * ETH_GSTRING_LEN,
+				"rx%d_xdp_drop", i);
+			sprintf(data + (index++) * ETH_GSTRING_LEN,
+				"rx%d_xdp_tx", i);
+			sprintf(data + (index++) * ETH_GSTRING_LEN,
+				"rx%d_xdp_tx_full", i);
 		}
 		break;
 	case ETH_SS_PRIV_FLAGS:
@@ -1024,27 +1046,32 @@ static int mlx4_en_set_pauseparam(struct net_device *dev,
 {
 	struct mlx4_en_priv *priv = netdev_priv(dev);
 	struct mlx4_en_dev *mdev = priv->mdev;
+	u8 tx_pause, tx_ppp, rx_pause, rx_ppp;
 	int err;
 
 	if (pause->autoneg)
 		return -EINVAL;
 
-	priv->prof->tx_pause = pause->tx_pause != 0;
-	priv->prof->rx_pause = pause->rx_pause != 0;
+	tx_pause = !!(pause->tx_pause);
+	rx_pause = !!(pause->rx_pause);
+	rx_ppp = priv->prof->rx_ppp && !(tx_pause || rx_pause);
+	tx_ppp = priv->prof->tx_ppp && !(tx_pause || rx_pause);
+
 	err = mlx4_SET_PORT_general(mdev->dev, priv->port,
 				    priv->rx_skb_size + ETH_FCS_LEN,
-				    priv->prof->tx_pause,
-				    priv->prof->tx_ppp,
-				    priv->prof->rx_pause,
-				    priv->prof->rx_ppp);
-	if (err)
-		en_err(priv, "Failed setting pause params\n");
-	else
-		mlx4_en_update_pfc_stats_bitmap(mdev->dev, &priv->stats_bitmap,
-						priv->prof->rx_ppp,
-						priv->prof->rx_pause,
-						priv->prof->tx_ppp,
-						priv->prof->tx_pause);
+				    tx_pause, tx_ppp, rx_pause, rx_ppp);
+	if (err) {
+		en_err(priv, "Failed setting pause params, err = %d\n", err);
+		return err;
+	}
+
+	mlx4_en_update_pfc_stats_bitmap(mdev->dev, &priv->stats_bitmap,
+					rx_ppp, rx_pause, tx_ppp, tx_pause);
+
+	priv->prof->tx_pause = tx_pause;
+	priv->prof->rx_pause = rx_pause;
+	priv->prof->tx_ppp = tx_ppp;
+	priv->prof->rx_ppp = rx_ppp;
 
 	return err;
 }
@@ -1072,12 +1099,21 @@ static int mlx4_en_set_ringparam(struct net_device *dev,
 	if (param->rx_jumbo_pending || param->rx_mini_pending)
 		return -EINVAL;
 
+	if (param->rx_pending < MLX4_EN_MIN_RX_SIZE) {
+		en_warn(priv, "%s: rx_pending (%d) < min (%d)\n",
+			__func__, param->rx_pending,
+			MLX4_EN_MIN_RX_SIZE);
+		return -EINVAL;
+	}
+	if (param->tx_pending < MLX4_EN_MIN_TX_SIZE) {
+		en_warn(priv, "%s: tx_pending (%d) < min (%lu)\n",
+			__func__, param->tx_pending,
+			MLX4_EN_MIN_TX_SIZE);
+		return -EINVAL;
+	}
+
 	rx_size = roundup_pow_of_two(param->rx_pending);
-	rx_size = max_t(u32, rx_size, MLX4_EN_MIN_RX_SIZE);
-	rx_size = min_t(u32, rx_size, MLX4_EN_MAX_RX_SIZE);
 	tx_size = roundup_pow_of_two(param->tx_pending);
-	tx_size = max_t(u32, tx_size, MLX4_EN_MIN_TX_SIZE);
-	tx_size = min_t(u32, tx_size, MLX4_EN_MAX_TX_SIZE);
 
 	if (rx_size == (priv->port_up ? priv->rx_ring[0]->actual_size :
 					priv->rx_ring[0]->size) &&
@@ -1092,7 +1128,7 @@ static int mlx4_en_set_ringparam(struct net_device *dev,
 	memcpy(&new_prof, priv->prof, sizeof(struct mlx4_en_port_profile));
 	new_prof.tx_ring_size = tx_size;
 	new_prof.rx_ring_size = rx_size;
-	err = mlx4_en_try_alloc_resources(priv, tmp, &new_prof);
+	err = mlx4_en_try_alloc_resources(priv, tmp, &new_prof, true);
 	if (err)
 		goto out;
 
@@ -1524,8 +1560,6 @@ static int mlx4_en_flow_replace(struct net_device *dev,
 	struct mlx4_spec_list *spec, *tmp_spec;
 	u32 qpn;
 	u64 reg_id;
-	u32 location;
-	u64 ring_cookie;
 
 	struct mlx4_net_trans_rule rule = {
 		.queue_mode = MLX4_NET_TRANS_Q_FIFO,
@@ -1549,10 +1583,7 @@ static int mlx4_en_flow_replace(struct net_device *dev,
 				cmd->fs.ring_cookie);
 			return -EINVAL;
 		}
-		ring_cookie = array_index_nospec(cmd->fs.ring_cookie,
-						 priv->rx_ring_num);
-
-		qpn = priv->rss_map.qps[ring_cookie].qpn;
+		qpn = priv->rss_map.qps[cmd->fs.ring_cookie].qpn;
 		if (!qpn) {
 			en_warn(priv, "rxnfc: RX ring (%llu) is inactive\n",
 				cmd->fs.ring_cookie);
@@ -1564,8 +1595,7 @@ static int mlx4_en_flow_replace(struct net_device *dev,
 	if (err)
 		goto out_free_list;
 
-	location = array_index_nospec(cmd->fs.location, MAX_NUM_OF_FS_RULES);
-	loc_rule = &priv->ethtool_rules[location];
+	loc_rule = &priv->ethtool_rules[cmd->fs.location];
 	if (loc_rule->id) {
 		err = mlx4_flow_detach(priv->mdev->dev, loc_rule->id);
 		if (err) {
@@ -1603,13 +1633,11 @@ static int mlx4_en_flow_detach(struct net_device *dev,
 	int err = 0;
 	struct ethtool_flow_id *rule;
 	struct mlx4_en_priv *priv = netdev_priv(dev);
-	u32 location;
 
 	if (cmd->fs.location >= MAX_NUM_OF_FS_RULES)
 		return -EINVAL;
-	location = array_index_nospec(cmd->fs.location, MAX_NUM_OF_FS_RULES);
 
-	rule = &priv->ethtool_rules[location];
+	rule = &priv->ethtool_rules[cmd->fs.location];
 	if (!rule->id) {
 		err =  -ENOENT;
 		goto out;
@@ -1638,7 +1666,6 @@ static int mlx4_en_get_flow(struct net_device *dev, struct ethtool_rxnfc *cmd,
 
 	if (loc < 0 || loc >= MAX_NUM_OF_FS_RULES)
 		return -EINVAL;
-	loc = array_index_nospec(loc, MAX_NUM_OF_FS_RULES);
 
 	rule = &priv->ethtool_rules[loc];
 	if (rule->id)
@@ -1784,7 +1811,7 @@ static int mlx4_en_set_channels(struct net_device *dev,
 	new_prof.tx_ring_num[TX_XDP] = xdp_count;
 	new_prof.rx_ring_num = channel->rx_count;
 
-	err = mlx4_en_try_alloc_resources(priv, tmp, &new_prof);
+	err = mlx4_en_try_alloc_resources(priv, tmp, &new_prof, true);
 	if (err)
 		goto out;
 

@@ -961,10 +961,6 @@ struct xfrm_dst {
 	struct flow_cache_object flo;
 	struct xfrm_policy *pols[XFRM_POLICY_TYPE_MAX];
 	int num_pols, num_xfrms;
-#ifdef CONFIG_XFRM_SUB_POLICY
-	struct flowi *origin;
-	struct xfrm_selector *partner;
-#endif
 	u32 xfrm_genid;
 	u32 policy_genid;
 	u32 route_mtu_cached;
@@ -980,12 +976,6 @@ static inline void xfrm_dst_destroy(struct xfrm_dst *xdst)
 	dst_release(xdst->route);
 	if (likely(xdst->u.dst.xfrm))
 		xfrm_state_put(xdst->u.dst.xfrm);
-#ifdef CONFIG_XFRM_SUB_POLICY
-	kfree(xdst->origin);
-	xdst->origin = NULL;
-	kfree(xdst->partner);
-	xdst->partner = NULL;
-#endif
 }
 #endif
 
@@ -1548,8 +1538,6 @@ int xfrm4_protocol_register(struct xfrm4_protocol *handler, unsigned char protoc
 int xfrm4_protocol_deregister(struct xfrm4_protocol *handler, unsigned char protocol);
 int xfrm4_tunnel_register(struct xfrm_tunnel *handler, unsigned short family);
 int xfrm4_tunnel_deregister(struct xfrm_tunnel *handler, unsigned short family);
-int xfrm4_mode_tunnel_input_register(struct xfrm_tunnel_notifier *handler);
-int xfrm4_mode_tunnel_input_deregister(struct xfrm_tunnel_notifier *handler);
 int xfrm6_mode_tunnel_input_register(struct xfrm_tunnel_notifier *handler);
 int xfrm6_mode_tunnel_input_deregister(struct xfrm_tunnel_notifier *handler);
 int xfrm6_extract_header(struct sk_buff *skb);

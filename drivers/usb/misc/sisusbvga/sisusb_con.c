@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: (GPL-2.0 OR BSD-3-Clause)
 /*
  * sisusb - usb kernel driver for SiS315(E) based USB2VGA dongles
  *
@@ -65,7 +66,6 @@
 #include <linux/ioport.h>
 #include <linux/interrupt.h>
 #include <linux/vmalloc.h>
-#include <linux/nospec.h>
 
 #include "sisusb.h"
 #include "sisusb_init.h"
@@ -170,7 +170,6 @@ sisusb_get_sisusb_lock_and_check(unsigned short console)
 	if (in_atomic())
 		return NULL;
 
-	console = array_index_nospec(console, MAX_NR_CONSOLES);
 	sisusb = sisusb_get_sisusb(console);
 	if (!sisusb)
 		return NULL;
@@ -818,7 +817,7 @@ sisusbcon_scroll_area(struct vc_data *c, struct sisusb_usb_data *sisusb,
 
 	mutex_unlock(&sisusb->lock);
 
-	return 1;
+	return true;
 }
 
 /* Interface routine */
@@ -975,7 +974,7 @@ sisusbcon_set_origin(struct vc_data *c)
 
 	mutex_unlock(&sisusb->lock);
 
-	return 1;
+	return true;
 }
 
 /* Interface routine */

@@ -44,8 +44,7 @@ static int destroy_cq(struct c4iw_rdev *rdev, struct t4_cq *cq,
 	wr_len = sizeof *res_wr + sizeof *res;
 	set_wr_txq(skb, CPL_PRIORITY_CONTROL, 0);
 
-	res_wr = (struct fw_ri_res_wr *)__skb_put(skb, wr_len);
-	memset(res_wr, 0, wr_len);
+	res_wr = __skb_put_zero(skb, wr_len);
 	res_wr->op_nres = cpu_to_be32(
 			FW_WR_OP_V(FW_RI_RES_WR) |
 			FW_RI_RES_WR_NRES_V(1) |
@@ -111,8 +110,7 @@ static int create_cq(struct c4iw_rdev *rdev, struct t4_cq *cq,
 	}
 	set_wr_txq(skb, CPL_PRIORITY_CONTROL, 0);
 
-	res_wr = (struct fw_ri_res_wr *)__skb_put(skb, wr_len);
-	memset(res_wr, 0, wr_len);
+	res_wr = __skb_put_zero(skb, wr_len);
 	res_wr->op_nres = cpu_to_be32(
 			FW_WR_OP_V(FW_RI_RES_WR) |
 			FW_RI_RES_WR_NRES_V(1) |
@@ -317,7 +315,7 @@ static void advance_oldest_read(struct t4_wq *wq)
  * Deal with out-of-order and/or completions that complete
  * prior unsignalled WRs.
  */
-void c4iw_flush_hw_cq(struct c4iw_cq *chp)
+void c4iw_flush_hw_cq(struct c4iw_cq *chp, struct c4iw_qp *flush_qhp)
 {
 	struct t4_cqe *hw_cqe, *swcqe, read_cqe;
 	struct c4iw_qp *qhp;
@@ -340,6 +338,13 @@ void c4iw_flush_hw_cq(struct c4iw_cq *chp)
 		 */
 		if (qhp == NULL)
 			goto next_cqe;
+
+		if (flush_qhp != qhp) {
+			spin_lock(&qhp->lock);
+
+			if (qhp->wq.flushed == 1)
+				goto next_cqe;
+		}
 
 		if (CQE_OPCODE(hw_cqe) == FW_RI_TERMINATE)
 			goto next_cqe;
@@ -392,6 +397,8 @@ void c4iw_flush_hw_cq(struct c4iw_cq *chp)
 next_cqe:
 		t4_hwcq_consume(&chp->cq);
 		ret = t4_next_hw_cqe(&chp->cq, &hw_cqe);
+		if (qhp && flush_qhp != qhp)
+			spin_unlock(&qhp->lock);
 	}
 }
 

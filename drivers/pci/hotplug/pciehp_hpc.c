@@ -668,7 +668,7 @@ static irqreturn_t pcie_isr(int irq, void *dev_id)
 	return handled;
 }
 
-void pcie_enable_notification(struct controller *ctrl)
+static void pcie_enable_notification(struct controller *ctrl)
 {
 	u16 cmd, mask;
 
@@ -704,6 +704,17 @@ void pcie_enable_notification(struct controller *ctrl)
 	pcie_write_cmd_nowait(ctrl, cmd, mask);
 	ctrl_dbg(ctrl, "%s: SLOTCTRL %x write cmd %x\n", __func__,
 		 pci_pcie_cap(ctrl->pcie->port) + PCI_EXP_SLTCTL, cmd);
+}
+
+void pcie_reenable_notification(struct controller *ctrl)
+{
+	/*
+	 * Clear both Presence and Data Link Layer Changed to make sure
+	 * those events still fire after we have re-enabled them.
+	 */
+	pcie_capability_write_word(ctrl->pcie->port, PCI_EXP_SLTSTA,
+				   PCI_EXP_SLTSTA_PDC | PCI_EXP_SLTSTA_DLLSC);
+	pcie_enable_notification(ctrl);
 }
 
 static void pcie_disable_notification(struct controller *ctrl)
@@ -854,11 +865,11 @@ struct controller *pcie_init(struct pcie_device *dev)
 	if (link_cap & PCI_EXP_LNKCAP_DLLLARC)
 		ctrl->link_active_reporting = 1;
 
-	/* Clear all remaining event bits in Slot Status register */
+	/* Clear all remaining event bits in Slot Status register. */
 	pcie_capability_write_word(pdev, PCI_EXP_SLTSTA,
 		PCI_EXP_SLTSTA_ABP | PCI_EXP_SLTSTA_PFD |
-		PCI_EXP_SLTSTA_MRLSC | PCI_EXP_SLTSTA_PDC |
-		PCI_EXP_SLTSTA_CC | PCI_EXP_SLTSTA_DLLSC);
+		PCI_EXP_SLTSTA_MRLSC | PCI_EXP_SLTSTA_CC |
+		PCI_EXP_SLTSTA_DLLSC | PCI_EXP_SLTSTA_PDC);
 
 	ctrl_info(ctrl, "Slot #%d AttnBtn%c PwrCtrl%c MRL%c AttnInd%c PwrInd%c HotPlug%c Surprise%c Interlock%c NoCompl%c LLActRep%c\n",
 		(slot_cap & PCI_EXP_SLTCAP_PSN) >> 19,

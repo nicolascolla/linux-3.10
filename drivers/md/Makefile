@@ -18,8 +18,11 @@ dm-cache-y	+= dm-cache-target.o dm-cache-metadata.o dm-cache-policy.o \
 dm-cache-smq-y   += dm-cache-policy-smq.o
 dm-era-y	+= dm-era-target.o
 dm-verity-y	+= dm-verity-target.o
-md-mod-y	+= md.o bitmap.o
+md-mod-y	+= md.o md-bitmap.o
 raid456-y	+= raid5.o raid5-cache.o raid5-ppl.o
+linear-y	+= md-linear.o
+multipath-y	+= md-multipath.o
+faulty-y	+= md-faulty.o
 
 # Note: link order is important.  All raid personalities
 # and must come before md.o, as they each initialise 
@@ -57,6 +60,7 @@ obj-$(CONFIG_DM_VERITY)		+= dm-verity.o
 obj-$(CONFIG_DM_CACHE)		+= dm-cache.o
 obj-$(CONFIG_DM_CACHE_SMQ)	+= dm-cache-smq.o
 obj-$(CONFIG_DM_ERA)		+= dm-era.o
+obj-$(CONFIG_DM_LOG_WRITES)	+= dm-log-writes.o
 
 ifeq ($(CONFIG_DM_UEVENT),y)
 dm-mod-objs			+= dm-uevent.o

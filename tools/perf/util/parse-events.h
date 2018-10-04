@@ -90,6 +90,9 @@ struct parse_events_term {
 	/* error string indexes for within parsed string */
 	int err_term;
 	int err_val;
+
+	/* Coming from implicit alias */
+	bool weak;
 };
 
 struct parse_events_error {
@@ -98,15 +101,12 @@ struct parse_events_error {
 	char *help;	/* optional help string */
 };
 
-struct parse_events_evlist {
+struct parse_events_state {
 	struct list_head	   list;
 	int			   idx;
 	int			   nr_groups;
 	struct parse_events_error *error;
-};
-
-struct parse_events_terms {
-	struct list_head *terms;
+	struct list_head	  *terms;
 };
 
 void parse_events__shrink_config_terms(void);
@@ -131,7 +131,7 @@ int parse_events_add_tracepoint(struct list_head *list, int *idx,
 				const char *sys, const char *event,
 				struct parse_events_error *error,
 				struct list_head *head_config);
-int parse_events_add_numeric(struct parse_events_evlist *data,
+int parse_events_add_numeric(struct parse_events_state *parse_state,
 			     struct list_head *list,
 			     u32 type, u64 config,
 			     struct list_head *head_config);
@@ -141,11 +141,11 @@ int parse_events_add_cache(struct list_head *list, int *idx,
 			   struct list_head *head_config);
 int parse_events_add_breakpoint(struct list_head *list, int *idx,
 				void *ptr, char *type, u64 len);
-int parse_events_add_pmu(struct parse_events_evlist *data,
+int parse_events_add_pmu(struct parse_events_state *parse_state,
 			 struct list_head *list, char *name,
 			 struct list_head *head_config);
 
-int parse_events_multi_pmu_add(struct parse_events_evlist *data,
+int parse_events_multi_pmu_add(struct parse_events_state *parse_state,
 			       char *str,
 			       struct list_head **listp);
 
@@ -157,7 +157,7 @@ perf_pmu__parse_check(const char *name);
 void parse_events__set_leader(char *name, struct list_head *list);
 void parse_events_update_lists(struct list_head *list_event,
 			       struct list_head *list_all);
-void parse_events_evlist_error(struct parse_events_evlist *data,
+void parse_events_evlist_error(struct parse_events_state *parse_state,
 			       int idx, const char *str);
 
 void print_events(const char *event_glob, bool name_only, bool quiet,
@@ -181,6 +181,9 @@ int is_valid_tracepoint(const char *event_string);
 
 int valid_event_mount(const char *eventfs);
 char *parse_events_formats_error_string(char *additional_terms);
+
+void parse_events_print_error(struct parse_events_error *err,
+			      const char *event);
 
 #ifdef HAVE_LIBELF_SUPPORT
 /*

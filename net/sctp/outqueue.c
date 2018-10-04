@@ -360,10 +360,12 @@ static int sctp_prsctp_prune_sent(struct sctp_association *asoc,
 	struct sctp_chunk *chk, *temp;
 
 	list_for_each_entry_safe(chk, temp, queue, transmitted_list) {
-		if (!SCTP_PR_PRIO_ENABLED(chk->sinfo.sinfo_flags) ||
-		    chk->sinfo.sinfo_timetolive <= sinfo->sinfo_timetolive)
+		if (!chk->msg->abandoned &&
+		    (!SCTP_PR_PRIO_ENABLED(chk->sinfo.sinfo_flags) ||
+		     chk->sinfo.sinfo_timetolive <= sinfo->sinfo_timetolive))
 			continue;
 
+		chk->msg->abandoned = 1;
 		list_del_init(&chk->transmitted_list);
 		sctp_insert_list(&asoc->outqueue.abandoned,
 				 &chk->transmitted_list);
@@ -371,7 +373,8 @@ static int sctp_prsctp_prune_sent(struct sctp_association *asoc,
 		asoc->sent_cnt_removable--;
 		asoc->abandoned_sent[SCTP_PR_INDEX(PRIO)]++;
 
-		if (!chk->tsn_gap_acked) {
+		if (queue != &asoc->outqueue.retransmit &&
+		    !chk->tsn_gap_acked) {
 			if (chk->transport)
 				chk->transport->flight_size -=
 						sctp_data_size(chk);
@@ -389,17 +392,21 @@ static int sctp_prsctp_prune_sent(struct sctp_association *asoc,
 }
 
 static int sctp_prsctp_prune_unsent(struct sctp_association *asoc,
-				    struct sctp_sndrcvinfo *sinfo,
-				    struct list_head *queue, int msg_len)
+				    struct sctp_sndrcvinfo *sinfo, int msg_len)
 {
+	struct sctp_outq *q = &asoc->outqueue;
 	struct sctp_chunk *chk, *temp;
 
-	list_for_each_entry_safe(chk, temp, queue, list) {
-		if (!SCTP_PR_PRIO_ENABLED(chk->sinfo.sinfo_flags) ||
-		    chk->sinfo.sinfo_timetolive <= sinfo->sinfo_timetolive)
+	list_for_each_entry_safe(chk, temp, &q->out_chunk_list, list) {
+		if (!chk->msg->abandoned &&
+		    (!(chk->chunk_hdr->flags & SCTP_DATA_FIRST_FRAG) ||
+		     !SCTP_PR_PRIO_ENABLED(chk->sinfo.sinfo_flags) ||
+		     chk->sinfo.sinfo_timetolive <= sinfo->sinfo_timetolive))
 			continue;
 
+		chk->msg->abandoned = 1;
 		list_del_init(&chk->list);
+		q->out_qlen -= chk->skb->len;
 		asoc->sent_cnt_removable--;
 		asoc->abandoned_unsent[SCTP_PR_INDEX(PRIO)]++;
 
@@ -438,9 +445,7 @@ void sctp_prsctp_prune(struct sctp_association *asoc,
 			return;
 	}
 
-	sctp_prsctp_prune_unsent(asoc, sinfo,
-				 &asoc->outqueue.out_chunk_list,
-				 msg_len);
+	sctp_prsctp_prune_unsent(asoc, sinfo, msg_len);
 }
 
 /* Mark all the eligible packets on a transport for retransmission.  */
@@ -1268,10 +1273,8 @@ int sctp_outq_sack(struct sctp_outq *q, struct sctp_chunk *chunk)
 
 	/* Get the highest TSN in the sack. */
 	highest_tsn = sack_ctsn;
-	if (gap_ack_blocks) {
-		barrier_nospec();
+	if (gap_ack_blocks)
 		highest_tsn += ntohs(frags[gap_ack_blocks - 1].gab.end);
-	}
 
 	if (TSN_lt(asoc->highest_sacked, highest_tsn))
 		asoc->highest_sacked = highest_tsn;
@@ -1420,7 +1423,8 @@ static void sctp_check_transmitted(struct sctp_outq *q,
 			/* If this chunk has not been acked, stop
 			 * considering it as 'outstanding'.
 			 */
-			if (!tchunk->tsn_gap_acked) {
+			if (transmitted_queue != &q->retransmit &&
+			    !tchunk->tsn_gap_acked) {
 				if (tchunk->transport)
 					tchunk->transport->flight_size -=
 							sctp_data_size(tchunk);

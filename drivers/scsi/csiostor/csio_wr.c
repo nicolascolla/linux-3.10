@@ -36,7 +36,6 @@
 #include <linux/string.h>
 #include <linux/compiler.h>
 #include <linux/slab.h>
-#include <linux/nospec.h>
 #include <asm/page.h>
 #include <linux/cache.h>
 
@@ -1172,7 +1171,6 @@ csio_wr_process_iq(struct csio_hw *hw, struct csio_q *q,
 		case X_RSPD_TYPE_INTR:
 			fw_qid = ntohl(ftr->pldbuflen_qid);
 			qid = fw_qid - wrm->fw_iq_start;
-			qid = array_index_nospec(qid, CSIO_MAX_IQ);
 			q_completed = hw->wrm.intr_map[qid];
 
 			if (unlikely(qid ==

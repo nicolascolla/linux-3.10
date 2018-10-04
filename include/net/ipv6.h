@@ -16,7 +16,6 @@
 #include <linux/ipv6.h>
 #include <linux/hardirq.h>
 #include <linux/jhash.h>
-#include <linux/nospec.h>
 #include <net/if_inet6.h>
 #include <net/ndisc.h>
 #include <net/flow.h>
@@ -392,17 +391,13 @@ static inline void ipv6_addr_prefix(struct in6_addr *pfx,
 				    int plen)
 {
 	/* caller must guarantee 0 <= plen <= 128 */
-	int o, b;
-
-	o = array_index_nospec(plen >> 3, 17);
-	b = plen & 0x7;
+	int o = plen >> 3,
+	    b = plen & 0x7;
 
 	memset(pfx->s6_addr, 0, sizeof(pfx->s6_addr));
 	memcpy(pfx->s6_addr, addr, o);
-	if (b != 0) {
-		o = array_index_nospec(o, 16);
+	if (b != 0)
 		pfx->s6_addr[o] = addr->s6_addr[o] & (0xff00 >> b);
-	}
 }
 
 static inline void ipv6_addr_prefix_copy(struct in6_addr *addr,

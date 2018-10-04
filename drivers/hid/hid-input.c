@@ -446,9 +446,9 @@ static bool hidinput_setup_battery(struct hid_device *dev, unsigned report_type,
 		kfree(psy_desc->name);
 		kfree(psy_desc);
 		dev->battery = NULL;
+	} else {
+		power_supply_powers(dev->battery, &dev->dev);
 	}
-
-	power_supply_powers(dev->battery, &dev->dev);
 
 out:
 	return true;
@@ -456,12 +456,15 @@ out:
 
 static void hidinput_cleanup_battery(struct hid_device *dev)
 {
+	const struct power_supply_desc *psy_desc;
+
 	if (!dev->battery)
 		return;
 
+	psy_desc = dev->battery->desc;
 	power_supply_unregister(dev->battery);
-	kfree(dev->battery->desc->name);
-	kfree(dev->battery->desc);
+	kfree(psy_desc->name);
+	kfree(psy_desc);
 	dev->battery = NULL;
 }
 #else  /* !CONFIG_HID_BATTERY_STRENGTH */
@@ -608,6 +611,12 @@ static void hidinput_configure_usage(struct hid_input *hidinput, struct hid_fiel
 		/* These usage IDs map directly to the usage codes. */
 		case HID_GD_X: case HID_GD_Y: case HID_GD_Z:
 		case HID_GD_RX: case HID_GD_RY: case HID_GD_RZ:
+			if (field->flags & HID_MAIN_ITEM_RELATIVE)
+				map_rel(usage->hid & 0xf);
+			else
+				map_abs_clear(usage->hid & 0xf);
+			break;
+
 		case HID_GD_SLIDER: case HID_GD_DIAL: case HID_GD_WHEEL:
 			if (field->flags & HID_MAIN_ITEM_RELATIVE)
 				map_rel(usage->hid & 0xf);
@@ -698,7 +707,10 @@ static void hidinput_configure_usage(struct hid_input *hidinput, struct hid_fiel
 			break;
 
 		case 0x5b: /* TransducerSerialNumber */
-			set_bit(MSC_SERIAL, input->mscbit);
+			usage->type = EV_MSC;
+			usage->code = MSC_SERIAL;
+			bit = input->mscbit;
+			max = MSC_MAX;
 			break;
 
 		default:  goto unknown;
@@ -1167,7 +1179,8 @@ static void hidinput_led_worker(struct work_struct *work)
 					      led_work);
 	struct hid_field *field;
 	struct hid_report *report;
-	int len, ret;
+	int ret;
+	u32 len;
 	__u8 *buf;
 
 	field = hidinput_get_led_field(hid);

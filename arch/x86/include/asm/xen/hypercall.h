@@ -38,7 +38,6 @@
 #include <linux/errno.h>
 #include <linux/string.h>
 #include <linux/types.h>
-#include <linux/nospec.h>
 
 #include <trace/events/xen.h>
 
@@ -207,8 +206,6 @@ extern struct { char _entry[32]; } hypercall_page[];
 	(type)__res;							\
 })
 
-#define HYPERCALL_ENTRIES (4096/32)
-
 static inline long
 privcmd_call(unsigned call,
 	     unsigned long a1, unsigned long a2,
@@ -217,10 +214,6 @@ privcmd_call(unsigned call,
 {
 	__HYPERCALL_DECLS;
 	__HYPERCALL_5ARG(a1, a2, a3, a4, a5);
-
-	if (call >= HYPERCALL_ENTRIES)
-		return -EINVAL;
-	call = array_index_nospec(call, HYPERCALL_ENTRIES);
 
 	asm volatile(CALL_NOSPEC
 		     : __HYPERCALL_5PARAM

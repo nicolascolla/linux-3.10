@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0
 
 /*
  * xHCI host controller driver
@@ -6,19 +7,6 @@
  *
  * Author: Sarah Sharp
  * Some code borrowed from the Linux EHCI driver.
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License version 2 as
- * published by the Free Software Foundation.
- *
- * This program is distributed in the hope that it will be useful, but
- * WITHOUT ANY WARRANTY; without even the implied warranty of MERCHANTABILITY
- * or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License
- * for more details.
- *
- * You should have received a copy of the GNU General Public License
- * along with this program; if not, write to the Free Software Foundation,
- * Inc., 675 Mass Ave, Cambridge, MA 02139, USA.
  */
 
 #ifndef __LINUX_XHCI_HCD_H
@@ -131,6 +119,8 @@ struct xhci_cap_regs {
 #define HCC_MAX_PSA(p)		(1 << ((((p) >> 12) & 0xf) + 1))
 /* Extended Capabilities pointer from PCI base - section 5.3.6 */
 #define HCC_EXT_CAPS(p)		XHCI_HCC_EXT_CAPS(p)
+
+#define CTX_SIZE(_hcc)		(HCC_64BYTE_CONTEXT(_hcc) ? 64 : 32)
 
 /* db_off bitmask - bits 0:1 reserved */
 #define	DBOFF_MASK	(~0x3)
@@ -312,12 +302,19 @@ struct xhci_op_regs {
  */
 #define PORT_PLS_MASK	(0xf << 5)
 #define XDEV_U0		(0x0 << 5)
+#define XDEV_U1		(0x1 << 5)
 #define XDEV_U2		(0x2 << 5)
 #define XDEV_U3		(0x3 << 5)
+#define XDEV_DISABLED	(0x4 << 5)
+#define XDEV_RXDETECT	(0x5 << 5)
 #define XDEV_INACTIVE	(0x6 << 5)
 #define XDEV_POLLING	(0x7 << 5)
-#define XDEV_COMP_MODE  (0xa << 5)
+#define XDEV_RECOVERY	(0x8 << 5)
+#define XDEV_HOT_RESET	(0x9 << 5)
+#define XDEV_COMP_MODE	(0xa << 5)
+#define XDEV_TEST_MODE	(0xb << 5)
 #define XDEV_RESUME	(0xf << 5)
+
 /* true: port has power (see HCC_PPC) */
 #define PORT_POWER	(1 << 9)
 /* bits 10:13 indicate device speed:
@@ -426,6 +423,7 @@ struct xhci_op_regs {
 #define	PORT_L1DS_MASK		(0xff << 8)
 #define	PORT_L1DS(p)		(((p) & 0xff) << 8)
 #define	PORT_HLE		(1 << 16)
+#define PORT_TEST_MODE_SHIFT	28
 
 /* USB3 Protocol PORTLI  Port Link Information */
 #define PORT_RX_LANES(p)	(((p) >> 16) & 0xf)
@@ -618,6 +616,7 @@ struct xhci_slot_ctx {
 #define ROUTE_STRING_MASK	(0xfffff)
 /* Device speed - values defined by PORTSC Device Speed field - 20:23 */
 #define DEV_SPEED	(0xf << 20)
+#define GET_DEV_SPEED(n) (((n) & DEV_SPEED) >> 20)
 /* bit 24 reserved */
 /* Is this LS/FS device connected through a HS hub? - bit 25 */
 #define DEV_MTT		(0x1 << 25)
@@ -638,6 +637,7 @@ struct xhci_slot_ctx {
 #define DEVINFO_TO_ROOT_HUB_PORT(p)	(((p) >> 16) & 0xff)
 /* Maximum number of ports under a hub device */
 #define XHCI_MAX_PORTS(p)	(((p) & 0xff) << 24)
+#define DEVINFO_TO_MAX_PORTS(p)	(((p) & (0xff << 24)) >> 24)
 
 /* tt_info bitmasks */
 /*
@@ -652,6 +652,7 @@ struct xhci_slot_ctx {
  */
 #define TT_PORT		(0xff << 8)
 #define TT_THINK_TIME(p)	(((p) & 0x3) << 16)
+#define GET_TT_THINK_TIME(p)	(((p) & (0x3 << 16)) >> 16)
 
 /* dev_state bitmasks */
 /* USB device address - assigned by the HC */
@@ -725,6 +726,8 @@ struct xhci_ep_ctx {
 #define EP_MAXPSTREAMS(p)	(((p) << 10) & EP_MAXPSTREAMS_MASK)
 /* Endpoint is set up with a Linear Stream Array (vs. Secondary Stream Array) */
 #define	EP_HAS_LSA		(1 << 15)
+/* hosts with LEC=1 use bits 31:24 as ESIT high bits. */
+#define CTX_TO_MAX_ESIT_PAYLOAD_HI(p)	(((p) >> 24) & 0xff)
 
 /* ep_info2 bitmasks */
 /*
@@ -921,8 +924,6 @@ struct xhci_virt_ep {
 #define EP_GETTING_NO_STREAMS	(1 << 5)
 	/* ----  Related to URB cancellation ---- */
 	struct list_head	cancelled_td_list;
-	struct xhci_td		*stopped_td;
-	unsigned int		stopped_stream;
 	/* Watchdog timer for stop endpoint command to cancel URBs */
 	struct timer_list	stop_cmd_timer;
 	struct xhci_hcd		*xhci;
@@ -990,10 +991,6 @@ struct xhci_virt_device {
 	struct xhci_container_ctx       *out_ctx;
 	/* Used for addressing devices and configuration changes */
 	struct xhci_container_ctx       *in_ctx;
-	/* Rings saved to ensure old alt settings can be re-instated */
-	struct xhci_ring		**ring_cache;
-	int				num_rings_cached;
-#define	XHCI_MAX_RINGS_CACHED	31
 	struct xhci_virt_ep		eps[31];
 	u8				fake_port;
 	u8				real_port;
@@ -1001,6 +998,8 @@ struct xhci_virt_device {
 	struct xhci_tt_bw_info		*tt_info;
 	/* The current max exit latency for the enabled USB3 link states. */
 	u16				current_mel;
+	/* Used for the debugfs interfaces. */
+	void				*debugfs_private;
 };
 
 /*
@@ -1206,6 +1205,11 @@ struct xhci_event_cmd {
 
 /* Stop Ring - Transfer State Preserve */
 #define TRB_TSP		(1<<9)
+
+enum xhci_ep_reset_type {
+	EP_HARD_RESET,
+	EP_SOFT_RESET,
+};
 
 /* Force Event */
 #define TRB_TO_VF_INTR_TARGET(p)	(((p) & (0x3ff << 22)) >> 22)
@@ -1524,6 +1528,7 @@ struct xhci_dequeue_state {
 	struct xhci_segment *new_deq_seg;
 	union xhci_trb *new_deq_ptr;
 	int new_cycle_state;
+	unsigned int stream_id;
 };
 
 enum xhci_ring_type {
@@ -1563,10 +1568,8 @@ struct xhci_ring {
 	struct xhci_segment	*last_seg;
 	union  xhci_trb		*enqueue;
 	struct xhci_segment	*enq_seg;
-	unsigned int		enq_updates;
 	union  xhci_trb		*dequeue;
 	struct xhci_segment	*deq_seg;
-	unsigned int		deq_updates;
 	struct list_head	td_list;
 	/*
 	 * Write the cycle state into the TRB cycle field to give ownership of
@@ -1605,7 +1608,6 @@ struct xhci_scratchpad {
 	u64 *sp_array;
 	dma_addr_t sp_dma;
 	void **sp_buffers;
-	dma_addr_t *sp_dma_buffers;
 };
 
 struct urb_priv {
@@ -1674,7 +1676,7 @@ struct xhci_bus_state {
 
 static inline unsigned int hcd_index(struct usb_hcd *hcd)
 {
-	if (hcd->speed == HCD_USB3)
+	if (hcd->speed >= HCD_USB3)
 		return 0;
 	else
 		return 1;
@@ -1716,6 +1718,8 @@ struct xhci_hcd {
 	u8		max_interrupters;
 	u8		max_ports;
 	u8		isoc_threshold;
+	/* imod_interval in ns (I * 250ns) */
+	u32		imod_interval;
 	int		event_ring_max;
 	/* 4KB min, 128MB max */
 	int		page_size;
@@ -1723,7 +1727,6 @@ struct xhci_hcd {
 	int		page_shift;
 	/* msi-x vectors */
 	int		msix_count;
-	struct msix_entry	*msix_entries;
 	/* optional clock */
 	struct clk		*clk;
 	/* data structures */
@@ -1819,7 +1822,10 @@ struct xhci_hcd {
 #define XHCI_MISSING_CAS	(1 << 24)
 /* For controller with a broken Port Disable implementation */
 #define XHCI_BROKEN_PORT_PED	(1 << 25)
+#define XHCI_LIMIT_ENDPOINT_INTERVAL_7	(1 << 26)
+/* Reserved. It was XHCI_U2_DISABLE_WAKE */
 #define XHCI_ASMEDIA_MODIFY_FLOWCONTROL	(1 << 28)
+#define XHCI_HW_LPM_DISABLE	(1 << 29)
 
 	unsigned int		num_active_eps;
 	unsigned int		limit_active_eps;
@@ -1845,9 +1851,15 @@ struct xhci_hcd {
 	/* Compliance Mode Recovery Data */
 	struct timer_list	comp_mode_recovery_timer;
 	u32			port_status_u0;
+	u16			test_mode;
 /* Compliance Mode Timer Triggered every 2 seconds */
 #define COMP_MODE_RCVRY_MSECS 2000
 
+	struct dentry		*debugfs_root;
+	struct dentry		*debugfs_slots;
+	struct list_head	regset_list;
+
+	void			*dbc;
 	/* platform-specific data -- must come last */
 	unsigned long		priv[0] __aligned(sizeof(s64));
 };
@@ -1916,23 +1928,8 @@ static inline int xhci_link_trb_quirk(struct xhci_hcd *xhci)
 }
 
 /* xHCI debugging */
-void xhci_print_ir_set(struct xhci_hcd *xhci, int set_num);
-void xhci_print_registers(struct xhci_hcd *xhci);
-void xhci_dbg_regs(struct xhci_hcd *xhci);
-void xhci_print_run_regs(struct xhci_hcd *xhci);
-void xhci_print_trb_offsets(struct xhci_hcd *xhci, union xhci_trb *trb);
-void xhci_debug_trb(struct xhci_hcd *xhci, union xhci_trb *trb);
-void xhci_debug_segment(struct xhci_hcd *xhci, struct xhci_segment *seg);
-void xhci_debug_ring(struct xhci_hcd *xhci, struct xhci_ring *ring);
-void xhci_dbg_erst(struct xhci_hcd *xhci, struct xhci_erst *erst);
-void xhci_dbg_cmd_ptrs(struct xhci_hcd *xhci);
-void xhci_dbg_ring_ptrs(struct xhci_hcd *xhci, struct xhci_ring *ring);
-void xhci_dbg_ctx(struct xhci_hcd *xhci, struct xhci_container_ctx *ctx, unsigned int last_ep);
 char *xhci_get_slot_state(struct xhci_hcd *xhci,
 		struct xhci_container_ctx *ctx);
-void xhci_dbg_ep_rings(struct xhci_hcd *xhci,
-		unsigned int slot_id, unsigned int ep_index,
-		struct xhci_virt_ep *ep);
 void xhci_dbg_trace(struct xhci_hcd *xhci, void (*trace)(struct va_format *),
 			const char *fmt, ...);
 
@@ -1946,16 +1943,8 @@ void xhci_copy_ep0_dequeue_into_input_ctx(struct xhci_hcd *xhci,
 		struct usb_device *udev);
 unsigned int xhci_get_endpoint_index(struct usb_endpoint_descriptor *desc);
 unsigned int xhci_get_endpoint_address(unsigned int ep_index);
-unsigned int xhci_get_endpoint_flag(struct usb_endpoint_descriptor *desc);
-unsigned int xhci_get_endpoint_flag_from_index(unsigned int ep_index);
 unsigned int xhci_last_valid_endpoint(u32 added_ctxs);
 void xhci_endpoint_zero(struct xhci_hcd *xhci, struct xhci_virt_device *virt_dev, struct usb_host_endpoint *ep);
-void xhci_drop_ep_from_interval_table(struct xhci_hcd *xhci,
-		struct xhci_bw_info *ep_bw,
-		struct xhci_interval_bw_table *bw_table,
-		struct usb_device *udev,
-		struct xhci_virt_ep *virt_ep,
-		struct xhci_tt_bw_info *tt_info);
 void xhci_update_tt_active_eps(struct xhci_hcd *xhci,
 		struct xhci_virt_device *virt_dev,
 		int old_active_eps);
@@ -1974,10 +1963,18 @@ void xhci_slot_copy(struct xhci_hcd *xhci,
 int xhci_endpoint_init(struct xhci_hcd *xhci, struct xhci_virt_device *virt_dev,
 		struct usb_device *udev, struct usb_host_endpoint *ep,
 		gfp_t mem_flags);
+struct xhci_ring *xhci_ring_alloc(struct xhci_hcd *xhci,
+		unsigned int num_segs, unsigned int cycle_state,
+		enum xhci_ring_type type, unsigned int max_packet, gfp_t flags);
 void xhci_ring_free(struct xhci_hcd *xhci, struct xhci_ring *ring);
 int xhci_ring_expansion(struct xhci_hcd *xhci, struct xhci_ring *ring,
-				unsigned int num_trbs, gfp_t flags);
-void xhci_free_or_cache_endpoint_ring(struct xhci_hcd *xhci,
+		unsigned int num_trbs, gfp_t flags);
+int xhci_alloc_erst(struct xhci_hcd *xhci,
+		struct xhci_ring *evt_ring,
+		struct xhci_erst *erst,
+		gfp_t flags);
+void xhci_free_erst(struct xhci_hcd *xhci, struct xhci_erst *erst);
+void xhci_free_endpoint_ring(struct xhci_hcd *xhci,
 		struct xhci_virt_device *virt_dev,
 		unsigned int ep_index);
 struct xhci_stream_info *xhci_alloc_stream_info(struct xhci_hcd *xhci,
@@ -2001,64 +1998,40 @@ struct xhci_ring *xhci_stream_id_to_ring(
 		unsigned int ep_index,
 		unsigned int stream_id);
 struct xhci_command *xhci_alloc_command(struct xhci_hcd *xhci,
-		bool allocate_in_ctx, bool allocate_completion,
-		gfp_t mem_flags);
+		bool allocate_completion, gfp_t mem_flags);
+struct xhci_command *xhci_alloc_command_with_ctx(struct xhci_hcd *xhci,
+		bool allocate_completion, gfp_t mem_flags);
 void xhci_urb_free_priv(struct urb_priv *urb_priv);
 void xhci_free_command(struct xhci_hcd *xhci,
 		struct xhci_command *command);
+struct xhci_container_ctx *xhci_alloc_container_ctx(struct xhci_hcd *xhci,
+		int type, gfp_t flags);
+void xhci_free_container_ctx(struct xhci_hcd *xhci,
+		struct xhci_container_ctx *ctx);
 
 /* xHCI host controller glue */
 typedef void (*xhci_get_quirks_t)(struct device *, struct xhci_hcd *);
 int xhci_handshake(void __iomem *ptr, u32 mask, u32 done, int usec);
 void xhci_quiesce(struct xhci_hcd *xhci);
 int xhci_halt(struct xhci_hcd *xhci);
+int xhci_start(struct xhci_hcd *xhci);
 int xhci_reset(struct xhci_hcd *xhci);
-int xhci_init(struct usb_hcd *hcd);
 int xhci_run(struct usb_hcd *hcd);
-void xhci_stop(struct usb_hcd *hcd);
-void xhci_shutdown(struct usb_hcd *hcd);
 int xhci_gen_setup(struct usb_hcd *hcd, xhci_get_quirks_t get_quirks);
 void xhci_init_driver(struct hc_driver *drv,
 		      const struct xhci_driver_overrides *over);
+int xhci_disable_slot(struct xhci_hcd *xhci, u32 slot_id);
 
-#ifdef	CONFIG_PM
 int xhci_suspend(struct xhci_hcd *xhci, bool do_wakeup);
 int xhci_resume(struct xhci_hcd *xhci, bool hibernated);
-#else
-#define	xhci_suspend	NULL
-#define	xhci_resume	NULL
-#endif
 
-int xhci_get_frame(struct usb_hcd *hcd);
 irqreturn_t xhci_irq(struct usb_hcd *hcd);
 irqreturn_t xhci_msi_irq(int irq, void *hcd);
 int xhci_alloc_dev(struct usb_hcd *hcd, struct usb_device *udev);
-void xhci_free_dev(struct usb_hcd *hcd, struct usb_device *udev);
 int xhci_alloc_tt_info(struct xhci_hcd *xhci,
 		struct xhci_virt_device *virt_dev,
 		struct usb_device *hdev,
 		struct usb_tt *tt, gfp_t mem_flags);
-int xhci_alloc_streams(struct usb_hcd *hcd, struct usb_device *udev,
-		struct usb_host_endpoint **eps, unsigned int num_eps,
-		unsigned int num_streams, gfp_t mem_flags);
-int xhci_free_streams(struct usb_hcd *hcd, struct usb_device *udev,
-		struct usb_host_endpoint **eps, unsigned int num_eps,
-		gfp_t mem_flags);
-int xhci_address_device(struct usb_hcd *hcd, struct usb_device *udev);
-int xhci_enable_device(struct usb_hcd *hcd, struct usb_device *udev);
-int xhci_update_device(struct usb_hcd *hcd, struct usb_device *udev);
-int xhci_set_usb2_hardware_lpm(struct usb_hcd *hcd,
-				struct usb_device *udev, int enable);
-int xhci_update_hub_device(struct usb_hcd *hcd, struct usb_device *hdev,
-			struct usb_tt *tt, gfp_t mem_flags);
-int xhci_urb_enqueue(struct usb_hcd *hcd, struct urb *urb, gfp_t mem_flags);
-int xhci_urb_dequeue(struct usb_hcd *hcd, struct urb *urb, int status);
-int xhci_add_endpoint(struct usb_hcd *hcd, struct usb_device *udev, struct usb_host_endpoint *ep);
-int xhci_drop_endpoint(struct usb_hcd *hcd, struct usb_device *udev, struct usb_host_endpoint *ep);
-void xhci_endpoint_reset(struct usb_hcd *hcd, struct usb_host_endpoint *ep);
-int xhci_discover_or_reset_device(struct usb_hcd *hcd, struct usb_device *udev);
-int xhci_check_bandwidth(struct usb_hcd *hcd, struct usb_device *udev);
-void xhci_reset_bandwidth(struct usb_hcd *hcd, struct usb_device *udev);
 
 /* xHCI ring, segment, TRB, and TD functions */
 dma_addr_t xhci_trb_virt_to_dma(struct xhci_segment *seg, union xhci_trb *trb);
@@ -2089,7 +2062,8 @@ int xhci_queue_configure_endpoint(struct xhci_hcd *xhci,
 int xhci_queue_evaluate_context(struct xhci_hcd *xhci, struct xhci_command *cmd,
 		dma_addr_t in_ctx_ptr, u32 slot_id, bool command_must_succeed);
 int xhci_queue_reset_ep(struct xhci_hcd *xhci, struct xhci_command *cmd,
-		int slot_id, unsigned int ep_index);
+		int slot_id, unsigned int ep_index,
+		enum xhci_ep_reset_type reset_type);
 int xhci_queue_reset_device(struct xhci_hcd *xhci, struct xhci_command *cmd,
 		u32 slot_id);
 void xhci_find_new_dequeue_state(struct xhci_hcd *xhci,
@@ -2098,33 +2072,28 @@ void xhci_find_new_dequeue_state(struct xhci_hcd *xhci,
 		struct xhci_dequeue_state *state);
 void xhci_queue_new_dequeue_state(struct xhci_hcd *xhci,
 		unsigned int slot_id, unsigned int ep_index,
-		unsigned int stream_id,
 		struct xhci_dequeue_state *deq_state);
-void xhci_cleanup_stalled_ring(struct xhci_hcd *xhci,
-		unsigned int ep_index, struct xhci_td *td);
-void xhci_queue_config_ep_quirk(struct xhci_hcd *xhci,
-		unsigned int slot_id, unsigned int ep_index,
-		struct xhci_dequeue_state *deq_state);
-void xhci_stop_endpoint_command_watchdog(unsigned long arg);
+void xhci_cleanup_stalled_ring(struct xhci_hcd *xhci, unsigned int ep_index,
+		unsigned int stream_id, struct xhci_td *td);
+void xhci_stop_endpoint_command_watchdog(struct timer_list *t);
 void xhci_handle_command_timeout(struct work_struct *work);
 
 void xhci_ring_ep_doorbell(struct xhci_hcd *xhci, unsigned int slot_id,
 		unsigned int ep_index, unsigned int stream_id);
 void xhci_cleanup_command_queue(struct xhci_hcd *xhci);
+void inc_deq(struct xhci_hcd *xhci, struct xhci_ring *ring);
+unsigned int count_trbs(u64 addr, u64 len);
 
 /* xHCI roothub code */
 void xhci_set_link_state(struct xhci_hcd *xhci, __le32 __iomem **port_array,
 				int port_id, u32 link_state);
-int xhci_enable_usb3_lpm_timeout(struct usb_hcd *hcd,
-			struct usb_device *udev, enum usb3_link_state state);
-int xhci_disable_usb3_lpm_timeout(struct usb_hcd *hcd,
-			struct usb_device *udev, enum usb3_link_state state);
 void xhci_test_and_clear_bit(struct xhci_hcd *xhci, __le32 __iomem **port_array,
 				int port_id, u32 port_bit);
 int xhci_hub_control(struct usb_hcd *hcd, u16 typeReq, u16 wValue, u16 wIndex,
 		char *buf, u16 wLength);
 int xhci_hub_status_data(struct usb_hcd *hcd, char *buf);
 int xhci_find_raw_port_number(struct usb_hcd *hcd, int port1);
+void xhci_hc_died(struct xhci_hcd *xhci);
 
 #ifdef CONFIG_PM
 int xhci_bus_suspend(struct usb_hcd *hcd);
@@ -2147,12 +2116,29 @@ struct xhci_ep_ctx *xhci_get_ep_ctx(struct xhci_hcd *xhci, struct xhci_container
 struct xhci_ring *xhci_triad_to_transfer_ring(struct xhci_hcd *xhci,
 		unsigned int slot_id, unsigned int ep_index,
 		unsigned int stream_id);
+
 static inline struct xhci_ring *xhci_urb_to_transfer_ring(struct xhci_hcd *xhci,
 								struct urb *urb)
 {
 	return xhci_triad_to_transfer_ring(xhci, urb->dev->slot_id,
 					xhci_get_endpoint_index(&urb->ep->desc),
 					urb->stream_id);
+}
+
+static inline char *xhci_slot_state_string(u32 state)
+{
+	switch (state) {
+	case SLOT_STATE_ENABLED:
+		return "enabled/disabled";
+	case SLOT_STATE_DEFAULT:
+		return "default";
+	case SLOT_STATE_ADDRESSED:
+		return "addressed";
+	case SLOT_STATE_CONFIGURED:
+		return "configured";
+	default:
+		return "reserved";
+	}
 }
 
 static inline const char *xhci_decode_trb(u32 field0, u32 field1, u32 field2,
@@ -2164,14 +2150,12 @@ static inline const char *xhci_decode_trb(u32 field0, u32 field1, u32 field2,
 	switch (type) {
 	case TRB_LINK:
 		sprintf(str,
-			"TRB %08x%08x status '%s' len %d slot %d ep %d type '%s' flags %c:%c",
-			field1, field0,
-			xhci_trb_comp_code_string(GET_COMP_CODE(field2)),
-			EVENT_TRB_LEN(field2), TRB_TO_SLOT_ID(field3),
-			/* Macro decrements 1, maybe it shouldn't?!? */
-			TRB_TO_EP_INDEX(field3) + 1,
-			xhci_trb_type_string(TRB_FIELD_TO_TYPE(field3)),
-			field3 & EVENT_DATA ? 'E' : 'e',
+			"LINK %08x%08x intr %d type '%s' flags %c:%c:%c:%c",
+			field1, field0, GET_INTR_TARGET(field2),
+			xhci_trb_type_string(type),
+			field3 & TRB_IOC ? 'I' : 'i',
+			field3 & TRB_CHAIN ? 'C' : 'c',
+			field3 & TRB_TC ? 'T' : 't',
 			field3 & TRB_CYCLE ? 'C' : 'c');
 		break;
 	case TRB_TRANSFER:
@@ -2189,37 +2173,52 @@ static inline const char *xhci_decode_trb(u32 field0, u32 field1, u32 field2,
 			EVENT_TRB_LEN(field2), TRB_TO_SLOT_ID(field3),
 			/* Macro decrements 1, maybe it shouldn't?!? */
 			TRB_TO_EP_INDEX(field3) + 1,
-			xhci_trb_type_string(TRB_FIELD_TO_TYPE(field3)),
+			xhci_trb_type_string(type),
 			field3 & EVENT_DATA ? 'E' : 'e',
 			field3 & TRB_CYCLE ? 'C' : 'c');
 
 		break;
 	case TRB_SETUP:
-		sprintf(str,
-			"bRequestType %02x bRequest %02x wValue %02x%02x wIndex %02x%02x wLength %d length %d TD size %d intr %d type '%s' flags %c:%c:%c:%c:%c:%c:%c:%c",
-			field0 & 0xff,
-			(field0 & 0xff00) >> 8,
-			(field0 & 0xff000000) >> 24,
-			(field0 & 0xff0000) >> 16,
-			(field1 & 0xff00) >> 8,
-			field1 & 0xff,
-			(field1 & 0xff000000) >> 16 |
-			(field1 & 0xff0000) >> 16,
-			TRB_LEN(field2), GET_TD_SIZE(field2),
-			GET_INTR_TARGET(field2),
-			xhci_trb_type_string(TRB_FIELD_TO_TYPE(field3)),
-			field3 & TRB_BEI ? 'B' : 'b',
-			field3 & TRB_IDT ? 'I' : 'i',
-			field3 & TRB_IOC ? 'I' : 'i',
-			field3 & TRB_CHAIN ? 'C' : 'c',
-			field3 & TRB_NO_SNOOP ? 'S' : 's',
-			field3 & TRB_ISP ? 'I' : 'i',
-			field3 & TRB_ENT ? 'E' : 'e',
-			field3 & TRB_CYCLE ? 'C' : 'c');
+		sprintf(str, "bRequestType %02x bRequest %02x wValue %02x%02x wIndex %02x%02x wLength %d length %d TD size %d intr %d type '%s' flags %c:%c:%c",
+				field0 & 0xff,
+				(field0 & 0xff00) >> 8,
+				(field0 & 0xff000000) >> 24,
+				(field0 & 0xff0000) >> 16,
+				(field1 & 0xff00) >> 8,
+				field1 & 0xff,
+				(field1 & 0xff000000) >> 16 |
+				(field1 & 0xff0000) >> 16,
+				TRB_LEN(field2), GET_TD_SIZE(field2),
+				GET_INTR_TARGET(field2),
+				xhci_trb_type_string(type),
+				field3 & TRB_IDT ? 'I' : 'i',
+				field3 & TRB_IOC ? 'I' : 'i',
+				field3 & TRB_CYCLE ? 'C' : 'c');
+		break;
+	case TRB_DATA:
+		sprintf(str, "Buffer %08x%08x length %d TD size %d intr %d type '%s' flags %c:%c:%c:%c:%c:%c:%c",
+				field1, field0, TRB_LEN(field2), GET_TD_SIZE(field2),
+				GET_INTR_TARGET(field2),
+				xhci_trb_type_string(type),
+				field3 & TRB_IDT ? 'I' : 'i',
+				field3 & TRB_IOC ? 'I' : 'i',
+				field3 & TRB_CHAIN ? 'C' : 'c',
+				field3 & TRB_NO_SNOOP ? 'S' : 's',
+				field3 & TRB_ISP ? 'I' : 'i',
+				field3 & TRB_ENT ? 'E' : 'e',
+				field3 & TRB_CYCLE ? 'C' : 'c');
+		break;
+	case TRB_STATUS:
+		sprintf(str, "Buffer %08x%08x length %d TD size %d intr %d type '%s' flags %c:%c:%c:%c",
+				field1, field0, TRB_LEN(field2), GET_TD_SIZE(field2),
+				GET_INTR_TARGET(field2),
+				xhci_trb_type_string(type),
+				field3 & TRB_IOC ? 'I' : 'i',
+				field3 & TRB_CHAIN ? 'C' : 'c',
+				field3 & TRB_ENT ? 'E' : 'e',
+				field3 & TRB_CYCLE ? 'C' : 'c');
 		break;
 	case TRB_NORMAL:
-	case TRB_DATA:
-	case TRB_STATUS:
 	case TRB_ISOC:
 	case TRB_EVENT_DATA:
 	case TRB_TR_NOOP:
@@ -2227,7 +2226,7 @@ static inline const char *xhci_decode_trb(u32 field0, u32 field1, u32 field2,
 			"Buffer %08x%08x length %d TD size %d intr %d type '%s' flags %c:%c:%c:%c:%c:%c:%c:%c",
 			field1, field0, TRB_LEN(field2), GET_TD_SIZE(field2),
 			GET_INTR_TARGET(field2),
-			xhci_trb_type_string(TRB_FIELD_TO_TYPE(field3)),
+			xhci_trb_type_string(type),
 			field3 & TRB_BEI ? 'B' : 'b',
 			field3 & TRB_IDT ? 'I' : 'i',
 			field3 & TRB_IOC ? 'I' : 'i',
@@ -2242,21 +2241,21 @@ static inline const char *xhci_decode_trb(u32 field0, u32 field1, u32 field2,
 	case TRB_ENABLE_SLOT:
 		sprintf(str,
 			"%s: flags %c",
-			xhci_trb_type_string(TRB_FIELD_TO_TYPE(field3)),
+			xhci_trb_type_string(type),
 			field3 & TRB_CYCLE ? 'C' : 'c');
 		break;
 	case TRB_DISABLE_SLOT:
 	case TRB_NEG_BANDWIDTH:
 		sprintf(str,
 			"%s: slot %d flags %c",
-			xhci_trb_type_string(TRB_FIELD_TO_TYPE(field3)),
+			xhci_trb_type_string(type),
 			TRB_TO_SLOT_ID(field3),
 			field3 & TRB_CYCLE ? 'C' : 'c');
 		break;
 	case TRB_ADDR_DEV:
 		sprintf(str,
 			"%s: ctx %08x%08x slot %d flags %c:%c",
-			xhci_trb_type_string(TRB_FIELD_TO_TYPE(field3)),
+			xhci_trb_type_string(type),
 			field1, field0,
 			TRB_TO_SLOT_ID(field3),
 			field3 & TRB_BSR ? 'B' : 'b',
@@ -2265,7 +2264,7 @@ static inline const char *xhci_decode_trb(u32 field0, u32 field1, u32 field2,
 	case TRB_CONFIG_EP:
 		sprintf(str,
 			"%s: ctx %08x%08x slot %d flags %c:%c",
-			xhci_trb_type_string(TRB_FIELD_TO_TYPE(field3)),
+			xhci_trb_type_string(type),
 			field1, field0,
 			TRB_TO_SLOT_ID(field3),
 			field3 & TRB_DC ? 'D' : 'd',
@@ -2274,7 +2273,7 @@ static inline const char *xhci_decode_trb(u32 field0, u32 field1, u32 field2,
 	case TRB_EVAL_CONTEXT:
 		sprintf(str,
 			"%s: ctx %08x%08x slot %d flags %c",
-			xhci_trb_type_string(TRB_FIELD_TO_TYPE(field3)),
+			xhci_trb_type_string(type),
 			field1, field0,
 			TRB_TO_SLOT_ID(field3),
 			field3 & TRB_CYCLE ? 'C' : 'c');
@@ -2282,7 +2281,7 @@ static inline const char *xhci_decode_trb(u32 field0, u32 field1, u32 field2,
 	case TRB_RESET_EP:
 		sprintf(str,
 			"%s: ctx %08x%08x slot %d ep %d flags %c",
-			xhci_trb_type_string(TRB_FIELD_TO_TYPE(field3)),
+			xhci_trb_type_string(type),
 			field1, field0,
 			TRB_TO_SLOT_ID(field3),
 			/* Macro decrements 1, maybe it shouldn't?!? */
@@ -2292,7 +2291,7 @@ static inline const char *xhci_decode_trb(u32 field0, u32 field1, u32 field2,
 	case TRB_STOP_RING:
 		sprintf(str,
 			"%s: slot %d sp %d ep %d flags %c",
-			xhci_trb_type_string(TRB_FIELD_TO_TYPE(field3)),
+			xhci_trb_type_string(type),
 			TRB_TO_SLOT_ID(field3),
 			TRB_TO_SUSPEND_PORT(field3),
 			/* Macro decrements 1, maybe it shouldn't?!? */
@@ -2302,7 +2301,7 @@ static inline const char *xhci_decode_trb(u32 field0, u32 field1, u32 field2,
 	case TRB_SET_DEQ:
 		sprintf(str,
 			"%s: deq %08x%08x stream %d slot %d ep %d flags %c",
-			xhci_trb_type_string(TRB_FIELD_TO_TYPE(field3)),
+			xhci_trb_type_string(type),
 			field1, field0,
 			TRB_TO_STREAM_ID(field2),
 			TRB_TO_SLOT_ID(field3),
@@ -2313,14 +2312,14 @@ static inline const char *xhci_decode_trb(u32 field0, u32 field1, u32 field2,
 	case TRB_RESET_DEV:
 		sprintf(str,
 			"%s: slot %d flags %c",
-			xhci_trb_type_string(TRB_FIELD_TO_TYPE(field3)),
+			xhci_trb_type_string(type),
 			TRB_TO_SLOT_ID(field3),
 			field3 & TRB_CYCLE ? 'C' : 'c');
 		break;
 	case TRB_FORCE_EVENT:
 		sprintf(str,
 			"%s: event %08x%08x vf intr %d vf id %d flags %c",
-			xhci_trb_type_string(TRB_FIELD_TO_TYPE(field3)),
+			xhci_trb_type_string(type),
 			field1, field0,
 			TRB_TO_VF_INTR_TARGET(field2),
 			TRB_TO_VF_ID(field3),
@@ -2329,14 +2328,14 @@ static inline const char *xhci_decode_trb(u32 field0, u32 field1, u32 field2,
 	case TRB_SET_LT:
 		sprintf(str,
 			"%s: belt %d flags %c",
-			xhci_trb_type_string(TRB_FIELD_TO_TYPE(field3)),
+			xhci_trb_type_string(type),
 			TRB_TO_BELT(field3),
 			field3 & TRB_CYCLE ? 'C' : 'c');
 		break;
 	case TRB_GET_BW:
 		sprintf(str,
 			"%s: ctx %08x%08x slot %d speed %d flags %c",
-			xhci_trb_type_string(TRB_FIELD_TO_TYPE(field3)),
+			xhci_trb_type_string(type),
 			field1, field0,
 			TRB_TO_SLOT_ID(field3),
 			TRB_TO_DEV_SPEED(field3),
@@ -2345,7 +2344,7 @@ static inline const char *xhci_decode_trb(u32 field0, u32 field1, u32 field2,
 	case TRB_FORCE_HEADER:
 		sprintf(str,
 			"%s: info %08x%08x%08x pkt type %d roothub port %d flags %c",
-			xhci_trb_type_string(TRB_FIELD_TO_TYPE(field3)),
+			xhci_trb_type_string(type),
 			field2, field1, field0 & 0xffffffe0,
 			TRB_TO_PACKET_TYPE(field0),
 			TRB_TO_ROOTHUB_PORT(field3),
@@ -2354,12 +2353,237 @@ static inline const char *xhci_decode_trb(u32 field0, u32 field1, u32 field2,
 	default:
 		sprintf(str,
 			"type '%s' -> raw %08x %08x %08x %08x",
-			xhci_trb_type_string(TRB_FIELD_TO_TYPE(field3)),
+			xhci_trb_type_string(type),
 			field0, field1, field2, field3);
 	}
 
 	return str;
 }
 
+static inline const char *xhci_decode_slot_context(u32 info, u32 info2,
+		u32 tt_info, u32 state)
+{
+	static char str[1024];
+	u32 speed;
+	u32 hub;
+	u32 mtt;
+	int ret = 0;
+
+	speed = info & DEV_SPEED;
+	hub = info & DEV_HUB;
+	mtt = info & DEV_MTT;
+
+	ret = sprintf(str, "RS %05x %s%s%s Ctx Entries %d MEL %d us Port# %d/%d",
+			info & ROUTE_STRING_MASK,
+			({ char *s;
+			switch (speed) {
+			case SLOT_SPEED_FS:
+				s = "full-speed";
+				break;
+			case SLOT_SPEED_LS:
+				s = "low-speed";
+				break;
+			case SLOT_SPEED_HS:
+				s = "high-speed";
+				break;
+			case SLOT_SPEED_SS:
+				s = "super-speed";
+				break;
+			case SLOT_SPEED_SSP:
+				s = "super-speed plus";
+				break;
+			default:
+				s = "UNKNOWN speed";
+			} s; }),
+			mtt ? " multi-TT" : "",
+			hub ? " Hub" : "",
+			(info & LAST_CTX_MASK) >> 27,
+			info2 & MAX_EXIT,
+			DEVINFO_TO_ROOT_HUB_PORT(info2),
+			DEVINFO_TO_MAX_PORTS(info2));
+
+	ret += sprintf(str + ret, " [TT Slot %d Port# %d TTT %d Intr %d] Addr %d State %s",
+			tt_info & TT_SLOT, (tt_info & TT_PORT) >> 8,
+			GET_TT_THINK_TIME(tt_info), GET_INTR_TARGET(tt_info),
+			state & DEV_ADDR_MASK,
+			xhci_slot_state_string(GET_SLOT_STATE(state)));
+
+	return str;
+}
+
+
+static inline const char *xhci_portsc_link_state_string(u32 portsc)
+{
+	switch (portsc & PORT_PLS_MASK) {
+	case XDEV_U0:
+		return "U0";
+	case XDEV_U1:
+		return "U1";
+	case XDEV_U2:
+		return "U2";
+	case XDEV_U3:
+		return "U3";
+	case XDEV_DISABLED:
+		return "Disabled";
+	case XDEV_RXDETECT:
+		return "RxDetect";
+	case XDEV_INACTIVE:
+		return "Inactive";
+	case XDEV_POLLING:
+		return "Polling";
+	case XDEV_RECOVERY:
+		return "Recovery";
+	case XDEV_HOT_RESET:
+		return "Hot Reset";
+	case XDEV_COMP_MODE:
+		return "Compliance mode";
+	case XDEV_TEST_MODE:
+		return "Test mode";
+	case XDEV_RESUME:
+		return "Resume";
+	default:
+		break;
+	}
+	return "Unknown";
+}
+
+static inline const char *xhci_decode_portsc(u32 portsc)
+{
+	static char str[256];
+	int ret;
+
+	ret = sprintf(str, "%s %s %s Link:%s PortSpeed:%d ",
+		      portsc & PORT_POWER	? "Powered" : "Powered-off",
+		      portsc & PORT_CONNECT	? "Connected" : "Not-connected",
+		      portsc & PORT_PE		? "Enabled" : "Disabled",
+		      xhci_portsc_link_state_string(portsc),
+		      DEV_PORT_SPEED(portsc));
+
+	if (portsc & PORT_OC)
+		ret += sprintf(str + ret, "OverCurrent ");
+	if (portsc & PORT_RESET)
+		ret += sprintf(str + ret, "In-Reset ");
+
+	ret += sprintf(str + ret, "Change: ");
+	if (portsc & PORT_CSC)
+		ret += sprintf(str + ret, "CSC ");
+	if (portsc & PORT_PEC)
+		ret += sprintf(str + ret, "PEC ");
+	if (portsc & PORT_WRC)
+		ret += sprintf(str + ret, "WRC ");
+	if (portsc & PORT_OCC)
+		ret += sprintf(str + ret, "OCC ");
+	if (portsc & PORT_RC)
+		ret += sprintf(str + ret, "PRC ");
+	if (portsc & PORT_PLC)
+		ret += sprintf(str + ret, "PLC ");
+	if (portsc & PORT_CEC)
+		ret += sprintf(str + ret, "CEC ");
+	if (portsc & PORT_CAS)
+		ret += sprintf(str + ret, "CAS ");
+
+	ret += sprintf(str + ret, "Wake: ");
+	if (portsc & PORT_WKCONN_E)
+		ret += sprintf(str + ret, "WCE ");
+	if (portsc & PORT_WKDISC_E)
+		ret += sprintf(str + ret, "WDE ");
+	if (portsc & PORT_WKOC_E)
+		ret += sprintf(str + ret, "WOE ");
+
+	return str;
+}
+
+static inline const char *xhci_ep_state_string(u8 state)
+{
+	switch (state) {
+	case EP_STATE_DISABLED:
+		return "disabled";
+	case EP_STATE_RUNNING:
+		return "running";
+	case EP_STATE_HALTED:
+		return "halted";
+	case EP_STATE_STOPPED:
+		return "stopped";
+	case EP_STATE_ERROR:
+		return "error";
+	default:
+		return "INVALID";
+	}
+}
+
+static inline const char *xhci_ep_type_string(u8 type)
+{
+	switch (type) {
+	case ISOC_OUT_EP:
+		return "Isoc OUT";
+	case BULK_OUT_EP:
+		return "Bulk OUT";
+	case INT_OUT_EP:
+		return "Int OUT";
+	case CTRL_EP:
+		return "Ctrl";
+	case ISOC_IN_EP:
+		return "Isoc IN";
+	case BULK_IN_EP:
+		return "Bulk IN";
+	case INT_IN_EP:
+		return "Int IN";
+	default:
+		return "INVALID";
+	}
+}
+
+static inline const char *xhci_decode_ep_context(u32 info, u32 info2, u64 deq,
+		u32 tx_info)
+{
+	static char str[1024];
+	int ret;
+
+	u32 esit;
+	u16 maxp;
+	u16 avg;
+
+	u8 max_pstr;
+	u8 ep_state;
+	u8 interval;
+	u8 ep_type;
+	u8 burst;
+	u8 cerr;
+	u8 mult;
+	u8 lsa;
+	u8 hid;
+
+	esit = CTX_TO_MAX_ESIT_PAYLOAD_HI(info) << 16 |
+		CTX_TO_MAX_ESIT_PAYLOAD(tx_info);
+
+	ep_state = info & EP_STATE_MASK;
+	max_pstr = info & EP_MAXPSTREAMS_MASK;
+	interval = CTX_TO_EP_INTERVAL(info);
+	mult = CTX_TO_EP_MULT(info) + 1;
+	lsa = info & EP_HAS_LSA;
+
+	cerr = (info2 & (3 << 1)) >> 1;
+	ep_type = CTX_TO_EP_TYPE(info2);
+	hid = info2 & (1 << 7);
+	burst = CTX_TO_MAX_BURST(info2);
+	maxp = MAX_PACKET_DECODED(info2);
+
+	avg = EP_AVG_TRB_LENGTH(tx_info);
+
+	ret = sprintf(str, "State %s mult %d max P. Streams %d %s",
+			xhci_ep_state_string(ep_state), mult,
+			max_pstr, lsa ? "LSA " : "");
+
+	ret += sprintf(str + ret, "interval %d us max ESIT payload %d CErr %d ",
+			(1 << interval) * 125, esit, cerr);
+
+	ret += sprintf(str + ret, "Type %s %sburst %d maxp %d deq %016llx ",
+			xhci_ep_type_string(ep_type), hid ? "HID" : "",
+			burst, maxp, deq);
+
+	ret += sprintf(str + ret, "avg trb len %d", avg);
+
+	return str;
+}
 
 #endif /* __LINUX_XHCI_HCD_H */

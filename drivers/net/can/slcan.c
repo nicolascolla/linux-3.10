@@ -54,7 +54,6 @@
 #include <linux/delay.h>
 #include <linux/init.h>
 #include <linux/kernel.h>
-#include <linux/nospec.h>
 #include <linux/can.h>
 #include <linux/can/skb.h>
 
@@ -372,7 +371,7 @@ static int slc_open(struct net_device *dev)
 /* Hook the destructor so we can free slcan devs at the right point in time */
 static void slc_free_netdev(struct net_device *dev)
 {
-	int i = array_index_nospec(dev->base_addr, maxdev);
+	int i = dev->base_addr;
 
 	slcan_devs[i] = NULL;
 }

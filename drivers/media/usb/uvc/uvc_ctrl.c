@@ -21,7 +21,6 @@
 #include <linux/vmalloc.h>
 #include <linux/wait.h>
 #include <linux/atomic.h>
-#include <linux/nospec.h>
 #include <media/v4l2-ctrls.h>
 
 #include "uvcvideo.h"
@@ -1109,9 +1108,8 @@ int uvc_query_v4l2_menu(struct uvc_video_chain *chain,
 		ret = -EINVAL;
 		goto done;
 	}
-	index = array_index_nospec(query_menu->index, mapping->menu_count);
 
-	menu_info = &mapping->menu_info[index];
+	menu_info = &mapping->menu_info[query_menu->index];
 
 	if (mapping->data_type == UVC_CTRL_DATA_TYPE_BITMASK &&
 	    (ctrl->info.flags & UVC_CTRL_FLAG_GET_RES)) {
@@ -1431,7 +1429,6 @@ int uvc_ctrl_set(struct uvc_video_chain *chain,
 	s32 min;
 	s32 max;
 	int ret;
-	s32 idx;
 
 	ctrl = uvc_find_control(chain, xctrl->id, &mapping);
 	if (ctrl == NULL)
@@ -1474,9 +1471,7 @@ int uvc_ctrl_set(struct uvc_video_chain *chain,
 	case V4L2_CTRL_TYPE_MENU:
 		if (xctrl->value < 0 || xctrl->value >= mapping->menu_count)
 			return -ERANGE;
-		idx = array_index_nospec(xctrl->value, mapping->menu_count);
-
-		value = mapping->menu_info[idx].value;
+		value = mapping->menu_info[xctrl->value].value;
 
 		/* Valid menu indices are reported by the GET_RES request for
 		 * UVC controls that support it.

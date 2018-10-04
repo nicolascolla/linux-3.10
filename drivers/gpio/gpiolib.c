@@ -15,7 +15,6 @@
 #include <linux/acpi.h>
 #include <linux/gpio/driver.h>
 #include <linux/pinctrl/consumer.h>
-#include <linux/nospec.h>
 
 #include "gpiolib.h"
 
@@ -168,11 +167,8 @@ struct gpio_desc *gpio_to_desc(unsigned gpio)
 	list_for_each_entry(gdev, &gpio_devices, list) {
 		if (gdev->base <= gpio &&
 		    gdev->base + gdev->ngpio > gpio) {
-			unsigned idx = array_index_nospec(gpio - gdev->base,
-							  gdev->ngpio);
-
 			spin_unlock_irqrestore(&gpio_lock, flags);
-			return &gdev->chip->desc[idx];
+			return &gdev->chip->desc[gpio - gdev->base];
 		}
 	}
 

@@ -11,7 +11,6 @@
 #include <linux/cpu.h>
 #include <linux/mman.h>
 #include <linux/pkeys.h>
-#include <linux/nospec.h>
 #include <asm/cpufeature.h>
 #include <asm/i387.h>
 #include <asm/fpu-internal.h>
@@ -122,7 +121,6 @@ static inline int check_for_xstate(struct i387_fxsave_struct __user *buf,
 				   void __user *fpstate,
 				   struct _fpx_sw_bytes *fx_sw)
 {
-	int size;
 	int min_xstate_size = sizeof(struct i387_fxsave_struct) +
 			      sizeof(struct xsave_hdr_struct);
 	unsigned int magic2;
@@ -143,8 +141,7 @@ static inline int check_for_xstate(struct i387_fxsave_struct __user *buf,
 	 * fpstate layout with out copying the extended state information
 	 * in the memory layout.
 	 */
-	size = array_index_nospec(fx_sw->xstate_size, xstate_size + 1);
-	if (__get_user(magic2, (__u32 __user *)(fpstate + size))
+	if (__get_user(magic2, (__u32 __user *)(fpstate + fx_sw->xstate_size))
 	    || magic2 != FP_XSTATE_MAGIC2)
 		return -1;
 

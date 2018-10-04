@@ -17,7 +17,6 @@
 #include <linux/crypto.h>
 #include <linux/scatterlist.h>
 #include <linux/pci.h>
-#include <linux/nospec.h>
 #include <scsi/scsi.h>
 #include <scsi/scsi_cmnd.h>
 #include <scsi/scsi_host.h>
@@ -519,7 +518,6 @@ static void sock_put_port(struct cxgbi_sock *csk)
 				ntohs(*port));
 			return;
 		}
-		idx = array_index_nospec(idx, pmap->max_connect);
 
 		spin_lock_bh(&pmap->lock);
 		pmap->port_csk[idx] = NULL;

@@ -44,11 +44,13 @@ FILES=                                          \
          test-compile-x32.bin                   \
          test-zlib.bin                          \
          test-lzma.bin                          \
+         test-bpf.bin                           \
          test-get_cpuid.bin                     \
          test-sdt.bin                           \
          test-cxx.bin                           \
          test-jvmti.bin				\
-         test-sched_getcpu.bin
+         test-sched_getcpu.bin			\
+         test-setns.bin
 
 FILES := $(addprefix $(OUTPUT),$(FILES))
 
@@ -92,6 +94,9 @@ $(OUTPUT)test-glibc.bin:
 	$(BUILD)
 
 $(OUTPUT)test-sched_getcpu.bin:
+	$(BUILD)
+
+$(OUTPUT)test-setns.bin:
 	$(BUILD)
 
 DWARFLIBS := -ldw
@@ -217,6 +222,9 @@ $(OUTPUT)test-zlib.bin:
 
 $(OUTPUT)test-lzma.bin:
 	$(BUILD) -llzma
+
+$(OUTPUT)test-bpf.bin:
+	$(BUILD)
 
 $(OUTPUT)test-get_cpuid.bin:
 	$(BUILD)
