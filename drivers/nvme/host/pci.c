@@ -296,6 +296,14 @@ static bool nvme_dbbuf_update_and_check_event(u16 value, u32 *dbbuf_db,
 		old_value = *dbbuf_db;
 		*dbbuf_db = value;
 
+		/*
+		 * Ensure that the doorbell is updated before reading the event
+		 * index from memory.  The controller needs to provide similar
+		 * ordering to ensure the envent index is updated before reading
+		 * the doorbell.
+		 */
+		mb();
+
 		if (!nvme_dbbuf_need_event(*dbbuf_ei, value, old_value))
 			return false;
 	}
@@ -400,6 +408,7 @@ static int nvme_init_request(struct blk_mq_tag_set *set, struct request *req,
 	return 0;
 }
 
+#ifndef __s390x__
 static int nvme_pci_map_queues(struct blk_mq_tag_set *set)
 {
 	struct nvme_dev *dev = set->driver_data;
@@ -407,6 +416,7 @@ static int nvme_pci_map_queues(struct blk_mq_tag_set *set)
 	return blk_mq_pci_map_queues(set, to_pci_dev(dev->dev),
 			dev->num_vecs > 1 ? 1 /* admin queue */ : 0);
 }
+#endif
 
 /**
  * __nvme_submit_cmd() - Copy a command into a queue and ring the doorbell
@@ -1244,7 +1254,9 @@ static struct blk_mq_ops nvme_mq_admin_ops = {
 };
 
 static struct blk_mq_aux_ops nvme_mq_aux_ops = {
+#ifndef __s390x__
 	.map_queues	= nvme_pci_map_queues,
+#endif
 };
 
 static struct blk_mq_ops nvme_mq_ops = {
