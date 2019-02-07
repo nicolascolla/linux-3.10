@@ -1742,7 +1742,7 @@ insert:
 	if (bypass_insert)
 		return BLK_MQ_RQ_QUEUE_BUSY;
 
-	blk_mq_sched_insert_request(rq, false, run_queue, false);
+	blk_mq_request_bypass_insert(rq, run_queue);
 	return BLK_MQ_RQ_QUEUE_OK;
 }
 
@@ -1756,7 +1756,7 @@ static void blk_mq_try_issue_directly(struct blk_mq_hw_ctx *hctx,
 	hctx_lock(hctx, &srcu_idx);
 	ret = __blk_mq_try_issue_directly(hctx, rq, false);
 	if (ret == BLK_MQ_RQ_QUEUE_BUSY || ret == BLK_MQ_RQ_QUEUE_DEV_BUSY)
-		blk_mq_sched_insert_request(rq, false, true, false);
+		blk_mq_request_bypass_insert(rq, true);
 	else if (ret != BLK_MQ_RQ_QUEUE_OK)
 		blk_mq_end_request(rq, ret);
 
@@ -1790,7 +1790,8 @@ void blk_mq_try_issue_list_directly(struct blk_mq_hw_ctx *hctx,
 		if (ret != BLK_MQ_RQ_QUEUE_OK) {
 			if (ret == BLK_MQ_RQ_QUEUE_BUSY ||
 					ret == BLK_MQ_RQ_QUEUE_DEV_BUSY) {
-				list_add(&rq->queuelist, list);
+				blk_mq_request_bypass_insert(rq,
+							list_empty(list));
 				break;
 			}
 			blk_mq_end_request(rq, ret);

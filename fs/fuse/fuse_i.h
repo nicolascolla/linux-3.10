@@ -82,6 +82,9 @@ struct fuse_inode {
 	/** Time in jiffies until the file attributes are valid */
 	u64 i_time;
 
+	/* Is atime invalid? */
+	int inval_atime;
+
 	/** The sticky bit in inode->i_mode may have been removed, so
 	    preserve the original mode */
 	umode_t orig_i_mode;
@@ -797,6 +800,8 @@ void fuse_abort_conn(struct fuse_conn *fc);
 void fuse_invalidate_attr(struct inode *inode);
 
 void fuse_invalidate_entry_cache(struct dentry *entry);
+
+void fuse_invalidate_atime(struct inode *inode);
 
 /**
  * Acquire reference to fuse_conn

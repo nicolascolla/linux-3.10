@@ -68,6 +68,10 @@ static bool psmouse_smartscroll = 1;
 module_param_named(smartscroll, psmouse_smartscroll, bool, 0644);
 MODULE_PARM_DESC(smartscroll, "Logitech Smartscroll autorepeat, 1 = enabled (default), 0 = disabled.");
 
+static bool psmouse_a4tech_2wheels;
+module_param_named(a4tech_workaround, psmouse_a4tech_2wheels, bool, 0644);
+MODULE_PARM_DESC(a4tech_workaround, "A4Tech second scroll wheel workaround, 1 = enabled, 0 = disabled (default).");
+
 static unsigned int psmouse_resetafter = 5;
 module_param_named(resetafter, psmouse_resetafter, uint, 0644);
 MODULE_PARM_DESC(resetafter, "Reset device after so many bad packets (0 = never).");
@@ -148,6 +152,7 @@ psmouse_ret_t psmouse_process_byte(struct psmouse *psmouse)
 {
 	struct input_dev *dev = psmouse->dev;
 	u8 *packet = psmouse->packet;
+	int wheel;
 
 	if (psmouse->pktcnt < psmouse->pktsize)
 		return PSMOUSE_GOOD_DATA;
@@ -173,10 +178,20 @@ psmouse_ret_t psmouse_process_byte(struct psmouse *psmouse)
 			break;
 		case 0x00:
 		case 0xC0:
-			input_report_rel(dev, REL_WHEEL,
-					 -sign_extend32(packet[3], 3));
-			input_report_key(dev, BTN_SIDE,  BIT(4));
-			input_report_key(dev, BTN_EXTRA, BIT(5));
+			wheel = sign_extend32(packet[3], 3);
+
+			/*
+			 * Some A4Tech mice have two scroll wheels, with first
+			 * one reporting +/-1 in the lower nibble, and second
+			 * one reporting +/-2.
+			 */
+			if (psmouse_a4tech_2wheels && abs(wheel) > 1)
+				input_report_rel(dev, REL_HWHEEL, wheel / 2);
+			else
+				input_report_rel(dev, REL_WHEEL, -wheel);
+
+			input_report_key(dev, BTN_SIDE,  packet[3] & BIT(4));
+			input_report_key(dev, BTN_EXTRA, packet[3] & BIT(5));
 			break;
 		}
 		break;
@@ -186,13 +201,13 @@ psmouse_ret_t psmouse_process_byte(struct psmouse *psmouse)
 		input_report_rel(dev, REL_WHEEL, -(s8) packet[3]);
 
 		/* Extra buttons on Genius NewNet 3D */
-		input_report_key(dev, BTN_SIDE,  BIT(6));
-		input_report_key(dev, BTN_EXTRA, BIT(7));
+		input_report_key(dev, BTN_SIDE,  packet[0] & BIT(6));
+		input_report_key(dev, BTN_EXTRA, packet[0] & BIT(7));
 		break;
 
 	case PSMOUSE_THINKPS:
 		/* Extra button on ThinkingMouse */
-		input_report_key(dev, BTN_EXTRA, BIT(3));
+		input_report_key(dev, BTN_EXTRA, packet[0] & BIT(3));
 
 		/*
 		 * Without this bit of weirdness moving up gives wildly
@@ -206,7 +221,7 @@ psmouse_ret_t psmouse_process_byte(struct psmouse *psmouse)
 		 * Cortron PS2 Trackball reports SIDE button in the
 		 * 4th bit of the first byte.
 		 */
-		input_report_key(dev, BTN_SIDE, BIT(3));
+		input_report_key(dev, BTN_SIDE, packet[0] & BIT(3));
 		packet[0] |= BIT(3);
 		break;
 

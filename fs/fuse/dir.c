@@ -112,6 +112,16 @@ void fuse_invalidate_attr(struct inode *inode)
 	get_fuse_inode(inode)->i_time = 0;
 }
 
+/**
+ * Mark the attributes as stale due to an atime change.  Avoid the invalidate if
+ * atime is not used.
+ */
+void fuse_invalidate_atime(struct inode *inode)
+{
+	if (!IS_RDONLY(inode))
+		WRITE_ONCE(get_fuse_inode(inode)->inval_atime, 1);
+}
+
 /*
  * Just mark the entry as stale, so that a next attempt to look it up
  * will result in a new lookup call to userspace
@@ -1442,7 +1452,7 @@ static int fuse_readdir(struct file *file, void *dstbuf, filldir_t filldir)
 	}
 
 	__free_page(page);
-	fuse_invalidate_attr(inode); /* atime changed */
+	fuse_invalidate_atime(inode);
 	return err;
 }
 
@@ -1475,7 +1485,7 @@ static char *read_link(struct dentry *dentry)
 		link[req->out.args[0].size] = '\0';
  out:
 	fuse_put_request(fc, req);
-	fuse_invalidate_attr(inode); /* atime changed */
+	fuse_invalidate_atime(inode);
 	return link;
 }
 
@@ -1761,6 +1771,9 @@ static int fuse_getattr(struct vfsmount *mnt, struct dentry *entry,
 
 	if (!fuse_allow_current_process(fc))
 		return -EACCES;
+
+	if (READ_ONCE(get_fuse_inode(inode)->inval_atime))
+		fuse_invalidate_attr(inode);
 
 	return fuse_update_attributes(inode, stat, NULL, NULL);
 }
