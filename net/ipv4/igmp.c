@@ -115,7 +115,8 @@
 
 #define IGMP_V1_Router_Present_Timeout		(400*HZ)
 #define IGMP_V2_Router_Present_Timeout		(400*HZ)
-#define IGMP_Unsolicited_Report_Interval	(10*HZ)
+#define IGMP_V2_Unsolicited_Report_Interval	(10*HZ)
+#define IGMP_V3_Unsolicited_Report_Interval	(1*HZ)
 #define IGMP_Query_Response_Interval		(10*HZ)
 #define IGMP_Query_Robustness_Variable		2
 
@@ -139,6 +140,29 @@
 	 IN_DEV_CONF_GET((in_dev), FORCE_IGMP_VERSION) == 2 || \
 	 ((in_dev)->mr_v2_seen && \
 	  time_before(jiffies, (in_dev)->mr_v2_seen)))
+
+static int unsolicited_report_interval(struct in_device *in_dev)
+{
+	int interval_ms, interval_jiffies;
+
+	if (IGMP_V1_SEEN(in_dev) || IGMP_V2_SEEN(in_dev))
+		interval_ms = IN_DEV_CONF_GET(
+			in_dev,
+			IGMPV2_UNSOLICITED_REPORT_INTERVAL);
+	else /* v3 */
+		interval_ms = IN_DEV_CONF_GET(
+			in_dev,
+			IGMPV3_UNSOLICITED_REPORT_INTERVAL);
+
+	interval_jiffies = msecs_to_jiffies(interval_ms);
+
+	/* _timer functions can't handle a delay of 0 jiffies so ensure
+	 * we always return a positive value.
+	 */
+	if (interval_jiffies <= 0)
+		interval_jiffies = 1;
+	return interval_jiffies;
+}
 
 static void igmpv3_add_delrec(struct in_device *in_dev, struct ip_mc_list *im);
 static void igmpv3_del_delrec(struct in_device *in_dev, struct ip_mc_list *im);
@@ -737,7 +761,8 @@ static void igmp_ifc_timer_expire(unsigned long data)
 	igmpv3_send_cr(in_dev);
 	if (in_dev->mr_ifc_count) {
 		in_dev->mr_ifc_count--;
-		igmp_ifc_start_timer(in_dev, IGMP_Unsolicited_Report_Interval);
+		igmp_ifc_start_timer(in_dev,
+				     unsolicited_report_interval(in_dev));
 	}
 	in_dev_put(in_dev);
 }
@@ -759,10 +784,9 @@ static void igmp_timer_expire(unsigned long data)
 	spin_lock(&im->lock);
 	im->tm_running = 0;
 
-	if (im->unsolicit_count) {
-		im->unsolicit_count--;
-		igmp_start_timer(im, IGMP_Unsolicited_Report_Interval);
-	}
+	if (im->unsolicit_count && --im->unsolicit_count)
+		igmp_start_timer(im, unsolicited_report_interval(in_dev));
+
 	im->reporter = 1;
 	spin_unlock(&im->lock);
 
@@ -1221,6 +1245,8 @@ static void igmp_group_added(struct ip_mc_list *im)
 
 	if (in_dev->dead)
 		return;
+
+	im->unsolicit_count = sysctl_igmp_qrv;
 	if (IGMP_V1_SEEN(in_dev) || IGMP_V2_SEEN(in_dev)) {
 		spin_lock_bh(&im->lock);
 		igmp_start_timer(im, IGMP_Initial_Report_Delay);
@@ -1249,7 +1275,8 @@ static void igmp_group_added(struct ip_mc_list *im)
 /*
  *	A socket has joined a multicast group on device dev.
  */
-void __ip_mc_inc_group(struct in_device *in_dev, __be32 addr, unsigned int mode)
+static void __ip_mc_inc_group(struct in_device *in_dev, __be32 addr,
+			      unsigned int mode)
 {
 	struct ip_mc_list *im;
 
@@ -1278,7 +1305,6 @@ void __ip_mc_inc_group(struct in_device *in_dev, __be32 addr, unsigned int mode)
 	spin_lock_init(&im->lock);
 #ifdef CONFIG_IP_MULTICAST
 	setup_timer(&im->timer, &igmp_timer_expire, (unsigned long)im);
-	im->unsolicit_count = sysctl_igmp_qrv;
 #endif
 
 	im->next_rcu = in_dev->mc_list;
