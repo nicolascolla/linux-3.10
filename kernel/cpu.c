@@ -8,6 +8,7 @@
 #include <linux/init.h>
 #include <linux/notifier.h>
 #include <linux/sched.h>
+#include <linux/sched/smt.h>
 #include <linux/unistd.h>
 #include <linux/cpu.h>
 #include <linux/oom.h>
@@ -23,6 +24,7 @@
 #include <linux/tick.h>
 
 #include "smpboot.h"
+#include "sched/sched.h"
 
 #ifdef CONFIG_SMP
 /* Serializes the updates to cpu_online_mask, cpu_present_mask */
@@ -226,6 +228,12 @@ void cpu_hotplug_enable(void)
 static void cpu_hotplug_begin(void) {}
 static void cpu_hotplug_done(void) {}
 #endif	/* #else #if CONFIG_HOTPLUG_CPU */
+
+/*
+ * Architectures that need SMT-specific errata handling during SMT hotplug
+ * should override this.
+ */
+void __weak arch_smt_update(void) { }
 
 #ifdef CONFIG_HOTPLUG_SMT
 enum cpuhp_smt_control cpu_smt_control __read_mostly = CPU_SMT_ENABLED;
@@ -432,6 +440,13 @@ static int __ref _cpu_down(unsigned int cpu, int tasks_frozen)
 	if (!cpu_online(cpu))
 		return -EINVAL;
 
+	/*
+	 * The sibling_mask will be cleared in take_cpu_down when the
+	 * operation succeeds. So we can't test the sibling mask after
+	 * that. We needs to call sched_cpu_activate() if it fails.
+	 */
+	sched_cpu_deactivate(cpu);
+
 	cpu_hotplug_begin();
 
 	err = __cpu_notify(CPU_DOWN_PREPARE | mod, hcpu, -1, &nr_calls);
@@ -496,6 +511,9 @@ out_release:
 	cpu_hotplug_done();
 	if (!err)
 		cpu_notify_nofail(CPU_POST_DEAD | mod, hcpu);
+	else
+		sched_cpu_activate(cpu); /* Revert sched_cpu_deactivate() */
+	arch_smt_update();
 	return err;
 }
 
@@ -568,6 +586,9 @@ out_notify:
 		__cpu_notify(CPU_UP_CANCELED | mod, hcpu, nr_calls, NULL);
 out:
 	cpu_hotplug_done();
+	if (!ret)
+		sched_cpu_activate(cpu);
+	arch_smt_update();
 
 	return ret;
 }

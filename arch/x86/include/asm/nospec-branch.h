@@ -149,6 +149,22 @@
 .Ldone_\@:
 .endm
 
+/*
+ * MDS_USER_CLEAR_CPU_BUFFERS macro is the assembly equivalent of
+ * mds_user_clear_cpu_buffers(). Like the C version, the __KERNEL_DS
+ * is used for verw.
+ */
+.macro MDS_USER_CLEAR_CPU_BUFFERS
+	STATIC_JUMP .Lverw_\@, mds_user_clear
+	jmp	.Ldone_\@
+	.balign 2
+.Lds_\@:
+	.word	__KERNEL_DS
+.Lverw_\@:
+	verw	.Lds_\@(%rip)
+.Ldone_\@:
+.endm
+
 #else /* __ASSEMBLY__ */
 
 #if defined(CONFIG_X86_64) && defined(RETPOLINE)
@@ -179,6 +195,8 @@ enum spectre_v2_mitigation {
 	SPECTRE_V2_IBP_DISABLED,
 	SPECTRE_V2_IBRS_ENHANCED,
 };
+
+extern enum spectre_v2_mitigation spectre_v2_enabled;
 
 void __spectre_v2_select_mitigation(void);
 void spectre_v2_print_mitigation(void);
@@ -228,6 +246,56 @@ static inline void fill_RSB(void)
 	asm volatile (__stringify(__FILL_RETURN_BUFFER(%0, RSB_CLEAR_LOOPS, %1))
 		      : "=r" (loops), "+r" (sp)
 		      : : "memory" );
+}
+
+extern struct static_key mds_user_clear;
+extern struct static_key mds_idle_clear;
+
+#include <asm/segment.h>
+
+/**
+ * mds_clear_cpu_buffers - Mitigation for MDS vulnerability
+ *
+ * This uses the otherwise unused and obsolete VERW instruction in
+ * combination with microcode which triggers a CPU buffer flush when the
+ * instruction is executed.
+ */
+static inline void mds_clear_cpu_buffers(void)
+{
+	static const u16 ds = __KERNEL_DS;
+
+	/*
+	 * Has to be the memory-operand variant because only that
+	 * guarantees the CPU buffer flush functionality according to
+	 * documentation. The register-operand variant does not.
+	 * Works with any segment selector, but a valid writable
+	 * data segment is the fastest variant.
+	 *
+	 * "cc" clobber is required because VERW modifies ZF.
+	 */
+	asm volatile("verw %[ds]" : : [ds] "m" (ds) : "cc");
+}
+
+/**
+ * mds_user_clear_cpu_buffers - Mitigation for MDS vulnerability
+ *
+ * Clear CPU buffers if the corresponding static key is enabled
+ */
+static inline void mds_user_clear_cpu_buffers(void)
+{
+	if (static_key_false(&mds_user_clear))
+		mds_clear_cpu_buffers();
+}
+
+/**
+ * mds_idle_clear_cpu_buffers - Mitigation for MDS vulnerability
+ *
+ * Clear CPU buffers if the corresponding static key is enabled
+ */
+static inline void mds_idle_clear_cpu_buffers(void)
+{
+	if (static_key_false(&mds_idle_clear))
+		mds_clear_cpu_buffers();
 }
 
 #endif /* __ASSEMBLY__ */
