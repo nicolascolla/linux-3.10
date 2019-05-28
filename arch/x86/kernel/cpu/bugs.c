@@ -157,7 +157,7 @@ enum spectre_v2_mitigation_cmd spectre_v2_cmd = SPECTRE_V2_CMD_AUTO;
 #undef pr_fmt
 #define pr_fmt(fmt)	"MDS: " fmt
 
-/* Default mitigation for L1TF-affected CPUs */
+/* Default mitigation for MDS-affected CPUs */
 enum mds_mitigations mds_mitigation = MDS_MITIGATION_FULL;
 static bool mds_nosmt = false;
 
@@ -360,9 +360,9 @@ static void update_mds_branch_idle(void)
 	if (!boot_cpu_has(X86_BUG_MSBDS_ONLY))
 		return;
 
-	if (sched_smt_active())
+	if (sched_smt_active() && !static_key_enabled(&mds_idle_clear))
 		static_key_slow_inc(&mds_idle_clear);
-	else
+	else if (!sched_smt_active() && static_key_enabled(&mds_idle_clear))
 		static_key_slow_dec(&mds_idle_clear);
 }
 
@@ -788,7 +788,8 @@ static ssize_t mds_show_state(char *buf)
 
 	if (boot_cpu_has(X86_BUG_MSBDS_ONLY)) {
 		return sprintf(buf, "%s; SMT %s\n", mds_strings[mds_mitigation],
-			       sched_smt_active() ? "mitigated" : "disabled");
+			       (mds_mitigation == MDS_MITIGATION_OFF ? "vulnerable" :
+			        sched_smt_active() ? "mitigated" : "disabled"));
 	}
 
 	return sprintf(buf, "%s; SMT %s\n", mds_strings[mds_mitigation],
