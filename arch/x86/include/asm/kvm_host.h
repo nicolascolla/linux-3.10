@@ -151,6 +151,7 @@ enum {
 
 #define DR6_BD		(1 << 13)
 #define DR6_BS		(1 << 14)
+#define DR6_BT		(1 << 15)
 #define DR6_RTM		(1 << 16)
 #define DR6_FIXED_1	0xfffe0ff0
 #define DR6_INIT	0xffff0ff0
@@ -168,6 +169,8 @@ enum {
 #define PFERR_RSVD_BIT 3
 #define PFERR_FETCH_BIT 4
 #define PFERR_PK_BIT 5
+#define PFERR_GUEST_FINAL_BIT 32
+#define PFERR_GUEST_PAGE_BIT 33
 
 #define PFERR_PRESENT_MASK (1U << PFERR_PRESENT_BIT)
 #define PFERR_WRITE_MASK (1U << PFERR_WRITE_BIT)
@@ -175,6 +178,12 @@ enum {
 #define PFERR_RSVD_MASK (1U << PFERR_RSVD_BIT)
 #define PFERR_FETCH_MASK (1U << PFERR_FETCH_BIT)
 #define PFERR_PK_MASK (1U << PFERR_PK_BIT)
+#define PFERR_GUEST_FINAL_MASK (1ULL << PFERR_GUEST_FINAL_BIT)
+#define PFERR_GUEST_PAGE_MASK (1ULL << PFERR_GUEST_PAGE_BIT)
+
+#define PFERR_NESTED_GUEST_PAGE (PFERR_GUEST_PAGE_MASK |	\
+				 PFERR_WRITE_MASK |		\
+				 PFERR_PRESENT_MASK)
 
 /*
  * The mask used to denote special SPTEs, which can be either MMIO SPTEs or
@@ -209,14 +218,14 @@ struct kvm_mmu_memory_cache {
  * kvm_memory_slot.arch.gfn_track which is 16 bits, so the role bits used
  * by indirect shadow page can not be more than 15 bits.
  *
- * Currently, we used 14 bits that are @level, @cr4_pae, @quadrant, @access,
+ * Currently, we used 14 bits that are @level, @gpte_is_8_bytes, @quadrant, @access,
  * @nxe, @cr0_wp, @smep_andnot_wp and @smap_andnot_wp.
  */
 union kvm_mmu_page_role {
-	unsigned word;
+	u32 word;
 	struct {
 		unsigned level:4;
-		unsigned cr4_pae:1;
+		unsigned gpte_is_8_bytes:1;
 		unsigned quadrant:2;
 		unsigned direct:1;
 		unsigned access:3;
@@ -226,7 +235,8 @@ union kvm_mmu_page_role {
 		unsigned smep_andnot_wp:1;
 		unsigned smap_andnot_wp:1;
 		unsigned ad_disabled:1;
-		unsigned :7;
+		unsigned guest_mode:1;
+		unsigned :6;
 
 		/*
 		 * This is left at the top of the word so that
@@ -235,6 +245,34 @@ union kvm_mmu_page_role {
 		 * byte so it is also faster to load it from memory.
 		 */
 		unsigned smm:8;
+	};
+};
+
+union kvm_mmu_extended_role {
+/*
+ * This structure complements kvm_mmu_page_role caching everything needed for
+ * MMU configuration. If nothing in both these structures changed, MMU
+ * re-configuration can be skipped. @valid bit is set on first usage so we don't
+ * treat all-zero structure as valid data.
+ */
+	u32 word;
+	struct {
+		unsigned int valid:1;
+		unsigned int execonly:1;
+		unsigned int cr0_pg:1;
+		unsigned int cr4_pae:1;
+		unsigned int cr4_pse:1;
+		unsigned int cr4_pke:1;
+		unsigned int cr4_smap:1;
+		unsigned int cr4_smep:1;
+	};
+};
+
+union kvm_mmu_role {
+	u64 as_u64;
+	struct {
+		union kvm_mmu_page_role base;
+		union kvm_mmu_extended_role ext;
 	};
 };
 
@@ -290,6 +328,16 @@ struct rsvd_bits_validate {
 	u64 bad_mt_xwr;
 };
 
+struct kvm_mmu_root_info {
+	gpa_t cr3;
+	hpa_t hpa;
+};
+
+#define KVM_MMU_ROOT_INFO_INVALID \
+	((struct kvm_mmu_root_info) { .cr3 = INVALID_PAGE, .hpa = INVALID_PAGE })
+
+#define KVM_MMU_NUM_PREV_ROOTS 3
+
 /*
  * x86 supports 3 paging modes (4-level 64-bit, 3-level 64-bit, and 2-level
  * 32-bit).  The kvm_mmu structure abstracts the details of the current mmu
@@ -309,15 +357,17 @@ struct kvm_mmu {
 			       struct x86_exception *exception);
 	int (*sync_page)(struct kvm_vcpu *vcpu,
 			 struct kvm_mmu_page *sp);
-	void (*invlpg)(struct kvm_vcpu *vcpu, gva_t gva);
+	void (*invlpg)(struct kvm_vcpu *vcpu, gva_t gva, hpa_t root_hpa);
 	void (*update_pte)(struct kvm_vcpu *vcpu, struct kvm_mmu_page *sp,
 			   u64 *spte, const void *pte);
 	hpa_t root_hpa;
-	union kvm_mmu_page_role base_role;
+	gpa_t root_cr3;
+	union kvm_mmu_role mmu_role;
 	u8 root_level;
 	u8 shadow_root_level;
 	u8 ept_ad;
 	bool direct_map;
+	struct kvm_mmu_root_info prev_roots[KVM_MMU_NUM_PREV_ROOTS];
 
 	/*
 	 * Bitmap; bit set = permission fault
@@ -466,6 +516,7 @@ struct kvm_vcpu_arch {
 	u64 apic_base;
 	struct kvm_lapic *apic;    /* kernel irqchip context */
 	bool apicv_active;
+	bool load_eoi_exitmap_pending;
 	DECLARE_BITMAP(ioapic_handled_vectors, 256);
 	unsigned long apic_attention;
 	int32_t apic_arb_prio;
@@ -481,7 +532,13 @@ struct kvm_vcpu_arch {
 	 * the paging mode of the l1 guest. This context is always used to
 	 * handle faults.
 	 */
-	struct kvm_mmu mmu;
+	struct kvm_mmu *mmu;
+
+	/* Non-nested MMU for L1 */
+	struct kvm_mmu root_mmu;
+
+	/* L1 MMU when running nested */
+	struct kvm_mmu guest_mmu;
 
 	/*
 	 * Paging state of an L2 guest (used for nested npt)
@@ -515,10 +572,11 @@ struct kvm_vcpu_arch {
 
 	struct kvm_queued_exception {
 		bool pending;
+		bool injected;
 		bool has_error_code;
-		bool reinject;
 		u8 nr;
 		u32 error_code;
+		u8 nested_apf;
 	} exception;
 
 	struct kvm_queued_interrupt {
@@ -617,6 +675,8 @@ struct kvm_vcpu_arch {
 		u64 msr_val;
 		u32 id;
 		bool send_user_only;
+		u32 host_apf_reason;
+		unsigned long nested_apf_token;
 	} apf;
 
 	/* OSVW MSRs (AMD only) */
@@ -650,6 +710,10 @@ struct kvm_vcpu_arch {
 
 	/* Flush the L1 Data cache for L1TF mitigation on VMENTER */
 	bool l1tf_flush_l1d;
+
+	/* GPA available */
+	bool gpa_available;
+	gpa_t gpa_val;
 };
 
 struct kvm_lpage_info {
@@ -916,9 +980,7 @@ struct kvm_x86_ops {
 				unsigned char *hypercall_addr);
 	void (*set_irq)(struct kvm_vcpu *vcpu);
 	void (*set_nmi)(struct kvm_vcpu *vcpu);
-	void (*queue_exception)(struct kvm_vcpu *vcpu, unsigned nr,
-				bool has_error_code, u32 error_code,
-				bool reinject);
+	void (*queue_exception)(struct kvm_vcpu *vcpu);
 	void (*cancel_injection)(struct kvm_vcpu *vcpu);
 	int (*interrupt_allowed)(struct kvm_vcpu *vcpu);
 	int (*nmi_allowed)(struct kvm_vcpu *vcpu);
@@ -931,8 +993,9 @@ struct kvm_x86_ops {
 	void (*refresh_apicv_exec_ctrl)(struct kvm_vcpu *vcpu);
 	void (*hwapic_irr_update)(struct kvm_vcpu *vcpu, int max_irr);
 	void (*hwapic_isr_update)(struct kvm_vcpu *vcpu, int isr);
+	bool (*guest_apic_has_interrupt)(struct kvm_vcpu *vcpu);
 	void (*load_eoi_exitmap)(struct kvm_vcpu *vcpu, u64 *eoi_exit_bitmap);
-	void (*set_virtual_x2apic_mode)(struct kvm_vcpu *vcpu, bool set);
+	void (*set_virtual_apic_mode)(struct kvm_vcpu *vcpu);
 	void (*set_apic_access_page_addr)(struct kvm_vcpu *vcpu, hpa_t hpa);
 	void (*deliver_posted_interrupt)(struct kvm_vcpu *vcpu, int vector);
 	int (*sync_pir_to_irr)(struct kvm_vcpu *vcpu);
@@ -949,7 +1012,9 @@ struct kvm_x86_ops {
 
 	bool (*has_wbinvd_exit)(void);
 
-	void (*write_tsc_offset)(struct kvm_vcpu *vcpu, u64 offset);
+	u64 (*read_l1_tsc_offset)(struct kvm_vcpu *vcpu);
+	/* Returns actual tsc_offset set in active VMCS */
+	u64 (*write_l1_tsc_offset)(struct kvm_vcpu *vcpu, u64 offset);
 
 	void (*get_exit_info)(struct kvm_vcpu *vcpu, u64 *info1, u64 *info2);
 
@@ -1036,7 +1101,6 @@ void kvm_mmu_module_exit(void);
 
 void kvm_mmu_destroy(struct kvm_vcpu *vcpu);
 int kvm_mmu_create(struct kvm_vcpu *vcpu);
-void kvm_mmu_setup(struct kvm_vcpu *vcpu);
 void kvm_mmu_init_vm(struct kvm *kvm);
 void kvm_mmu_uninit_vm(struct kvm *kvm);
 void kvm_mmu_set_mask_ptes(u64 user_mask, u64 accessed_mask,
@@ -1179,6 +1243,10 @@ static inline int __kvm_irq_line_state(unsigned long *irq_state,
 	return !!(*irq_state);
 }
 
+#define KVM_MMU_ROOT_CURRENT		BIT(0)
+#define KVM_MMU_ROOT_PREVIOUS(i)	BIT(1+i)
+#define KVM_MMU_ROOTS_ALL		(~0UL)
+
 int kvm_pic_set_irq(struct kvm_pic *pic, int irq, int irq_source_id, int level);
 void kvm_pic_clear_all(struct kvm_pic *pic, int irq_source_id);
 
@@ -1192,6 +1260,8 @@ void __kvm_mmu_free_some_pages(struct kvm_vcpu *vcpu);
 int kvm_mmu_load(struct kvm_vcpu *vcpu);
 void kvm_mmu_unload(struct kvm_vcpu *vcpu);
 void kvm_mmu_sync_roots(struct kvm_vcpu *vcpu);
+void kvm_mmu_free_roots(struct kvm_vcpu *vcpu, struct kvm_mmu *mmu,
+			ulong roots_to_free);
 gpa_t translate_nested_gpa(struct kvm_vcpu *vcpu, gpa_t gpa, u32 access,
 			   struct x86_exception *exception);
 gpa_t kvm_mmu_gva_to_gpa_read(struct kvm_vcpu *vcpu, gva_t gva,
@@ -1207,10 +1277,10 @@ void kvm_vcpu_deactivate_apicv(struct kvm_vcpu *vcpu);
 
 int kvm_emulate_hypercall(struct kvm_vcpu *vcpu);
 
-int kvm_mmu_page_fault(struct kvm_vcpu *vcpu, gva_t gva, u32 error_code,
+int kvm_mmu_page_fault(struct kvm_vcpu *vcpu, gva_t gva, u64 error_code,
 		       void *insn, int insn_len);
 void kvm_mmu_invlpg(struct kvm_vcpu *vcpu, gva_t gva);
-void kvm_mmu_new_cr3(struct kvm_vcpu *vcpu);
+void kvm_mmu_new_cr3(struct kvm_vcpu *vcpu, gpa_t new_cr3);
 
 void kvm_enable_tdp(void);
 void kvm_disable_tdp(void);

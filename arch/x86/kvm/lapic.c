@@ -1274,9 +1274,8 @@ EXPORT_SYMBOL_GPL(kvm_lapic_reg_read);
 
 static int apic_mmio_in_range(struct kvm_lapic *apic, gpa_t addr)
 {
-	return kvm_apic_hw_enabled(apic) &&
-	    addr >= apic->base_address &&
-	    addr < apic->base_address + LAPIC_MMIO_LENGTH;
+	return addr >= apic->base_address &&
+		addr < apic->base_address + LAPIC_MMIO_LENGTH;
 }
 
 static int apic_mmio_read(struct kvm_io_device *this,
@@ -1287,6 +1286,15 @@ static int apic_mmio_read(struct kvm_io_device *this,
 
 	if (!apic_mmio_in_range(apic, address))
 		return -EOPNOTSUPP;
+
+	if (!kvm_apic_hw_enabled(apic) || apic_x2apic_mode(apic)) {
+		if (!kvm_check_has_quirk(apic->vcpu->kvm,
+					 KVM_X86_QUIRK_LAPIC_MMIO_HOLE))
+			return -EOPNOTSUPP;
+
+		memset(data, 0xff, len);
+		return 0;
+	}
 
 	kvm_lapic_reg_read(apic, offset, len, data);
 
@@ -1799,6 +1807,14 @@ static int apic_mmio_write(struct kvm_io_device *this,
 	if (!apic_mmio_in_range(apic, address))
 		return -EOPNOTSUPP;
 
+	if (!kvm_apic_hw_enabled(apic) || apic_x2apic_mode(apic)) {
+		if (!kvm_check_has_quirk(apic->vcpu->kvm,
+					 KVM_X86_QUIRK_LAPIC_MMIO_HOLE))
+			return -EOPNOTSUPP;
+
+		return 0;
+	}
+
 	/*
 	 * APIC register must be aligned on 128-bits boundary.
 	 * 32/64/128 bits registers must be accessed thru 32 bits.
@@ -1915,13 +1931,16 @@ void kvm_lapic_set_base(struct kvm_vcpu *vcpu, u64 value)
 	u64 old_value = vcpu->arch.apic_base;
 	struct kvm_lapic *apic = vcpu->arch.apic;
 
-	if (!apic) {
+	if (!apic)
 		value |= MSR_IA32_APICBASE_BSP;
-		vcpu->arch.apic_base = value;
-		return;
-	}
 
 	vcpu->arch.apic_base = value;
+
+	if ((old_value ^ value) & MSR_IA32_APICBASE_ENABLE)
+		kvm_update_cpuid(vcpu);
+
+	if (!apic)
+		return;
 
 	/* update jump label if enable bit changes */
 	if ((old_value ^ value) & MSR_IA32_APICBASE_ENABLE) {
@@ -1933,13 +1952,11 @@ void kvm_lapic_set_base(struct kvm_vcpu *vcpu, u64 value)
 		recalculate_apic_map(vcpu->kvm);
 	}
 
-	if ((old_value ^ value) & X2APIC_ENABLE) {
-		if (value & X2APIC_ENABLE) {
-			kvm_apic_set_x2apic_id(apic, vcpu->vcpu_id);
-			kvm_x86_ops->set_virtual_x2apic_mode(vcpu, true);
-		} else
-			kvm_x86_ops->set_virtual_x2apic_mode(vcpu, false);
-	}
+	if (((old_value ^ value) & X2APIC_ENABLE) && (value & X2APIC_ENABLE))
+		kvm_apic_set_x2apic_id(apic, vcpu->vcpu_id);
+
+	if ((old_value ^ value) & (MSR_IA32_APICBASE_ENABLE | X2APIC_ENABLE))
+		kvm_x86_ops->set_virtual_apic_mode(vcpu);
 
 	apic->base_address = apic->vcpu->arch.apic_base &
 			     MSR_IA32_APICBASE_BASE;

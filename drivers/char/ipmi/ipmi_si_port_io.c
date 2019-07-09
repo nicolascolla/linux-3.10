@@ -67,8 +67,6 @@ int ipmi_si_port_setup(struct si_sm_io *io)
 	if (!addr)
 		return -ENODEV;
 
-	io->io_cleanup = port_cleanup;
-
 	/*
 	 * Figure out the actual inb/inw/inl/etc routine to use based
 	 * upon the register size.
@@ -108,5 +106,8 @@ int ipmi_si_port_setup(struct si_sm_io *io)
 			return -EIO;
 		}
 	}
+
+	io->io_cleanup = port_cleanup;
+
 	return 0;
 }

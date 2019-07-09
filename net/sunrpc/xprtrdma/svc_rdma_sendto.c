@@ -602,10 +602,6 @@ err:
 	return ret;
 }
 
-void svc_rdma_prep_reply_hdr(struct svc_rqst *rqstp)
-{
-}
-
 /**
  * svc_rdma_sendto - Transmit an RPC reply
  * @rqstp: processed RPC request, reply XDR already in ::rq_res

@@ -243,7 +243,7 @@ void nvme_cancel_request(struct request *req, void *data, bool reserved)
 	if (blk_queue_dying(req->q))
 		status |= NVME_SC_DNR;
 	nvme_req(req)->status = status;
-	blk_mq_complete_request(req, 0);
+	blk_mq_complete_request_sync(req, 0);
 
 }
 EXPORT_SYMBOL_GPL(nvme_cancel_request);
@@ -1516,6 +1516,7 @@ static void nvme_set_queue_limits(struct nvme_ctrl *ctrl,
 		u32 max_segments =
 			(ctrl->max_hw_sectors / (ctrl->page_size >> 9)) + 1;
 
+		max_segments = min_not_zero(max_segments, ctrl->max_segments);
 		blk_queue_max_hw_sectors(q, ctrl->max_hw_sectors);
 		blk_queue_max_segments(q, min_t(u32, max_segments, USHRT_MAX));
 	}

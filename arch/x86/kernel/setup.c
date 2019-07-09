@@ -869,14 +869,42 @@ static void __init trim_low_memory_range(void)
 	memblock_reserve(0, ALIGN(reserve_low, PAGE_SIZE));
 }
 
-static bool valid_amd_processor(__u8 family, const char *model_id)
+static bool valid_amd_processor(__u8 family, const char *model_id, bool guest)
 {
-	bool valid;
+	bool valid = false;
+	int len;
 
-	if (family < 0x17)
+	switch(family) {
+	case 0x15:
 		valid = true;
-	else
-		valid = strstr(model_id, "AMD EPYC 7");
+		break;
+
+	case 0x17:
+		if (!guest) {
+			len = strlen("AMD EPYC 7");
+			if (!strncmp(model_id, "AMD EPYC 7", len)) {
+				len += 3;
+				/*
+				 * AMD EPYC 7xx1 == NAPLES
+				 * AMD EPYC 7xx2 == ROME
+				 */
+				if (strlen(model_id) >= len) {
+					if (model_id[len-1] == '1' ||
+					    model_id[len-1] == '2')
+						valid = true;
+				}
+			}
+		}
+		else {
+			/* guest names do not conform to bare metal */
+			if (!strncmp(model_id, "AMD EPYC", 8))
+				valid = true;
+		}
+		break;
+
+	default:
+		break;
+	}
 
 	return valid;
 }
@@ -887,11 +915,11 @@ static bool valid_intel_processor(__u8 model, __u8 stepping)
 
 	switch(model) {
 	case INTEL_FAM6_KABYLAKE_DESKTOP:
-		valid = (stepping <= 10 || stepping == 12);
+		valid = (stepping <= 13);
 		break;
 
 	case INTEL_FAM6_KABYLAKE_MOBILE:
-		valid = (stepping <= 11);
+		valid = (stepping <= 12);
 		break;
 
 	case INTEL_FAM6_XEON_PHI_KNM:
@@ -927,9 +955,13 @@ static bool valid_intel_processor(__u8 model, __u8 stepping)
 
 static void rh_check_supported(void)
 {
+	bool guest;
+
+	guest = x86_hyper || cpu_has_hypervisor;
+
 	/* RHEL7 supports single cpu on guests only */
 	if (((boot_cpu_data.x86_max_cores * smp_num_siblings) == 1) &&
-	    !x86_hyper && !cpu_has_hypervisor && !is_kdump_kernel()) {
+	    !guest && !is_kdump_kernel()) {
 		pr_crit("Detected single cpu native boot.\n");
 		pr_crit("Important:  In Red Hat Enterprise Linux 7, single threaded, single CPU 64-bit physical systems are unsupported by Red Hat. Please contact your Red Hat support representative for a list of certified and supported systems.");
 	}
@@ -948,7 +980,7 @@ static void rh_check_supported(void)
 
 	if (boot_cpu_data.x86_vendor == X86_VENDOR_AMD) {
 		if (!valid_amd_processor(boot_cpu_data.x86,
-					 boot_cpu_data.x86_model_id)) {
+					 boot_cpu_data.x86_model_id, guest)) {
 			pr_crit("Detected CPU family %xh model %d\n",
 				boot_cpu_data.x86,
 				boot_cpu_data.x86_model);
@@ -975,7 +1007,7 @@ static void rh_check_supported(void)
 	 * parameter, so just print out a loud warning in case something
 	 * goes wrong (which is most of the time).
 	 */
-	if (acpi_disabled && !x86_hyper && !cpu_has_hypervisor)
+	if (acpi_disabled && !guest)
 		pr_crit("ACPI has been disabled or is not available on this hardware.  This may result in a single cpu boot, incorrect PCI IRQ routing, or boot failure.\n");
 }
 

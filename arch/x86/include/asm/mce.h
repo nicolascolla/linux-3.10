@@ -354,24 +354,24 @@ enum smca_bank_types {
 	SMCA_IF,	/* Instruction Fetch */
 	SMCA_L2_CACHE,	/* L2 Cache */
 	SMCA_DE,	/* Decoder Unit */
+	SMCA_RESERVED,	/* Reserved */
 	SMCA_EX,	/* Execution Unit */
 	SMCA_FP,	/* Floating Point */
 	SMCA_L3_CACHE,	/* L3 Cache */
 	SMCA_CS,	/* Coherent Slave */
+	SMCA_CS_V2,	/* Coherent Slave */
 	SMCA_PIE,	/* Power, Interrupts, etc. */
 	SMCA_UMC,	/* Unified Memory Controller */
 	SMCA_PB,	/* Parameter Block */
 	SMCA_PSP,	/* Platform Security Processor */
+	SMCA_PSP_V2,	/* Platform Security Processor */
 	SMCA_SMU,	/* System Management Unit */
+	SMCA_SMU_V2,	/* System Management Unit */
+	SMCA_MP5,	/* Microprocessor 5 Unit */
+	SMCA_NBIO,	/* Northbridge IO Unit */
+	SMCA_PCIE,	/* PCI Express Unit */
 	N_SMCA_BANK_TYPES
 };
-
-struct smca_bank_name {
-	const char *name;	/* Short name for sysfs */
-	const char *long_name;	/* Long name for pretty-printing */
-};
-
-extern struct smca_bank_name smca_names[N_SMCA_BANK_TYPES];
 
 #define HWID_MCATYPE(hwid, mcatype) (((hwid) << 16) | (mcatype))
 
@@ -379,16 +379,18 @@ struct smca_hwid {
 	unsigned int bank_type;	/* Use with smca_bank_types for easy indexing. */
 	u32 hwid_mcatype;	/* (hwid,mcatype) tuple */
 	u32 xec_bitmap;		/* Bitmap of valid ExtErrorCodes; current max is 21. */
+	u8 count;		/* Number of instances. */
 };
 
 struct smca_bank {
 	struct smca_hwid *hwid;
-	/* Instance ID */
-	u32 id;
+	u32 id;			/* Value of MCA_IPID[InstanceId]. */
+	u8 sysfs_id;		/* Value used for sysfs name. */
 };
 
 extern struct smca_bank smca_banks[MAX_NR_BANKS];
 
+extern const char *smca_get_long_name(enum smca_bank_types t);
 #endif
 
 #endif /* _ASM_X86_MCE_H */

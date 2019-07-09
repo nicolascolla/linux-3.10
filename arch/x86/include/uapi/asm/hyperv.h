@@ -268,8 +268,14 @@
 #define HV_FLUSH_USE_EXTENDED_RANGE_FORMAT	BIT(3)
 
 enum HV_GENERIC_SET_FORMAT {
-	HV_GENERIC_SET_SPARCE_4K,
+	HV_GENERIC_SET_SPARSE_4K,
 	HV_GENERIC_SET_ALL,
+};
+
+struct hv_vpset {
+       __u64 format;
+       __u64 valid_bank_mask;
+       __u64 bank_contents[];
 };
 
 /* hypercall status code */
