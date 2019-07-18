@@ -53,11 +53,12 @@ struct netpoll_info {
 };
 
 #ifdef CONFIG_NETPOLL
-extern int netpoll_rx_disable(struct net_device *dev);
-extern void netpoll_rx_enable(struct net_device *dev);
+void netpoll_poll_dev(struct net_device *dev);
+void netpoll_poll_disable(struct net_device *dev);
+void netpoll_poll_enable(struct net_device *dev);
 #else
-static inline int netpoll_rx_disable(struct net_device *dev) { return 0; }
-static inline void netpoll_rx_enable(struct net_device *dev) { return; }
+static inline void netpoll_poll_disable(struct net_device *dev) { return; }
+static inline void netpoll_poll_enable(struct net_device *dev) { return; }
 #endif
 
 void netpoll_send_udp(struct netpoll *np, const char *msg, int len);

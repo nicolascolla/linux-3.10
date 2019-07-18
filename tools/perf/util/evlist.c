@@ -25,6 +25,7 @@
 #include "parse-events.h"
 #include <subcmd/parse-options.h>
 
+#include <fcntl.h>
 #include <sys/ioctl.h>
 #include <sys/mman.h>
 
@@ -357,7 +358,7 @@ void perf_evlist__disable(struct perf_evlist *evlist)
 	struct perf_evsel *pos;
 
 	evlist__for_each_entry(evlist, pos) {
-		if (!perf_evsel__is_group_leader(pos) || !pos->fd)
+		if (pos->disabled || !perf_evsel__is_group_leader(pos) || !pos->fd)
 			continue;
 		perf_evsel__disable(pos);
 	}
@@ -1064,10 +1065,30 @@ int perf_evlist__mmap(struct perf_evlist *evlist, unsigned int pages)
 
 int perf_evlist__create_maps(struct perf_evlist *evlist, struct target *target)
 {
+	bool all_threads = (target->per_thread && target->system_wide);
 	struct cpu_map *cpus;
 	struct thread_map *threads;
 
-	threads = thread_map__new_str(target->pid, target->tid, target->uid);
+	/*
+	 * If specify '-a' and '--per-thread' to perf record, perf record
+	 * will override '--per-thread'. target->per_thread = false and
+	 * target->system_wide = true.
+	 *
+	 * If specify '--per-thread' only to perf record,
+	 * target->per_thread = true and target->system_wide = false.
+	 *
+	 * So target->per_thread && target->system_wide is false.
+	 * For perf record, thread_map__new_str doesn't call
+	 * thread_map__new_all_cpus. That will keep perf record's
+	 * current behavior.
+	 *
+	 * For perf stat, it allows the case that target->per_thread and
+	 * target->system_wide are all true. It means to collect system-wide
+	 * per-thread data. thread_map__new_str will call
+	 * thread_map__new_all_cpus to enumerate all threads.
+	 */
+	threads = thread_map__new_str(target->pid, target->tid, target->uid,
+				      all_threads);
 
 	if (!threads)
 		return -1;
@@ -1705,7 +1726,7 @@ void perf_evlist__toggle_bkw_mmap(struct perf_evlist *evlist,
 	switch (old_state) {
 	case BKW_MMAP_NOTREADY: {
 		if (state != BKW_MMAP_RUNNING)
-			goto state_err;;
+			goto state_err;
 		break;
 	}
 	case BKW_MMAP_RUNNING: {
@@ -1757,4 +1778,62 @@ bool perf_evlist__exclude_kernel(struct perf_evlist *evlist)
 	}
 
 	return true;
+}
+
+struct perf_evsel *
+perf_evlist__find_evsel_by_str(struct perf_evlist *evlist,
+			       const char *str)
+{
+	struct perf_evsel *evsel;
+
+	evlist__for_each_entry(evlist, evsel) {
+		if (!evsel->name)
+			continue;
+		if (strcmp(str, evsel->name) == 0)
+			return evsel;
+	}
+
+	return NULL;
+}
+
+/*
+ * Events in data file are not collect in groups, but we still want
+ * the group display. Set the artificial group and set the leader's
+ * forced_leader flag to notify the display code.
+ */
+void perf_evlist__force_leader(struct perf_evlist *evlist)
+{
+	if (!evlist->nr_groups) {
+		struct perf_evsel *leader = perf_evlist__first(evlist);
+
+		perf_evlist__set_leader(evlist);
+		leader->forced_leader = true;
+	}
+}
+
+struct perf_evsel *perf_evlist__reset_weak_group(struct perf_evlist *evsel_list,
+						 struct perf_evsel *evsel)
+{
+	struct perf_evsel *c2, *leader;
+	bool is_open = true;
+
+	leader = evsel->leader;
+	pr_debug("Weak group for %s/%d failed\n",
+			leader->name, leader->nr_members);
+
+	/*
+	 * for_each_group_member doesn't work here because it doesn't
+	 * include the first entry.
+	 */
+	evlist__for_each_entry(evsel_list, c2) {
+		if (c2 == evsel)
+			is_open = false;
+		if (c2->leader == leader) {
+			if (is_open)
+				perf_evsel__close(c2);
+			c2->leader = c2;
+			c2->nr_members = 0;
+		}
+	}
+	return leader;
 }

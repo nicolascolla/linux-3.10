@@ -470,10 +470,10 @@ struct snd_riptide {
 };
 
 struct sgd {			/* scatter gather desriptor */
-	u32 dwNextLink;
-	u32 dwSegPtrPhys;
-	u32 dwSegLen;
-	u32 dwStat_Ctl;
+	__le32 dwNextLink;
+	__le32 dwSegPtrPhys;
+	__le32 dwSegLen;
+	__le32 dwStat_Ctl;
 };
 
 struct pcmhw {			/* pcm descriptor */
@@ -1974,10 +1974,8 @@ snd_riptide_proc_read(struct snd_info_entry *entry,
 
 static void snd_riptide_proc_init(struct snd_riptide *chip)
 {
-	struct snd_info_entry *entry;
-
-	if (!snd_card_proc_new(chip->card, "riptide", &entry))
-		snd_info_set_text_ops(entry, chip, snd_riptide_proc_read);
+	snd_card_ro_proc_new(chip->card, "riptide", chip,
+			     snd_riptide_proc_read);
 }
 
 static int snd_riptide_mixer(struct snd_riptide *chip)

@@ -83,11 +83,12 @@ out:
 	rcu_read_unlock();
 }
 
-int nf_xfrm_me_harder(struct sk_buff *skb, unsigned int family)
+int nf_xfrm_me_harder(struct net *net, struct sk_buff *skb, unsigned int family)
 {
 	struct flowi fl;
 	unsigned int hh_len;
 	struct dst_entry *dst;
+	struct sock *sk = skb->sk;
 	int err;
 
 	err = xfrm_decode_session(skb, &fl, family);
@@ -99,7 +100,10 @@ int nf_xfrm_me_harder(struct sk_buff *skb, unsigned int family)
 		dst = ((struct xfrm_dst *)dst)->route;
 	dst_hold(dst);
 
-	dst = xfrm_lookup(dev_net(dst->dev), dst, &fl, skb->sk, 0);
+	if (sk && !net_eq(net, sock_net(sk)))
+		sk = NULL;
+
+	dst = xfrm_lookup(net, dst, &fl, sk, 0);
 	if (IS_ERR(dst))
 		return PTR_ERR(dst);
 

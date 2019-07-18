@@ -34,6 +34,9 @@ struct qdisc_walker;
 struct tcf_walker;
 struct module;
 
+typedef int tc_indr_block_bind_cb_t(struct net_device *dev, void *cb_priv,
+				    enum tc_setup_type type, void *type_data);
+
 struct qdisc_rate_table {
 	struct tc_ratespec rate;
 	u32		data[256];
@@ -132,10 +135,11 @@ static inline bool qdisc_run_begin(struct Qdisc *qdisc)
 {
 	if (qdisc_is_running(qdisc))
 		return false;
-	/* RHEL: The seqcount structure has not lockdep functionality so
-	 * we use plain write_seqcount_begin() here.
+	/* Variant of write_seqcount_begin() telling lockdep a trylock
+	 * was attempted.
 	 */
-	write_seqcount_begin(&qdisc->running);
+	raw_write_seqcount_begin(&qdisc->running);
+	seqcount_acquire(&qdisc->running.dep_map, 0, 1, _RET_IP_);
 	return true;
 }
 
@@ -773,6 +777,16 @@ static inline void __qdisc_drop(struct sk_buff *skb, struct sk_buff **to_free)
 	*to_free = skb;
 }
 
+static inline void __qdisc_drop_all(struct sk_buff *skb,
+				    struct sk_buff **to_free)
+{
+	if (skb->prev)
+		skb->prev->next = *to_free;
+	else
+		skb->next = *to_free;
+	*to_free = skb;
+}
+
 static inline unsigned int __qdisc_queue_drop_head(struct Qdisc *sch,
 						   struct qdisc_skb_head *qh,
 						   struct sk_buff **to_free)
@@ -888,6 +902,15 @@ static inline int qdisc_drop(struct sk_buff *skb, struct Qdisc *sch,
 			     struct sk_buff **to_free)
 {
 	__qdisc_drop(skb, to_free);
+	qdisc_qstats_drop(sch);
+
+	return NET_XMIT_DROP;
+}
+
+static inline int qdisc_drop_all(struct sk_buff *skb, struct Qdisc *sch,
+				 struct sk_buff **to_free)
+{
+	__qdisc_drop_all(skb, to_free);
 	qdisc_qstats_drop(sch);
 
 	return NET_XMIT_DROP;

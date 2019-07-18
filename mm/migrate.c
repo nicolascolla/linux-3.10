@@ -40,6 +40,7 @@
 #include <linux/memremap.h>
 #include <linux/userfaultfd_k.h>
 #include <linux/ptrace.h>
+#include <linux/page_idle.h>
 
 #include <asm/tlbflush.h>
 
@@ -553,6 +554,11 @@ void migrate_page_states(struct page *newpage, struct page *page)
 			__set_page_dirty_nobuffers(newpage);
  	}
 
+	if (page_is_young(page))
+		set_page_young(newpage);
+	if (page_is_idle(page))
+		set_page_idle(newpage);
+
 	/*
 	 * Copy NUMA information to the new page, to prevent over-eager
 	 * future migrations of this same page.
@@ -978,6 +984,7 @@ static int unmap_and_move(new_page_t get_new_page, unsigned long private,
 	int rc = 0;
 	int *result = NULL;
 	struct page *newpage = get_new_page(page, private, &result);
+	bool is_lru = !isolated_balloon_page(page);
 
 	if (!newpage)
 		return -ENOMEM;
@@ -1009,9 +1016,12 @@ out:
 	}
 	/*
 	 * Move the new page to the LRU. If migration was not successful
-	 * then this will free the page.
+	 * then this will free the page. Use the old state of the isolated
+	 * source page to determine if we migrated a LRU page. newpage was
+	 * already unlocked and possibly modified by its owner - don't rely
+	 * on the page state.
 	 */
-	if (unlikely(__is_movable_balloon_page(newpage))) {
+	if (rc == MIGRATEPAGE_SUCCESS && unlikely(!is_lru)) {
 		/* drop our reference, page already in the balloon */
 		put_page(newpage);
 	} else {
@@ -1586,7 +1596,7 @@ static bool migrate_balanced_pgdat(struct pglist_data *pgdat,
 		if (!populated_zone(zone))
 			continue;
 
-		if (zone->all_unreclaimable)
+		if (!zone_reclaimable(zone))
 			continue;
 
 		/* Avoid waking kswapd by allocating pages_to_migrate pages. */
@@ -2657,7 +2667,8 @@ int migrate_vma(const struct migrate_vma_ops *ops,
 	/* Sanity check the arguments */
 	start &= PAGE_MASK;
 	end &= PAGE_MASK;
-	if (!vma || is_vm_hugetlb_page(vma) || (vma->vm_flags & VM_SPECIAL))
+	if (!vma || is_vm_hugetlb_page(vma) || (vma->vm_flags & VM_SPECIAL) ||
+			vma_is_dax(vma))
 		return -EINVAL;
 	if (start < vma->vm_start || start >= vma->vm_end)
 		return -EINVAL;

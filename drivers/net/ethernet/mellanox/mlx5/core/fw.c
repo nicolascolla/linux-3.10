@@ -184,6 +184,9 @@ int mlx5_query_hca_caps(struct mlx5_core_dev *dev)
 			return err;
 	}
 
+	if (MLX5_CAP_GEN(dev, debug))
+		mlx5_core_get_caps(dev, MLX5_CAP_DEBUG);
+
 	if (MLX5_CAP_GEN(dev, pcam_reg))
 		mlx5_get_pcam_reg(dev);
 
@@ -192,6 +195,12 @@ int mlx5_query_hca_caps(struct mlx5_core_dev *dev)
 
 	if (MLX5_CAP_GEN(dev, qcam_reg))
 		mlx5_get_qcam_reg(dev);
+
+	if (MLX5_CAP_GEN(dev, device_memory)) {
+		err = mlx5_core_get_caps(dev, MLX5_CAP_DEV_MEM);
+		if (err)
+			return err;
+	}
 
 	return 0;
 }

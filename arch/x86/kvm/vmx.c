@@ -27,6 +27,7 @@
 #include <linux/mm.h>
 #include <linux/highmem.h>
 #include <linux/sched.h>
+#include <linux/sched/smt.h>
 #include <linux/moduleparam.h>
 #include <linux/mod_devicetable.h>
 #include <linux/ftrace_event.h>
@@ -671,16 +672,16 @@ static int pi_test_and_set_pir(int vector, struct pi_desc *pi_desc)
 	return test_and_set_bit(vector, (unsigned long *)pi_desc->pir);
 }
 
-static inline void pi_clear_sn(struct pi_desc *pi_desc)
-{
-	return clear_bit(POSTED_INTR_SN,
-			(unsigned long *)&pi_desc->control);
-}
-
 static inline void pi_set_sn(struct pi_desc *pi_desc)
 {
-	return set_bit(POSTED_INTR_SN,
-			(unsigned long *)&pi_desc->control);
+	set_bit(POSTED_INTR_SN,
+		(unsigned long *)&pi_desc->control);
+}
+
+static inline void pi_set_on(struct pi_desc *pi_desc)
+{
+	set_bit(POSTED_INTR_ON,
+		(unsigned long *)&pi_desc->control);
 }
 
 static inline void pi_clear_on(struct pi_desc *pi_desc)
@@ -2394,21 +2395,6 @@ static void vmx_vcpu_pi_load(struct kvm_vcpu *vcpu, int cpu)
 	if (!pi_test_sn(pi_desc) && vcpu->cpu == cpu)
 		return;
 
-	/*
-	 * First handle the simple case where no cmpxchg is necessary; just
-	 * allow posting non-urgent interrupts.
-	 *
-	 * If the 'nv' field is POSTED_INTR_WAKEUP_VECTOR, do not change
-	 * PI.NDST: pi_post_block will do it for us and the wakeup_handler
-	 * expects the VCPU to be on the blocked_vcpu_list that matches
-	 * PI.NDST.
-	 */
-	if (pi_desc->nv == POSTED_INTR_WAKEUP_VECTOR ||
-	    vcpu->cpu == cpu) {
-		pi_clear_sn(pi_desc);
-		return;
-	}
-
 	/* The full case.  */
 	do {
 		old.control = new.control = pi_desc->control;
@@ -2423,6 +2409,17 @@ static void vmx_vcpu_pi_load(struct kvm_vcpu *vcpu, int cpu)
 		new.sn = 0;
 	} while (cmpxchg(&pi_desc->control, old.control,
 			new.control) != old.control);
+
+       /*
+        * Clear SN before reading the bitmap; this ensures that any
+        * interrupt that comes after the bitmap is read sets ON.  The
+        * VT-d firmware * writes the bitmap and reads SN atomically (5.2.3
+        * in the spec), so it doesn't really have a memory barrier that
+        * pairs with this.  However, we cannot do that and we need one.
+        */
+       smp_mb__after_atomic();
+       if (!bitmap_empty((unsigned long *)pi_desc->pir, NR_VECTORS))
+               pi_set_on(pi_desc);
 }
 
 static void decache_tsc_multiplier(struct vcpu_vmx *vmx)
@@ -5171,21 +5168,30 @@ static inline bool kvm_vcpu_trigger_posted_interrupt(struct kvm_vcpu *vcpu,
 	int pi_vec = nested ? POSTED_INTR_NESTED_VECTOR : POSTED_INTR_VECTOR;
 
 	if (vcpu->mode == IN_GUEST_MODE) {
-		struct vcpu_vmx *vmx = to_vmx(vcpu);
-
 		/*
-		 * Currently, we don't support urgent interrupt,
-		 * all interrupts are recognized as non-urgent
-		 * interrupt, so we cannot post interrupts when
-		 * 'SN' is set.
+		 * The vector of interrupt to be delivered to vcpu had
+		 * been set in PIR before this function.
 		 *
-		 * If the vcpu is in guest mode, it means it is
-		 * running instead of being scheduled out and
-		 * waiting in the run queue, and that's the only
-		 * case when 'SN' is set currently, warning if
-		 * 'SN' is set.
+		 * Following cases will be reached in this block, and
+		 * we always send a notification event in all cases as
+		 * explained below.
+		 *
+		 * Case 1: vcpu keeps in non-root mode. Sending a
+		 * notification event posts the interrupt to vcpu.
+		 *
+		 * Case 2: vcpu exits to root mode and is still
+		 * runnable. PIR will be synced to vIRR before the
+		 * next vcpu entry. Sending a notification event in
+		 * this case has no effect, as vcpu is not in root
+		 * mode.
+		 *
+		 * Case 3: vcpu exits to root mode and is blocked.
+		 * vcpu_block() has already synced PIR to vIRR and
+		 * never blocks vcpu if vIRR is not cleared. Therefore,
+		 * a blocked vcpu here does not wait for any requested
+		 * interrupts in PIR, and sending a notification event
+		 * which has no effect is safe here.
 		 */
-		WARN_ON_ONCE(pi_test_sn(&vmx->pi_desc));
 
 		apic->send_IPI_mask(get_cpu_mask(vcpu->cpu), pi_vec);
 		return true;
@@ -7148,8 +7154,7 @@ static int nested_vmx_check_vmptr(struct kvm_vcpu *vcpu, int exit_reason,
 			vmcs_read32(VMX_INSTRUCTION_INFO), false, &gva))
 		return 1;
 
-	if (kvm_read_guest_virt(&vcpu->arch.emulate_ctxt, gva, &vmptr,
-				sizeof(vmptr), &e)) {
+	if (kvm_read_guest_virt(vcpu, gva, &vmptr, sizeof(vmptr), &e)) {
 		kvm_inject_page_fault(vcpu, &e);
 		return 1;
 	}
@@ -7683,8 +7688,8 @@ static int handle_vmread(struct kvm_vcpu *vcpu)
 				vmx_instruction_info, true, &gva))
 			return 1;
 		/* _system ok, as nested_vmx_check_permission verified cpl=0 */
-		kvm_write_guest_virt_system(&vcpu->arch.emulate_ctxt, gva,
-			     &field_value, (is_long_mode(vcpu) ? 8 : 4), NULL);
+		kvm_write_guest_virt_system(vcpu, gva, &field_value,
+					    (is_long_mode(vcpu) ? 8 : 4), NULL);
 	}
 
 	nested_vmx_succeed(vcpu);
@@ -7723,8 +7728,8 @@ static int handle_vmwrite(struct kvm_vcpu *vcpu)
 		if (get_vmx_mem_address(vcpu, exit_qualification,
 				vmx_instruction_info, false, &gva))
 			return 1;
-		if (kvm_read_guest_virt(&vcpu->arch.emulate_ctxt, gva,
-			   &field_value, (is_64_bit_mode(vcpu) ? 8 : 4), &e)) {
+		if (kvm_read_guest_virt(vcpu, gva, &field_value,
+					(is_64_bit_mode(vcpu) ? 8 : 4), &e)) {
 			kvm_inject_page_fault(vcpu, &e);
 			return 1;
 		}
@@ -7826,9 +7831,9 @@ static int handle_vmptrst(struct kvm_vcpu *vcpu)
 			vmx_instruction_info, true, &vmcs_gva))
 		return 1;
 	/* ok to use *_system, as nested_vmx_check_permission verified cpl=0 */
-	if (kvm_write_guest_virt_system(&vcpu->arch.emulate_ctxt, vmcs_gva,
-				 (void *)&to_vmx(vcpu)->nested.current_vmptr,
-				 sizeof(u64), &e)) {
+	if (kvm_write_guest_virt_system(vcpu, vmcs_gva,
+					(void *)&to_vmx(vcpu)->nested.current_vmptr,
+					sizeof(u64), &e)) {
 		kvm_inject_page_fault(vcpu, &e);
 		return 1;
 	}
@@ -7882,8 +7887,7 @@ static int handle_invept(struct kvm_vcpu *vcpu)
 	if (get_vmx_mem_address(vcpu, vmcs_readl(EXIT_QUALIFICATION),
 			vmx_instruction_info, false, &gva))
 		return 1;
-	if (kvm_read_guest_virt(&vcpu->arch.emulate_ctxt, gva, &operand,
-				sizeof(operand), &e)) {
+	if (kvm_read_guest_virt(vcpu, gva, &operand, sizeof(operand), &e)) {
 		kvm_inject_page_fault(vcpu, &e);
 		return 1;
 	}
@@ -7949,8 +7953,7 @@ static int handle_invvpid(struct kvm_vcpu *vcpu)
 	if (get_vmx_mem_address(vcpu, vmcs_readl(EXIT_QUALIFICATION),
 			vmx_instruction_info, false, &gva))
 		return 1;
-	if (kvm_read_guest_virt(&vcpu->arch.emulate_ctxt, gva, &operand,
-				sizeof(operand), &e)) {
+	if (kvm_read_guest_virt(vcpu, gva, &operand, sizeof(operand), &e)) {
 		kvm_inject_page_fault(vcpu, &e);
 		return 1;
 	}
@@ -9694,7 +9697,7 @@ static int vmx_vm_init(struct kvm *kvm)
 			 * Warn upon starting the first VM in a potentially
 			 * insecure environment.
 			 */
-			if (cpu_smt_control == CPU_SMT_ENABLED)
+			if (sched_smt_active())
 				pr_warn_once(L1TF_MSG_SMT);
 			if (l1tf_vmx_mitigation == VMENTER_L1D_FLUSH_NEVER)
 				pr_warn_once(L1TF_MSG_L1D);

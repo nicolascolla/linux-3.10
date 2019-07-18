@@ -72,6 +72,11 @@ enum nvme_quirks {
 	 * The deepest sleep state should not be used.
 	 */
 	NVME_QUIRK_NO_DEEPEST_PS		= (1 << 5),
+
+	/*
+	 * Set MEDIUM priority on SQ creation
+	 */
+	NVME_QUIRK_MEDIUM_PRIO_SQ		= (1 << 7),
 };
 
 /*
@@ -84,6 +89,7 @@ struct nvme_request {
 	u8			retries;
 	u8			flags;
 	u16			status;
+	struct nvme_ctrl	*ctrl;
 };
 
 enum {
@@ -117,6 +123,7 @@ struct nvme_ctrl {
 	enum nvme_ctrl_state state;
 	bool identified;
 	spinlock_t lock;
+	struct mutex scan_lock;
 	const struct nvme_ctrl_ops *ops;
 	struct request_queue *admin_q;
 	struct request_queue *connect_q;
@@ -133,11 +140,13 @@ struct nvme_ctrl {
 	struct work_struct reset_work;
 	struct work_struct delete_work;
 
+	struct nvme_subsystem *subsys;
+	struct list_head subsys_entry;
+
 	char name[12];
 	char serial[20];
 	char model[40];
 	char firmware_rev[8];
-	char subnqn[NVMF_NQN_SIZE];
 	u16 cntlid;
 
 	u32 ctrl_config;
@@ -149,7 +158,6 @@ struct nvme_ctrl {
 	u32 max_hw_sectors;
 	u32 max_segments;
 	u16 oncs;
-	u16 vid;
 	u16 oacs;
 	atomic_t abort_limit;
 	u8 vwc;
@@ -158,6 +166,7 @@ struct nvme_ctrl {
 	u16 kas;
 	u8 npss;
 	u8 apsta;
+	u32 oaes;
 	u32 aen_result;
 	unsigned int shutdown_timeout;
 	unsigned int kato;
@@ -170,6 +179,7 @@ struct nvme_ctrl {
 	struct delayed_work ka_work;
 	struct nvme_command ka_cmd;
 	struct work_struct fw_act_work;
+	unsigned long events;
 
 	/* Power saving configuration */
 	u64 ps_max_latency_us;
@@ -189,6 +199,25 @@ struct nvme_ctrl {
 	u16 maxcmd;
 	int nr_reconnects;
 	struct nvmf_ctrl_options *opts;
+};
+
+struct nvme_subsystem {
+	int			instance;
+	struct device		dev;
+	/*
+	 * Because we unregister the device on the last put we need
+	 * a separate refcount.
+	 */
+	struct kref		ref;
+	struct list_head	entry;
+	struct mutex		lock;
+	struct list_head	ctrls;
+	char			subnqn[NVMF_NQN_SIZE];
+	char			serial[20];
+	char			model[40];
+	char			firmware_rev[8];
+	u8			cmic;
+	u16			vendor_id;
 };
 
 struct nvme_ns {
@@ -304,11 +333,10 @@ void nvme_stop_ctrl(struct nvme_ctrl *ctrl);
 void nvme_put_ctrl(struct nvme_ctrl *ctrl);
 int nvme_init_identify(struct nvme_ctrl *ctrl);
 
-void nvme_queue_scan(struct nvme_ctrl *ctrl);
 void nvme_remove_namespaces(struct nvme_ctrl *ctrl);
 
 void nvme_complete_async_event(struct nvme_ctrl *ctrl, __le16 status,
-		union nvme_result *res);
+		volatile union nvme_result *res);
 
 void nvme_stop_queues(struct nvme_ctrl *ctrl);
 void nvme_start_queues(struct nvme_ctrl *ctrl);
@@ -350,8 +378,8 @@ int nvme_reset_ctrl_sync(struct nvme_ctrl *ctrl);
 int nvme_delete_ctrl(struct nvme_ctrl *ctrl);
 int nvme_delete_ctrl_sync(struct nvme_ctrl *ctrl);
 
-int nvme_get_log_ext(struct nvme_ctrl *ctrl, struct nvme_ns *ns,
-		u8 log_page, void *log, size_t size, u64 offset);
+int nvme_get_log(struct nvme_ctrl *ctrl, u32 nsid, u8 log_page, u8 lsp,
+		void *log, size_t size, u64 offset);
 
 struct sg_io_hdr;
 

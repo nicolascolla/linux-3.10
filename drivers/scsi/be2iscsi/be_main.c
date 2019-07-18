@@ -1,11 +1,22 @@
 /*
- * Copyright 2017 Broadcom. All Rights Reserved.
- * The term "Broadcom" refers to Broadcom Limited and/or its subsidiaries.
+ * This file is part of the Emulex Linux Device Driver for Enterprise iSCSI
+ * Host Bus Adapters. Refer to the README file included with this package
+ * for driver version and adapter compatibility.
  *
- * This program is free software; you can redistribute it and/or
- * modify it under the terms of the GNU General Public License version 2
- * as published by the Free Software Foundation. The full GNU General
- * Public License is included in this distribution in the file called COPYING.
+ * Copyright (c) 2018 Broadcom. All Rights Reserved.
+ * The term “Broadcom” refers to Broadcom Inc. and/or its subsidiaries.
+ *
+ * This program is free software; you can redistribute it and/or modify it
+ * under the terms of version 2 of the GNU General Public License as published
+ * by the Free Software Foundation.
+ *
+ * This program is distributed in the hope that it will be useful. ALL EXPRESS
+ * OR IMPLIED CONDITIONS, REPRESENTATIONS AND WARRANTIES, INCLUDING ANY
+ * IMPLIED WARRANTY OF MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE,
+ * OR NON-INFRINGEMENT, ARE DISCLAIMED, EXCEPT TO THE EXTENT THAT SUCH
+ * DISCLAIMERS ARE HELD TO BE LEGALLY INVALID.
+ * See the GNU General Public License for more details, a copy of which
+ * can be found in the file COPYING included with this package.
  *
  * Contact Information:
  * linux-drivers@broadcom.com
@@ -821,15 +832,14 @@ static int beiscsi_init_irqs(struct beiscsi_hba *phba)
 
 	if (pcidev->msix_enabled) {
 		for (i = 0; i < phba->num_cpus; i++) {
-			phba->msi_name[i] = kzalloc(BEISCSI_MSI_NAME,
-						    GFP_KERNEL);
+			phba->msi_name[i] = kasprintf(GFP_KERNEL,
+						      "beiscsi_%02x_%02x",
+						      phba->shost->host_no, i);
 			if (!phba->msi_name[i]) {
 				ret = -ENOMEM;
 				goto free_msix_irqs;
 			}
 
-			sprintf(phba->msi_name[i], "beiscsi_%02x_%02x",
-				phba->shost->host_no, i);
 			ret = request_irq(pci_irq_vector(pcidev, i),
 					  be_isr_msix, 0, phba->msi_name[i],
 					  &phwi_context->be_eq[i]);
@@ -842,13 +852,12 @@ static int beiscsi_init_irqs(struct beiscsi_hba *phba)
 				goto free_msix_irqs;
 			}
 		}
-		phba->msi_name[i] = kzalloc(BEISCSI_MSI_NAME, GFP_KERNEL);
+		phba->msi_name[i] = kasprintf(GFP_KERNEL, "beiscsi_mcc_%02x",
+					      phba->shost->host_no);
 		if (!phba->msi_name[i]) {
 			ret = -ENOMEM;
 			goto free_msix_irqs;
 		}
-		sprintf(phba->msi_name[i], "beiscsi_mcc_%02x",
-			phba->shost->host_no);
 		ret = request_irq(pci_irq_vector(pcidev, i), be_isr_mcc, 0,
 				  phba->msi_name[i], &phwi_context->be_eq[i]);
 		if (ret) {
@@ -1860,7 +1869,6 @@ unsigned int beiscsi_process_cq(struct be_eq_obj *pbe_eq, int budget)
 {
 	struct be_queue_info *cq;
 	struct sol_cqe *sol;
-	struct dmsg_cqe *dmsg;
 	unsigned int total = 0;
 	unsigned int num_processed = 0;
 	unsigned short code = 0, cid = 0;
@@ -1933,7 +1941,6 @@ unsigned int beiscsi_process_cq(struct be_eq_obj *pbe_eq, int budget)
 				    "BM_%d : Received %s[%d] on CID : %d\n",
 				    cqe_desc[code], code, cid);
 
-			dmsg = (struct dmsg_cqe *)sol;
 			hwi_complete_drvr_msgs(beiscsi_conn, phba, sol);
 			break;
 		case UNSOL_HDR_NOTIFY:

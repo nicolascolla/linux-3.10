@@ -1214,7 +1214,7 @@ static inline int policy_to_flow_dir(int dir)
 	}
 }
 
-static struct xfrm_policy *xfrm_sk_policy_lookup(struct sock *sk, int dir,
+static struct xfrm_policy *xfrm_sk_policy_lookup(const struct sock *sk, int dir,
 						 const struct flowi *fl, u16 family)
 {
 	struct xfrm_policy *pol;
@@ -1405,7 +1405,7 @@ xfrm_tmpl_resolve_one(struct xfrm_policy *policy, const struct flowi *fl,
 	xfrm_address_t *saddr = xfrm_flowi_saddr(fl, family);
 	xfrm_address_t tmp;
 
-	for (nx=0, i = 0; i < policy->xfrm_nr; i++) {
+	for (nx = 0, i = 0; i < policy->xfrm_nr; i++) {
 		struct xfrm_state *x;
 		xfrm_address_t *remote = daddr;
 		xfrm_address_t *local  = saddr;
@@ -1445,7 +1445,7 @@ xfrm_tmpl_resolve_one(struct xfrm_policy *policy, const struct flowi *fl,
 	return nx;
 
 fail:
-	for (nx--; nx>=0; nx--)
+	for (nx--; nx >= 0; nx--)
 		xfrm_state_put(xfrm[nx]);
 	return error;
 }
@@ -1482,7 +1482,7 @@ xfrm_tmpl_resolve(struct xfrm_policy **pols, int npols, const struct flowi *fl,
 	return cnx;
 
  fail:
-	for (cnx--; cnx>=0; cnx--)
+	for (cnx--; cnx >= 0; cnx--)
 		xfrm_state_put(tpp[cnx]);
 	return error;
 
@@ -2138,7 +2138,7 @@ static struct dst_entry *make_blackhole(struct net *net, u16 family,
  */
 struct dst_entry *xfrm_lookup(struct net *net, struct dst_entry *dst_orig,
 			      const struct flowi *fl,
-			      struct sock *sk, int flags)
+			      const struct sock *sk, int flags)
 {
 	struct xfrm_policy *pols[XFRM_POLICY_TYPE_MAX];
 	struct flow_cache_object *flo;
@@ -2152,6 +2152,7 @@ struct dst_entry *xfrm_lookup(struct net *net, struct dst_entry *dst_orig,
 	xdst = NULL;
 	route = NULL;
 
+	sk = sk_const_to_full_sk(sk);
 	if (sk && sk->sk_policy[XFRM_POLICY_OUT]) {
 		num_pols = 1;
 		pols[0] = xfrm_sk_policy_lookup(sk, XFRM_POLICY_OUT, fl, family);
@@ -2286,7 +2287,7 @@ EXPORT_SYMBOL(xfrm_lookup);
  */
 struct dst_entry *xfrm_lookup_route(struct net *net, struct dst_entry *dst_orig,
 				    const struct flowi *fl,
-				    struct sock *sk, int flags)
+				    const struct sock *sk, int flags)
 {
 	struct dst_entry *dst = xfrm_lookup(net, dst_orig, fl, sk,
 					    flags | XFRM_LOOKUP_QUEUE |
@@ -2294,6 +2295,9 @@ struct dst_entry *xfrm_lookup_route(struct net *net, struct dst_entry *dst_orig,
 
 	if (IS_ERR(dst) && PTR_ERR(dst) == -EREMOTE)
 		return make_blackhole(net, dst_orig->ops->family, dst_orig);
+
+	if (IS_ERR(dst))
+		dst_release(dst_orig);
 
 	return dst;
 }
@@ -2421,7 +2425,7 @@ int __xfrm_policy_check(struct sock *sk, int dir, struct sk_buff *skb,
 	if (skb->sp) {
 		int i;
 
-		for (i=skb->sp->len-1; i>=0; i--) {
+		for (i = skb->sp->len-1; i >= 0; i--) {
 			struct xfrm_state *x = skb->sp->xvec[i];
 			if (!xfrm_selector_match(&x->sel, &fl, family)) {
 				XFRM_INC_STATS(net, LINUX_MIB_XFRMINSTATEMISMATCH);
@@ -2431,6 +2435,7 @@ int __xfrm_policy_check(struct sock *sk, int dir, struct sk_buff *skb,
 	}
 
 	pol = NULL;
+	sk = sk_to_full_sk(sk);
 	if (sk && sk->sk_policy[dir]) {
 		pol = xfrm_sk_policy_lookup(sk, dir, &fl, family);
 		if (IS_ERR(pol)) {
@@ -2749,14 +2754,8 @@ static unsigned int xfrm_mtu(const struct dst_entry *dst)
 	return mtu ? : dst_mtu(dst->path);
 }
 
-static struct neighbour *xfrm_neigh_lookup(const struct dst_entry *dst,
-					   struct sk_buff *skb,
-					   const void *daddr)
-{
-	return dst->path->ops->neigh_lookup(dst, skb, daddr);
-}
-
-static void xfrm_confirm_neigh(const struct dst_entry *dst, const void *daddr)
+static const void *xfrm_get_dst_nexthop(const struct dst_entry *dst,
+					const void *daddr)
 {
 	const struct dst_entry *path = dst->path;
 
@@ -2770,6 +2769,25 @@ static void xfrm_confirm_neigh(const struct dst_entry *dst, const void *daddr)
 		else if (!(xfrm->type->flags & XFRM_TYPE_LOCAL_COADDR))
 			daddr = &xfrm->id.daddr;
 	}
+	return daddr;
+}
+
+static struct neighbour *xfrm_neigh_lookup(const struct dst_entry *dst,
+					   struct sk_buff *skb,
+					   const void *daddr)
+{
+	const struct dst_entry *path = dst->path;
+
+	if (!skb)
+		daddr = xfrm_get_dst_nexthop(dst, daddr);
+	return path->ops->neigh_lookup(path, skb, daddr);
+}
+
+static void xfrm_confirm_neigh(const struct dst_entry *dst, const void *daddr)
+{
+	const struct dst_entry *path = dst->path;
+
+	daddr = xfrm_get_dst_nexthop(dst, daddr);
 	path->ops->confirm_neigh(path, daddr);
 }
 
@@ -3057,7 +3075,7 @@ static void xfrm_audit_common_policyinfo(struct xfrm_policy *xp,
 		audit_log_format(audit_buf, " sec_alg=%u sec_doi=%u sec_obj=%s",
 				 ctx->ctx_alg, ctx->ctx_doi, ctx->ctx_str);
 
-	switch(sel->family) {
+	switch (sel->family) {
 	case AF_INET:
 		audit_log_format(audit_buf, " src=%pI4", &sel->saddr.a4);
 		if (sel->prefixlen_s != 32)

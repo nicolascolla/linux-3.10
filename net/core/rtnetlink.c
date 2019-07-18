@@ -1365,6 +1365,54 @@ static u32 rtnl_get_event(unsigned long event)
 	return rtnl_event_type;
 }
 
+static int put_master_ifindex(struct sk_buff *skb, struct net_device *dev)
+{
+	const struct net_device *upper_dev;
+	int ret = 0;
+
+	rcu_read_lock();
+
+	upper_dev = netdev_master_upper_dev_get_rcu(dev);
+	if (upper_dev)
+		ret = nla_put_u32(skb, IFLA_MASTER, upper_dev->ifindex);
+
+	rcu_read_unlock();
+	return ret;
+}
+
+static int nla_put_iflink(struct sk_buff *skb, const struct net_device *dev,
+			  bool force)
+{
+	int ifindex = dev_get_iflink(dev);
+
+	if (force || dev->ifindex != ifindex)
+		return nla_put_u32(skb, IFLA_LINK, ifindex);
+
+	return 0;
+}
+
+static int rtnl_fill_link_netnsid(struct sk_buff *skb,
+				  const struct net_device *dev,
+				  struct net *src_net)
+{
+	bool put_iflink = false;
+
+	if (dev->rtnl_link_ops && dev->rtnl_link_ops->get_link_net) {
+		struct net *link_net = dev->rtnl_link_ops->get_link_net(dev);
+
+		if (!net_eq(dev_net(dev), link_net)) {
+			int id = peernet2id_alloc(src_net, link_net);
+
+			if (nla_put_s32(skb, IFLA_LINK_NETNSID, id))
+				return -EMSGSIZE;
+
+			put_iflink = true;
+		}
+	}
+
+	return nla_put_iflink(skb, dev, put_iflink);
+}
+
 static int rtnl_fill_ifinfo(struct sk_buff *skb,
 			    struct net_device *dev, struct net *src_net,
 			    int type, u32 pid, u32 seq, u32 change,
@@ -1376,7 +1424,6 @@ static int rtnl_fill_ifinfo(struct sk_buff *skb,
 	struct nlmsghdr *nlh;
 	struct nlattr *af_spec;
 	struct rtnl_af_ops *af_ops;
-	struct net_device *upper_dev = netdev_master_upper_dev_get(dev);
 
 	ASSERT_RTNL();
 	nlh = nlmsg_put(skb, pid, seq, type, sizeof(*ifm), flags);
@@ -1408,10 +1455,7 @@ static int rtnl_fill_ifinfo(struct sk_buff *skb,
 #ifdef CONFIG_RPS
 	    nla_put_u32(skb, IFLA_NUM_RX_QUEUES, dev->num_rx_queues) ||
 #endif
-	    (dev->ifindex != dev_get_iflink(dev) &&
-	     nla_put_u32(skb, IFLA_LINK, dev_get_iflink(dev))) ||
-	    (upper_dev &&
-	     nla_put_u32(skb, IFLA_MASTER, upper_dev->ifindex)) ||
+	    put_master_ifindex(skb, dev) ||
 	    nla_put_u8(skb, IFLA_CARRIER, netif_carrier_ok(dev)) ||
 	    (dev->qdisc &&
 	     nla_put_string(skb, IFLA_QDISC, dev->qdisc->ops->id)) ||
@@ -1477,17 +1521,8 @@ static int rtnl_fill_ifinfo(struct sk_buff *skb,
 			goto nla_put_failure;
 	}
 
-	if (dev->rtnl_link_ops &&
-	    dev->rtnl_link_ops->get_link_net) {
-		struct net *link_net = dev->rtnl_link_ops->get_link_net(dev);
-
-		if (!net_eq(dev_net(dev), link_net)) {
-			int id = peernet2id_alloc(src_net, link_net);
-
-			if (nla_put_s32(skb, IFLA_LINK_NETNSID, id))
-				goto nla_put_failure;
-		}
-	}
+	if (rtnl_fill_link_netnsid(skb, dev, src_net))
+		goto nla_put_failure;
 
 	if (new_nsid &&
 	    nla_put_s32(skb, IFLA_NEW_NETNSID, *new_nsid) < 0)
@@ -3591,12 +3626,16 @@ static int rtnl_bridge_notify(struct net_device *dev)
 	if (err < 0)
 		goto errout;
 
+	if (!skb->len)
+		goto errout;
+
 	rtnl_notify(skb, net, 0, RTNLGRP_LINK, NULL, GFP_ATOMIC);
 	return 0;
 errout:
 	WARN_ON(err == -EMSGSIZE);
 	kfree_skb(skb);
-	rtnl_set_sk_err(net, RTNLGRP_LINK, err);
+	if (err)
+		rtnl_set_sk_err(net, RTNLGRP_LINK, err);
 	return err;
 }
 
@@ -4242,6 +4281,7 @@ void __init rtnetlink_init(void)
 
 	rtnl_register(PF_UNSPEC, RTM_GETADDR, NULL, rtnl_dump_all, NULL);
 	rtnl_register(PF_UNSPEC, RTM_GETROUTE, NULL, rtnl_dump_all, NULL);
+	rtnl_register(PF_UNSPEC, RTM_GETNETCONF, NULL, rtnl_dump_all, NULL);
 
 	rtnl_register(PF_BRIDGE, RTM_NEWNEIGH, rtnl_fdb_add, NULL, NULL);
 	rtnl_register(PF_BRIDGE, RTM_DELNEIGH, rtnl_fdb_del, NULL, NULL);

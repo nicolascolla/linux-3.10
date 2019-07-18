@@ -89,6 +89,9 @@ static const struct usb_device_id id_table[] = {
 	{ USB_DEVICE(0x10C4, 0x8156) }, /* B&G H3000 link cable */
 	{ USB_DEVICE(0x10C4, 0x815E) }, /* Helicomm IP-Link 1220-DVM */
 	{ USB_DEVICE(0x10C4, 0x815F) }, /* Timewave HamLinkUSB */
+	{ USB_DEVICE(0x10C4, 0x817C) }, /* CESINEL MEDCAL N Power Quality Monitor */
+	{ USB_DEVICE(0x10C4, 0x817D) }, /* CESINEL MEDCAL NT Power Quality Monitor */
+	{ USB_DEVICE(0x10C4, 0x817E) }, /* CESINEL MEDCAL S Power Quality Monitor */
 	{ USB_DEVICE(0x10C4, 0x818B) }, /* AVIT Research USB to TTL */
 	{ USB_DEVICE(0x10C4, 0x819F) }, /* MJS USB Toslink Switcher */
 	{ USB_DEVICE(0x10C4, 0x81A6) }, /* ThinkOptics WavIt */
@@ -106,6 +109,9 @@ static const struct usb_device_id id_table[] = {
 	{ USB_DEVICE(0x10C4, 0x826B) }, /* Cygnal Integrated Products, Inc., Fasttrax GPS demonstration module */
 	{ USB_DEVICE(0x10C4, 0x8281) }, /* Nanotec Plug & Drive */
 	{ USB_DEVICE(0x10C4, 0x8293) }, /* Telegesis ETRX2USB */
+	{ USB_DEVICE(0x10C4, 0x82EF) }, /* CESINEL FALCO 6105 AC Power Supply */
+	{ USB_DEVICE(0x10C4, 0x82F1) }, /* CESINEL MEDCAL EFD Earth Fault Detector */
+	{ USB_DEVICE(0x10C4, 0x82F2) }, /* CESINEL MEDCAL ST Network Analyzer */
 	{ USB_DEVICE(0x10C4, 0x82F4) }, /* Starizona MicroTouch */
 	{ USB_DEVICE(0x10C4, 0x82F9) }, /* Procyon AVS */
 	{ USB_DEVICE(0x10C4, 0x8341) }, /* Siemens MC35PU GPRS Modem */
@@ -118,7 +124,9 @@ static const struct usb_device_id id_table[] = {
 	{ USB_DEVICE(0x10C4, 0x8470) }, /* Juniper Networks BX Series System Console */
 	{ USB_DEVICE(0x10C4, 0x8477) }, /* Balluff RFID */
 	{ USB_DEVICE(0x10C4, 0x84B6) }, /* Starizona Hyperion */
+	{ USB_DEVICE(0x10C4, 0x851E) }, /* CESINEL MEDCAL PT Network Analyzer */
 	{ USB_DEVICE(0x10C4, 0x85A7) }, /* LifeScan OneTouch Verio IQ */
+	{ USB_DEVICE(0x10C4, 0x85B8) }, /* CESINEL ReCon T Energy Logger */
 	{ USB_DEVICE(0x10C4, 0x85EA) }, /* AC-Services IBUS-IF */
 	{ USB_DEVICE(0x10C4, 0x85EB) }, /* AC-Services CIS-IBUS */
 	{ USB_DEVICE(0x10C4, 0x85F8) }, /* Virtenio Preon32 */
@@ -128,17 +136,24 @@ static const struct usb_device_id id_table[] = {
 	{ USB_DEVICE(0x10C4, 0x8857) },	/* CEL EM357 ZigBee USB Stick */
 	{ USB_DEVICE(0x10C4, 0x88A4) }, /* MMB Networks ZigBee USB Device */
 	{ USB_DEVICE(0x10C4, 0x88A5) }, /* Planet Innovation Ingeni ZigBee USB Device */
+	{ USB_DEVICE(0x10C4, 0x88FB) }, /* CESINEL MEDCAL STII Network Analyzer */
+	{ USB_DEVICE(0x10C4, 0x8938) }, /* CESINEL MEDCAL S II Network Analyzer */
 	{ USB_DEVICE(0x10C4, 0x8946) }, /* Ketra N1 Wireless Interface */
 	{ USB_DEVICE(0x10C4, 0x8962) }, /* Brim Brothers charging dock */
 	{ USB_DEVICE(0x10C4, 0x8977) },	/* CEL MeshWorks DevKit Device */
 	{ USB_DEVICE(0x10C4, 0x8998) }, /* KCF Technologies PRN */
+	{ USB_DEVICE(0x10C4, 0x89A4) }, /* CESINEL FTBC Flexible Thyristor Bridge Controller */
+	{ USB_DEVICE(0x10C4, 0x89FB) }, /* Qivicon ZigBee USB Radio Stick */
 	{ USB_DEVICE(0x10C4, 0x8A2A) }, /* HubZ dual ZigBee and Z-Wave dongle */
 	{ USB_DEVICE(0x10C4, 0x8A5E) }, /* CEL EM3588 ZigBee USB Stick Long Range */
 	{ USB_DEVICE(0x10C4, 0x8B34) }, /* Qivicon ZigBee USB Radio Stick */
 	{ USB_DEVICE(0x10C4, 0xEA60) }, /* Silicon Labs factory default */
 	{ USB_DEVICE(0x10C4, 0xEA61) }, /* Silicon Labs factory default */
+	{ USB_DEVICE(0x10C4, 0xEA63) }, /* Silicon Labs Windows Update (CP2101-4/CP2102N) */
 	{ USB_DEVICE(0x10C4, 0xEA70) }, /* Silicon Labs factory default */
 	{ USB_DEVICE(0x10C4, 0xEA71) }, /* Infinity GPS-MIC-1 Radio Monophone */
+	{ USB_DEVICE(0x10C4, 0xEA7A) }, /* Silicon Labs Windows Update (CP2105) */
+	{ USB_DEVICE(0x10C4, 0xEA7B) }, /* Silicon Labs Windows Update (CP2108) */
 	{ USB_DEVICE(0x10C4, 0xF001) }, /* Elan Digital Systems USBscope50 */
 	{ USB_DEVICE(0x10C4, 0xF002) }, /* Elan Digital Systems USBwave12 */
 	{ USB_DEVICE(0x10C4, 0xF003) }, /* Elan Digital Systems USBpulse100 */
@@ -149,6 +164,7 @@ static const struct usb_device_id id_table[] = {
 	{ USB_DEVICE(0x12B8, 0xEC62) }, /* Link G4+ ECU */
 	{ USB_DEVICE(0x13AD, 0x9999) }, /* Baltech card reader */
 	{ USB_DEVICE(0x1555, 0x0004) }, /* Owen AC4 USB-RS485 Converter */
+	{ USB_DEVICE(0x155A, 0x1006) },	/* ELDAT Easywave RX09 */
 	{ USB_DEVICE(0x166A, 0x0201) }, /* Clipsal 5500PACA C-Bus Pascal Automation Controller */
 	{ USB_DEVICE(0x166A, 0x0301) }, /* Clipsal 5800PC C-Bus Wireless PC Interface */
 	{ USB_DEVICE(0x166A, 0x0303) }, /* Clipsal 5500PCU C-Bus USB interface */
@@ -207,6 +223,7 @@ static const struct usb_device_id id_table[] = {
 	{ USB_DEVICE(0x3195, 0xF190) }, /* Link Instruments MSO-19 */
 	{ USB_DEVICE(0x3195, 0xF280) }, /* Link Instruments MSO-28 */
 	{ USB_DEVICE(0x3195, 0xF281) }, /* Link Instruments MSO-28 */
+	{ USB_DEVICE(0x3923, 0x7A0B) }, /* National Instruments USB Serial Console */
 	{ USB_DEVICE(0x413C, 0x9500) }, /* DW700 GPS USB interface */
 	{ } /* Terminating Entry */
 };
@@ -590,48 +607,6 @@ static int cp210x_get_line_ctl(struct usb_serial_port *port, u16 *ctl)
 	return 0;
 }
 
-/*
- * cp210x_quantise_baudrate
- * Quantises the baud rate as per AN205 Table 1
- */
-static unsigned int cp210x_quantise_baudrate(unsigned int baud)
-{
-	if (baud <= 300)
-		baud = 300;
-	else if (baud <= 600)      baud = 600;
-	else if (baud <= 1200)     baud = 1200;
-	else if (baud <= 1800)     baud = 1800;
-	else if (baud <= 2400)     baud = 2400;
-	else if (baud <= 4000)     baud = 4000;
-	else if (baud <= 4803)     baud = 4800;
-	else if (baud <= 7207)     baud = 7200;
-	else if (baud <= 9612)     baud = 9600;
-	else if (baud <= 14428)    baud = 14400;
-	else if (baud <= 16062)    baud = 16000;
-	else if (baud <= 19250)    baud = 19200;
-	else if (baud <= 28912)    baud = 28800;
-	else if (baud <= 38601)    baud = 38400;
-	else if (baud <= 51558)    baud = 51200;
-	else if (baud <= 56280)    baud = 56000;
-	else if (baud <= 58053)    baud = 57600;
-	else if (baud <= 64111)    baud = 64000;
-	else if (baud <= 77608)    baud = 76800;
-	else if (baud <= 117028)   baud = 115200;
-	else if (baud <= 129347)   baud = 128000;
-	else if (baud <= 156868)   baud = 153600;
-	else if (baud <= 237832)   baud = 230400;
-	else if (baud <= 254234)   baud = 250000;
-	else if (baud <= 273066)   baud = 256000;
-	else if (baud <= 491520)   baud = 460800;
-	else if (baud <= 567138)   baud = 500000;
-	else if (baud <= 670254)   baud = 576000;
-	else if (baud < 1000000)
-		baud = 921600;
-	else if (baud > 2000000)
-		baud = 2000000;
-	return baud;
-}
-
 static int cp210x_open(struct tty_struct *tty, struct usb_serial_port *port)
 {
 	int result;
@@ -851,6 +826,58 @@ static void cp210x_get_termios_port(struct usb_serial_port *port,
 	*cflagp = cflag;
 }
 
+struct cp210x_rate {
+	speed_t rate;
+	speed_t high;
+};
+
+static const struct cp210x_rate cp210x_an205_table1[] = {
+	{ 300, 300 },
+	{ 600, 600 },
+	{ 1200, 1200 },
+	{ 1800, 1800 },
+	{ 2400, 2400 },
+	{ 4000, 4000 },
+	{ 4800, 4803 },
+	{ 7200, 7207 },
+	{ 9600, 9612 },
+	{ 14400, 14428 },
+	{ 16000, 16062 },
+	{ 19200, 19250 },
+	{ 28800, 28912 },
+	{ 38400, 38601 },
+	{ 51200, 51558 },
+	{ 56000, 56280 },
+	{ 57600, 58053 },
+	{ 64000, 64111 },
+	{ 76800, 77608 },
+	{ 115200, 117028 },
+	{ 128000, 129347 },
+	{ 153600, 156868 },
+	{ 230400, 237832 },
+	{ 250000, 254234 },
+	{ 256000, 273066 },
+	{ 460800, 491520 },
+	{ 500000, 567138 },
+	{ 576000, 670254 },
+	{ 921600, UINT_MAX }
+};
+
+/*
+ * Quantises the baud rate as per AN205 Table 1
+ */
+static speed_t cp210x_get_an205_rate(speed_t baud)
+{
+	int i;
+
+	for (i = 0; i < ARRAY_SIZE(cp210x_an205_table1); ++i) {
+		if (baud <= cp210x_an205_table1[i].high)
+			break;
+	}
+
+	return cp210x_an205_table1[i].rate;
+}
+
 /*
  * CP2101 supports the following baud rates:
  *
@@ -889,7 +916,10 @@ static void cp210x_change_speed(struct tty_struct *tty,
 	 *
 	 * NOTE: B0 is not implemented.
 	 */
-	baud = cp210x_quantise_baudrate(baud);
+	if (baud < 1000000)
+		baud = cp210x_get_an205_rate(baud);
+	else if (baud > 2000000)
+		baud = 2000000;
 
 	dev_dbg(&port->dev, "%s - setting baud rate to %u\n", __func__, baud);
 	if (cp210x_write_u32_reg(port, CP210X_SET_BAUDRATE, baud)) {

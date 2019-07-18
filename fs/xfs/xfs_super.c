@@ -986,6 +986,32 @@ xfs_fs_alloc_inode(
 	return NULL;
 }
 
+#ifdef DEBUG
+static void
+xfs_check_delalloc(
+	struct xfs_inode	*ip,
+	int			whichfork)
+{
+	struct xfs_ifork	*ifp = XFS_IFORK_PTR(ip, whichfork);
+	struct xfs_bmbt_irec	got;
+	struct xfs_iext_cursor	icur;
+
+	if (!ifp || !xfs_iext_lookup_extent(ip, ifp, 0, &icur, &got))
+		return;
+	do {
+		if (isnullstartblock(got.br_startblock)) {
+			xfs_warn(ip->i_mount,
+	"ino %llx %s fork has delalloc extent at [0x%llx:0x%llx]",
+				ip->i_ino,
+				whichfork == XFS_DATA_FORK ? "data" : "cow",
+				got.br_startoff, got.br_blockcount);
+		}
+	} while (xfs_iext_next_extent(ifp, &icur, &got));
+}
+#else
+#define xfs_check_delalloc(ip, whichfork)	do { } while (0)
+#endif
+
 /*
  * Now that the generic code is guaranteed not to be accessing
  * the linux inode, we can inactivate and reclaim the inode.
@@ -1004,7 +1030,11 @@ xfs_fs_destroy_inode(
 
 	xfs_inactive(ip);
 
-	ASSERT(XFS_FORCED_SHUTDOWN(ip->i_mount) || ip->i_delayed_blks == 0);
+	if (!XFS_FORCED_SHUTDOWN(ip->i_mount) && ip->i_delayed_blks) {
+		xfs_check_delalloc(ip, XFS_DATA_FORK);
+		ASSERT(0);
+	}
+
 	XFS_STATS_INC(ip->i_mount, vn_reclaim);
 
 	/*
@@ -1246,7 +1276,7 @@ xfs_test_remount_options(
 	tmp_mp->m_super = sb;
 	error = xfs_parseargs(tmp_mp, options);
 	xfs_free_fsname(tmp_mp);
-	kfree(tmp_mp);
+	kmem_free(tmp_mp);
 
 	return error;
 }
@@ -1654,6 +1684,16 @@ xfs_fs_fill_super(
 		if (!printed) {
 			mark_tech_preview("xfs direct access (dax)", NULL);
 			printed = true;
+		}
+	}
+
+	if (mp->m_flags & XFS_MOUNT_DISCARD) {
+		struct request_queue *q = bdev_get_queue(sb->s_bdev);
+
+		if (!blk_queue_discard(q)) {
+			xfs_warn(mp, "mounting with \"discard\" option, but "
+					"the device does not support discard");
+			mp->m_flags &= ~XFS_MOUNT_DISCARD;
 		}
 	}
 

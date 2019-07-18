@@ -1874,7 +1874,7 @@ int t4vf_eth_eq_free(struct adapter *adapter, unsigned int eqid)
  *
  *	Returns a string representation of the Link Down Reason Code.
  */
-const char *t4vf_link_down_rc_str(unsigned char link_down_rc)
+static const char *t4vf_link_down_rc_str(unsigned char link_down_rc)
 {
 	static const char * const reason[] = {
 		"Link Down",
@@ -1900,8 +1900,8 @@ const char *t4vf_link_down_rc_str(unsigned char link_down_rc)
  *
  *	Processes a GET_PORT_INFO FW reply message.
  */
-void t4vf_handle_get_port_info(struct port_info *pi,
-			       const struct fw_port_cmd *cmd)
+static void t4vf_handle_get_port_info(struct port_info *pi,
+				      const struct fw_port_cmd *cmd)
 {
 	int action = FW_PORT_CMD_ACTION_G(be32_to_cpu(cmd->action_to_len16));
 	struct adapter *adapter = pi->adapter;
@@ -2005,8 +2005,10 @@ void t4vf_handle_get_port_info(struct port_info *pi,
 	    fc != lc->fc || fec != lc->fec) {	/* something changed */
 		if (!link_ok && lc->link_ok) {
 			lc->link_down_rc = linkdnrc;
-			dev_warn(adapter->pdev_dev, "Port %d link down, reason: %s\n",
-				 pi->port_id, t4vf_link_down_rc_str(linkdnrc));
+			dev_warn_ratelimited(adapter->pdev_dev,
+					     "Port %d link down, reason: %s\n",
+					     pi->port_id,
+					     t4vf_link_down_rc_str(linkdnrc));
 		}
 		lc->link_ok = link_ok;
 		lc->speed = speed;

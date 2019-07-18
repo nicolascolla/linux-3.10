@@ -23,7 +23,9 @@ static inline unsigned long long rdclock(void)
 	return ts.tv_sec * 1000000000ULL + ts.tv_nsec;
 }
 
+#ifndef MAX_NR_CPUS
 #define MAX_NR_CPUS			1024
+#endif
 
 extern const char *input_name;
 extern bool perf_host, perf_guest;
@@ -49,6 +51,7 @@ struct record_opts {
 	bool	     sample_time_set;
 	bool	     sample_cpu;
 	bool	     period;
+	bool	     period_set;
 	bool	     running_time;
 	bool	     full_auxtrace;
 	bool	     auxtrace_snapshot_mode;
@@ -58,6 +61,8 @@ struct record_opts {
 	bool	     tail_synthesize;
 	bool	     overwrite;
 	bool	     ignore_missing_thread;
+	bool	     strict_freq;
+	bool	     sample_id;
 	unsigned int freq;
 	unsigned int mmap_pages;
 	unsigned int auxtrace_mmap_pages;
@@ -73,10 +78,14 @@ struct record_opts {
 	unsigned     initial_delay;
 	bool         use_clockid;
 	clockid_t    clockid;
+	u64          clockid_res_ns;
 	unsigned int proc_map_timeout;
 };
 
 struct option;
 extern const char * const *record_usage;
 extern struct option *record_options;
+extern int version_verbose;
+
+int record__parse_freq(const struct option *opt, const char *str, int unset);
 #endif

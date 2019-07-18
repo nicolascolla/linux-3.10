@@ -298,13 +298,17 @@ struct i40e_tx_buffer {
 
 struct i40e_rx_buffer {
 	dma_addr_t dma;
-	struct page *page;
-#if (BITS_PER_LONG > 32) || (PAGE_SIZE >= 65536)
-	__u32 page_offset;
-#else
-	__u16 page_offset;
-#endif
-	__u16 pagecnt_bias;
+	union {
+		struct {
+			struct page *page;
+			__u32 page_offset;
+			__u16 pagecnt_bias;
+		};
+		struct {
+			void *addr;
+			u64 handle;
+		};
+	};
 };
 
 struct i40e_queue_stats {
@@ -416,6 +420,8 @@ struct i40e_ring {
 
 	struct i40e_channel *ch;
 	struct xdp_rxq_info xdp_rxq;
+	struct xdp_umem *xsk_umem;
+	struct zero_copy_allocator zca; /* ZC allocator anchor */
 } ____cacheline_internodealigned_in_smp;
 
 static inline bool ring_uses_build_skb(struct i40e_ring *ring)
@@ -489,8 +495,8 @@ u32 i40e_get_tx_pending(struct i40e_ring *ring, bool in_sw);
 void i40e_detect_recover_hung(struct i40e_vsi *vsi);
 int __i40e_maybe_stop_tx(struct i40e_ring *tx_ring, int size);
 bool __i40e_chk_linearize(struct sk_buff *skb);
-int i40e_xdp_xmit(struct net_device *dev, struct xdp_frame *xdpf);
-void i40e_xdp_flush(struct net_device *dev);
+int i40e_xdp_xmit(struct net_device *dev, int n, struct xdp_frame **frames,
+		  u32 flags);
 
 /**
  * i40e_get_head - Retrieve head from head writeback

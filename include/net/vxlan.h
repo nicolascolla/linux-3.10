@@ -4,7 +4,7 @@
 #include <linux/if_vlan.h>
 #include <net/udp_tunnel.h>
 #include <net/dst_metadata.h>
-#include <net/udp_tunnel.h>
+#include <net/rtnetlink.h>
 
 /* VXLAN protocol (RFC 7348) header:
  * +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
@@ -368,6 +368,44 @@ static inline __be32 vxlan_compute_rco(unsigned int start, unsigned int offset)
 static inline unsigned short vxlan_get_sk_family(struct vxlan_sock *vs)
 {
 	return vs->sock->sk->sk_family;
+}
+
+#if IS_ENABLED(CONFIG_IPV6)
+
+static inline bool vxlan_addr_any(const union vxlan_addr *ipa)
+{
+	if (ipa->sa.sa_family == AF_INET6)
+		return ipv6_addr_any(&ipa->sin6.sin6_addr);
+	else
+		return ipa->sin.sin_addr.s_addr == htonl(INADDR_ANY);
+}
+
+static inline bool vxlan_addr_multicast(const union vxlan_addr *ipa)
+{
+	if (ipa->sa.sa_family == AF_INET6)
+		return ipv6_addr_is_multicast(&ipa->sin6.sin6_addr);
+	else
+		return IN_MULTICAST(ntohl(ipa->sin.sin_addr.s_addr));
+}
+
+#else /* !IS_ENABLED(CONFIG_IPV6) */
+
+static inline bool vxlan_addr_any(const union vxlan_addr *ipa)
+{
+	return ipa->sin.sin_addr.s_addr == htonl(INADDR_ANY);
+}
+
+static inline bool vxlan_addr_multicast(const union vxlan_addr *ipa)
+{
+	return IN_MULTICAST(ntohl(ipa->sin.sin_addr.s_addr));
+}
+
+#endif /* IS_ENABLED(CONFIG_IPV6) */
+
+static inline bool netif_is_vxlan(const struct net_device *dev)
+{
+	return dev->rtnl_link_ops &&
+	       !strcmp(dev->rtnl_link_ops->kind, "vxlan");
 }
 
 #endif

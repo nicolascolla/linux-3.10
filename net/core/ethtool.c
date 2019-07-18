@@ -120,6 +120,7 @@ tunable_strings[__ETHTOOL_TUNABLE_COUNT][ETH_GSTRING_LEN] = {
 	[ETHTOOL_ID_UNSPEC]     = "Unspec",
 	[ETHTOOL_RX_COPYBREAK]	= "rx-copybreak",
 	[ETHTOOL_TX_COPYBREAK]	= "tx-copybreak",
+	[ETHTOOL_PFC_PREVENTION_TOUT] = "pfc-prevention-tout",
 };
 
 static int ethtool_get_features(struct net_device *dev, void __user *useraddr)
@@ -410,7 +411,7 @@ bool ethtool_convert_link_mode_to_legacy_u32(u32 *legacy_u32,
 EXPORT_SYMBOL(ethtool_convert_link_mode_to_legacy_u32);
 
 /* return false if legacy contained non-0 deprecated fields
- * transceiver/maxtxpkt/maxrxpkt. rest of ksettings always updated
+ * maxtxpkt/maxrxpkt. rest of ksettings always updated
  */
 static bool
 convert_legacy_settings_to_link_ksettings(
@@ -425,8 +426,7 @@ convert_legacy_settings_to_link_ksettings(
 	 * deprecated legacy fields, and they should not use
 	 * %ETHTOOL_GLINKSETTINGS/%ETHTOOL_SLINKSETTINGS
 	 */
-	if (legacy_settings->transceiver ||
-	    legacy_settings->maxtxpkt ||
+	if (legacy_settings->maxtxpkt ||
 	    legacy_settings->maxrxpkt)
 		retval = false;
 
@@ -499,6 +499,8 @@ convert_link_ksettings_to_legacy_settings(
 		= link_ksettings->base.eth_tp_mdix;
 	legacy_settings->eth_tp_mdix_ctrl
 		= link_ksettings->base.eth_tp_mdix_ctrl;
+	legacy_settings->transceiver
+		= link_ksettings->base.transceiver;
 	return retval;
 }
 
@@ -1768,7 +1770,7 @@ static noinline_for_stack int ethtool_get_channels(struct net_device *dev,
 static noinline_for_stack int ethtool_set_channels(struct net_device *dev,
 						   void __user *useraddr)
 {
-	struct ethtool_channels channels, max;
+	struct ethtool_channels channels, max = { .cmd = ETHTOOL_GCHANNELS };
 	u32 max_rx_in_use = 0;
 
 	if (!dev->ethtool_ops->set_channels || !dev->ethtool_ops->get_channels)
@@ -2251,6 +2253,11 @@ static int ethtool_tunable_valid(const struct ethtool_tunable *tuna)
 		    tuna->type_id != ETHTOOL_TUNABLE_U32)
 			return -EINVAL;
 		break;
+	case ETHTOOL_PFC_PREVENTION_TOUT:
+		if (tuna->len != sizeof(u16) ||
+		    tuna->type_id != ETHTOOL_TUNABLE_U16)
+			return -EINVAL;
+		break;
 	default:
 		return -EINVAL;
 	}
@@ -2408,12 +2415,16 @@ roll_back:
 	return ret;
 }
 
-static int ethtool_set_per_queue(struct net_device *dev, void __user *useraddr)
+static int ethtool_set_per_queue(struct net_device *dev,
+				 void __user *useraddr, u32 sub_cmd)
 {
 	struct ethtool_per_queue_op per_queue_opt;
 
 	if (copy_from_user(&per_queue_opt, useraddr, sizeof(per_queue_opt)))
 		return -EFAULT;
+
+	if (per_queue_opt.sub_command != sub_cmd)
+		return -EINVAL;
 
 	switch (per_queue_opt.sub_command) {
 	case ETHTOOL_GCOALESCE:
@@ -2703,7 +2714,7 @@ int dev_ethtool(struct net *net, struct ifreq *ifr)
 		rc = ethtool_set_tunable(dev, useraddr);
 		break;
 	case ETHTOOL_PERQUEUE:
-		rc = ethtool_set_per_queue(dev, useraddr);
+		rc = ethtool_set_per_queue(dev, useraddr, sub_cmd);
 		break;
 	case ETHTOOL_GLINKSETTINGS:
 		rc = ethtool_get_link_ksettings(dev, useraddr);

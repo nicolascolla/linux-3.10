@@ -121,11 +121,16 @@ static void nvmet_execute_flush(struct nvmet_req *req)
 static u16 nvmet_discard_range(struct nvmet_ns *ns,
 		struct nvme_dsm_range *range, struct bio **bio)
 {
-	if (blkdev_issue_discard(ns->bdev,
+	int ret;
+
+	ret = blkdev_issue_discard(ns->bdev,
 			le64_to_cpu(range->slba) << (ns->blksize_shift - 9),
 			le32_to_cpu(range->nlb) << (ns->blksize_shift - 9),
-			GFP_KERNEL, 0))
+			GFP_KERNEL, 0);
+	if (ret && ret != -EOPNOTSUPP) {
 		return NVME_SC_INTERNAL | NVME_SC_DNR;
+	}
+
 	return 0;
 }
 
@@ -182,10 +187,8 @@ u16 nvmet_parse_io_cmd(struct nvmet_req *req)
 	u16 ret;
 
 	ret = nvmet_check_ctrl_status(req, cmd);
-	if (unlikely(ret)) {
-		req->ns = NULL;
+	if (unlikely(ret))
 		return ret;
-	}
 
 	req->ns = nvmet_find_namespace(req->sq->ctrl, cmd->rw.nsid);
 	if (unlikely(!req->ns))

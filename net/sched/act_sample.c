@@ -42,6 +42,7 @@ static int tcf_sample_init(struct net *net, struct nlattr *nla,
 	struct tc_action_net *tn = net_generic(net, sample_net_id);
 	struct nlattr *tb[TCA_SAMPLE_MAX + 1];
 	struct psample_group *psample_group;
+	u32 rate;
 	struct tc_sample *parm;
 	struct tcf_sample *s;
 	bool exists = false;
@@ -64,24 +65,27 @@ static int tcf_sample_init(struct net *net, struct nlattr *nla,
 
 	if (!exists) {
 		ret = tcf_idr_create(tn, parm->index, est, a,
-				     &act_sample_ops, bind, false);
+				     &act_sample_ops, bind, true);
 		if (ret)
 			return ret;
 		ret = ACT_P_CREATED;
-	} else {
+	} else if (!ovr) {
 		tcf_idr_release(*a, bind);
-		if (!ovr)
-			return -EEXIST;
+		return -EEXIST;
+	}
+	rate = nla_get_u32(tb[TCA_SAMPLE_RATE]);
+	if (!rate) {
+		tcf_idr_release(*a, bind);
+		return -EINVAL;
 	}
 	s = to_sample(*a);
 
 	s->tcf_action = parm->action;
-	s->rate = nla_get_u32(tb[TCA_SAMPLE_RATE]);
+	s->rate = rate;
 	s->psample_group_num = nla_get_u32(tb[TCA_SAMPLE_PSAMPLE_GROUP]);
 	psample_group = psample_group_get(net, s->psample_group_num);
 	if (!psample_group) {
-		if (ret == ACT_P_CREATED)
-			tcf_idr_release(*a, bind);
+		tcf_idr_release(*a, bind);
 		return -ENOMEM;
 	}
 	RCU_INIT_POINTER(s->psample_group, psample_group);
@@ -96,21 +100,15 @@ static int tcf_sample_init(struct net *net, struct nlattr *nla,
 	return ret;
 }
 
-static void tcf_sample_cleanup_rcu(struct rcu_head *rcu)
-{
-	struct tcf_sample *s = container_of(rcu, struct tcf_sample, rcu);
-	struct psample_group *psample_group;
-
-	psample_group = rcu_dereference_protected(s->psample_group, 1);
-	RCU_INIT_POINTER(s->psample_group, NULL);
-	psample_group_put(psample_group);
-}
-
 static void tcf_sample_cleanup(struct tc_action *a, int bind)
 {
 	struct tcf_sample *s = to_sample(a);
+	struct psample_group *psample_group;
 
-	call_rcu(&s->rcu, tcf_sample_cleanup_rcu);
+	psample_group = rtnl_dereference(s->psample_group);
+	RCU_INIT_POINTER(s->psample_group, NULL);
+	if (psample_group)
+		psample_group_put(psample_group);
 }
 
 static bool tcf_sample_dev_ok_push(struct net_device *dev)
@@ -264,7 +262,6 @@ static int __init sample_init_module(void)
 
 static void __exit sample_cleanup_module(void)
 {
-	rcu_barrier();
 	tcf_unregister_action(&act_sample_ops, &sample_net_ops);
 }
 

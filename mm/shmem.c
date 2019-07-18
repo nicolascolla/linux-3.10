@@ -491,7 +491,7 @@ void shmem_unlock_mapping(struct address_space *mapping)
 			break;
 		index = indices[pvec.nr - 1] + 1;
 		pagevec_remove_exceptionals(&pvec);
-		check_move_unevictable_pages(pvec.pages, pvec.nr);
+		check_move_unevictable_pages(&pvec);
 		pagevec_release(&pvec);
 		cond_resched();
 	}
@@ -1186,7 +1186,7 @@ repeat:
 
 	if (swap.val) {
 		/* Look it up and read it in.. */
-		page = lookup_swap_cache(swap);
+		page = lookup_swap_cache(swap, NULL, 0);
 		if (!page) {
 			/* here we actually do the io */
 			if (fault_type)
@@ -3676,8 +3676,8 @@ put_memory:
  * shmem_kernel_file_setup - get an unlinked file living in tmpfs which must be
  * 	kernel internal.  There will be NO LSM permission checks against the
  * 	underlying inode.  So users of this interface must do LSM checks at a
- * 	higher layer.  The one user is the big_key implementation.  LSM checks
- * 	are provided at the key level rather than the inode level.
+ *	higher layer.  The users are the big_key and shm implementations.  LSM
+ *	checks are provided at the key or shm level rather than the inode.
  * @name: name for dentry (to be seen in /proc/<pid>/maps
  * @size: size to be set for the file
  * @flags: VM_NORESERVE suppresses pre-accounting of the entire object size

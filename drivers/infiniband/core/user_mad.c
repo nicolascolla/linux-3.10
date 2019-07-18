@@ -50,7 +50,7 @@
 #include <linux/semaphore.h>
 #include <linux/slab.h>
 
-#include <asm/uaccess.h>
+#include <linux/uaccess.h>
 
 #include <rdma/ib_mad.h>
 #include <rdma/ib_user_mad.h>
@@ -129,8 +129,6 @@ struct ib_umad_packet {
 	int		   length;
 	struct ib_user_mad mad;
 };
-
-static struct class *umad_class;
 
 static const dev_t base_umad_dev = MKDEV(IB_UMAD_MAJOR, IB_UMAD_MINOR_BASE);
 static const dev_t base_issm_dev = MKDEV(IB_UMAD_MAJOR, IB_UMAD_MINOR_BASE) +
@@ -268,6 +266,7 @@ static void recv_handler(struct ib_mad_agent *agent,
 		packet->mad.hdr.traffic_class = grh->traffic_class;
 		memcpy(packet->mad.hdr.gid, &grh->dgid, 16);
 		packet->mad.hdr.flow_label = cpu_to_be32(grh->flow_label);
+		rdma_destroy_ah_attr(&ah_attr);
 	}
 
 	if (queue_packet(file, agent, packet))
@@ -1131,7 +1130,7 @@ static ssize_t show_ibdev(struct device *dev, struct device_attribute *attr,
 	if (!port)
 		return -ENODEV;
 
-	return sprintf(buf, "%s\n", port->ib_dev->name);
+	return sprintf(buf, "%s\n", dev_name(&port->ib_dev->dev));
 }
 static DEVICE_ATTR(ibdev, S_IRUGO, show_ibdev, NULL);
 
@@ -1149,6 +1148,16 @@ static DEVICE_ATTR(port, S_IRUGO, show_port, NULL);
 
 static CLASS_ATTR_STRING(abi_version, S_IRUGO,
 			 __stringify(IB_USER_MAD_ABI_VERSION));
+
+static char *umad_devnode(struct device *dev, umode_t *mode)
+{
+	return kasprintf(GFP_KERNEL, "infiniband/%s", dev_name(dev));
+}
+
+static struct class umad_class = {
+	.name		= "infiniband_mad",
+	.devnode	= umad_devnode,
+};
 
 static int ib_umad_init_port(struct ib_device *device, int port_num,
 			     struct ib_umad_device *umad_dev,
@@ -1184,7 +1193,7 @@ static int ib_umad_init_port(struct ib_device *device, int port_num,
 	if (cdev_add(&port->cdev, base_umad, 1))
 		goto err_cdev;
 
-	port->dev = device_create(umad_class, device->dev.parent,
+	port->dev = device_create(&umad_class, device->dev.parent,
 				  port->cdev.dev, port,
 				  "umad%d", port->dev_num);
 	if (IS_ERR(port->dev))
@@ -1202,7 +1211,7 @@ static int ib_umad_init_port(struct ib_device *device, int port_num,
 	if (cdev_add(&port->sm_cdev, base_issm, 1))
 		goto err_sm_cdev;
 
-	port->sm_dev = device_create(umad_class, device->dev.parent,
+	port->sm_dev = device_create(&umad_class, device->dev.parent,
 				     port->sm_cdev.dev, port,
 				     "issm%d", port->dev_num);
 	if (IS_ERR(port->sm_dev))
@@ -1216,13 +1225,13 @@ static int ib_umad_init_port(struct ib_device *device, int port_num,
 	return 0;
 
 err_sm_dev:
-	device_destroy(umad_class, port->sm_cdev.dev);
+	device_destroy(&umad_class, port->sm_cdev.dev);
 
 err_sm_cdev:
 	cdev_del(&port->sm_cdev);
 
 err_dev:
-	device_destroy(umad_class, port->cdev.dev);
+	device_destroy(&umad_class, port->cdev.dev);
 
 err_cdev:
 	cdev_del(&port->cdev);
@@ -1236,17 +1245,11 @@ static void ib_umad_kill_port(struct ib_umad_port *port)
 	struct ib_umad_file *file;
 	int id;
 
-	dev_set_drvdata(port->dev,    NULL);
-	dev_set_drvdata(port->sm_dev, NULL);
-
-	device_destroy(umad_class, port->cdev.dev);
-	device_destroy(umad_class, port->sm_cdev.dev);
-
-	cdev_del(&port->cdev);
-	cdev_del(&port->sm_cdev);
-
 	mutex_lock(&port->file_mutex);
 
+	/* Mark ib_dev NULL and block ioctl or other file ops to progress
+	 * further.
+	 */
 	port->ib_dev = NULL;
 
 	list_for_each_entry(file, &port->file_list, port_list) {
@@ -1260,6 +1263,16 @@ static void ib_umad_kill_port(struct ib_umad_port *port)
 	}
 
 	mutex_unlock(&port->file_mutex);
+
+	dev_set_drvdata(port->dev,    NULL);
+	dev_set_drvdata(port->sm_dev, NULL);
+
+	device_destroy(&umad_class, port->cdev.dev);
+	device_destroy(&umad_class, port->sm_cdev.dev);
+
+	cdev_del(&port->cdev);
+	cdev_del(&port->sm_cdev);
+
 	clear_bit(port->dev_num, dev_map);
 }
 
@@ -1327,11 +1340,6 @@ static void ib_umad_remove_one(struct ib_device *device, void *client_data)
 	kobject_put(&umad_dev->kobj);
 }
 
-static char *umad_devnode(struct device *dev, umode_t *mode)
-{
-	return kasprintf(GFP_KERNEL, "infiniband/%s", dev_name(dev));
-}
-
 static int __init ib_umad_init(void)
 {
 	int ret;
@@ -1353,16 +1361,13 @@ static int __init ib_umad_init(void)
 	}
 	dynamic_issm_dev = dynamic_umad_dev + IB_UMAD_NUM_DYNAMIC_MINOR;
 
-	umad_class = class_create(THIS_MODULE, "infiniband_mad");
-	if (IS_ERR(umad_class)) {
-		ret = PTR_ERR(umad_class);
+	ret = class_register(&umad_class);
+	if (ret) {
 		pr_err("couldn't create class infiniband_mad\n");
 		goto out_chrdev;
 	}
 
-	umad_class->devnode = umad_devnode;
-
-	ret = class_create_file(umad_class, &class_attr_abi_version.attr);
+	ret = class_create_file(&umad_class, &class_attr_abi_version.attr);
 	if (ret) {
 		pr_err("couldn't create abi_version attribute\n");
 		goto out_class;
@@ -1377,7 +1382,7 @@ static int __init ib_umad_init(void)
 	return 0;
 
 out_class:
-	class_destroy(umad_class);
+	class_unregister(&umad_class);
 
 out_chrdev:
 	unregister_chrdev_region(dynamic_umad_dev,
@@ -1394,7 +1399,7 @@ out:
 static void __exit ib_umad_cleanup(void)
 {
 	ib_unregister_client(&umad_client);
-	class_destroy(umad_class);
+	class_unregister(&umad_class);
 	unregister_chrdev_region(base_umad_dev,
 				 IB_UMAD_NUM_FIXED_MINOR * 2);
 	unregister_chrdev_region(dynamic_umad_dev,

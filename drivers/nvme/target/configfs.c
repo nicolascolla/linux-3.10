@@ -137,8 +137,10 @@ static ssize_t nvmet_addr_traddr_store(struct config_item *item,
 		pr_err("Disable the address before modifying\n");
 		return -EACCES;
 	}
-	return snprintf(port->disc_addr.traddr,
-			sizeof(port->disc_addr.traddr), "%s", page);
+
+	if (sscanf(page, "%s\n", port->disc_addr.traddr) != 1)
+		return -EINVAL;
+	return count;
 }
 
 CONFIGFS_ATTR(nvmet_, addr_traddr);
@@ -208,11 +210,42 @@ static ssize_t nvmet_addr_trsvcid_store(struct config_item *item,
 		pr_err("Disable the address before modifying\n");
 		return -EACCES;
 	}
-	return snprintf(port->disc_addr.trsvcid,
-			sizeof(port->disc_addr.trsvcid), "%s", page);
+
+	if (sscanf(page, "%s\n", port->disc_addr.trsvcid) != 1)
+		return -EINVAL;
+	return count;
 }
 
 CONFIGFS_ATTR(nvmet_, addr_trsvcid);
+
+static ssize_t nvmet_param_inline_data_size_show(struct config_item *item,
+		char *page)
+{
+	struct nvmet_port *port = to_nvmet_port(item);
+
+	return snprintf(page, PAGE_SIZE, "%d\n", port->inline_data_size);
+}
+
+static ssize_t nvmet_param_inline_data_size_store(struct config_item *item,
+		const char *page, size_t count)
+{
+	struct nvmet_port *port = to_nvmet_port(item);
+	int ret;
+
+	if (port->enabled) {
+		pr_err("Cannot modify inline_data_size while port enabled\n");
+		pr_err("Disable the port before modifying\n");
+		return -EACCES;
+	}
+	ret = kstrtoint(page, 0, &port->inline_data_size);
+	if (ret) {
+		pr_err("Invalid value '%s' for inline_data_size\n", page);
+		return -EINVAL;
+	}
+	return count;
+}
+
+CONFIGFS_ATTR(nvmet_, param_inline_data_size);
 
 static ssize_t nvmet_addr_trtype_show(struct config_item *item,
 		char *page)
@@ -278,6 +311,7 @@ static ssize_t nvmet_ns_device_path_store(struct config_item *item,
 {
 	struct nvmet_ns *ns = to_nvmet_ns(item);
 	struct nvmet_subsys *subsys = ns->subsys;
+	size_t len;
 	int ret;
 
 	mutex_lock(&subsys->lock);
@@ -285,10 +319,14 @@ static ssize_t nvmet_ns_device_path_store(struct config_item *item,
 	if (ns->enabled)
 		goto out_unlock;
 
-	kfree(ns->device_path);
+	ret = -EINVAL;
+	len = strcspn(page, "\n");
+	if (!len)
+		goto out_unlock;
 
+	kfree(ns->device_path);
 	ret = -ENOMEM;
-	ns->device_path = kstrdup(page, GFP_KERNEL);
+	ns->device_path = kstrndup(page, len, GFP_KERNEL);
 	if (!ns->device_path)
 		goto out_unlock;
 
@@ -872,6 +910,7 @@ static struct configfs_attribute *nvmet_port_attrs[] = {
 	&nvmet_attr_addr_traddr,
 	&nvmet_attr_addr_trsvcid,
 	&nvmet_attr_addr_trtype,
+	&nvmet_attr_param_inline_data_size,
 	NULL,
 };
 
@@ -901,6 +940,7 @@ static struct config_group *nvmet_ports_make(struct config_group *group,
 	INIT_LIST_HEAD(&port->entry);
 	INIT_LIST_HEAD(&port->subsystems);
 	INIT_LIST_HEAD(&port->referrals);
+	port->inline_data_size = -1;	/* < 0 == let the transport choose */
 
 	port->disc_addr.portid = cpu_to_le16(portid);
 	config_group_init_type_name(&port->group, name, &nvmet_port_type);

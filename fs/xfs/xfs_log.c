@@ -22,6 +22,7 @@
 #include "xfs_log_format.h"
 #include "xfs_trans_resv.h"
 #include "xfs_mount.h"
+#include "xfs_errortag.h"
 #include "xfs_error.h"
 #include "xfs_trans.h"
 #include "xfs_trans_priv.h"
@@ -756,6 +757,7 @@ xfs_log_mount_finish(
 {
 	int	error = 0;
 	bool	readonly = (mp->m_flags & XFS_MOUNT_RDONLY);
+	bool	recovered = mp->m_log->l_flags & XLOG_RECOVERY_NEEDED;
 
 	if (mp->m_flags & XFS_MOUNT_NORECOVERY) {
 		ASSERT(mp->m_flags & XFS_MOUNT_RDONLY);
@@ -768,6 +770,21 @@ xfs_log_mount_finish(
 	error = xlog_recover_finish(mp->m_log);
 	if (!error)
 		xfs_log_work_queue(mp);
+
+	/*
+	 * Drain the buffer LRU after log recovery. This is required for v4
+	 * filesystems to avoid leaving around buffers with NULL verifier ops,
+	 * but we do it unconditionally to make sure we're always in a clean
+	 * cache state after mount.
+	 *
+	 * Don't push in the error case because the AIL may have pending intents
+	 * that aren't removed until recovery is cancelled.
+	 */
+	if (!error && recovered) {
+		xfs_log_force(mp, XFS_LOG_SYNC);
+		xfs_ail_push_all_sync(mp->m_ail);
+	}
+	xfs_wait_buftarg(mp->m_ddev_targp);
 
 	if (readonly)
 		mp->m_flags |= XFS_MOUNT_RDONLY;
@@ -2506,7 +2523,7 @@ next_lv:
 				if (lv)
 					vecp = lv->lv_iovecp;
 			}
-			if (record_cnt == 0 && ordered == false) {
+			if (record_cnt == 0 && !ordered) {
 				if (!lv)
 					return 0;
 				break;
@@ -3366,8 +3383,6 @@ maybe_sleep:
 		 */
 		if (iclog->ic_state & XLOG_STATE_IOERROR)
 			return -EIO;
-		if (log_flushed)
-			*log_flushed = 1;
 	} else {
 
 no_sleep:
@@ -3471,8 +3486,6 @@ try_again:
 
 				xlog_wait(&iclog->ic_prev->ic_write_wait,
 							&log->l_icloglock);
-				if (log_flushed)
-					*log_flushed = 1;
 				already_slept = 1;
 				goto try_again;
 			}
@@ -3506,9 +3519,6 @@ try_again:
 			 */
 			if (iclog->ic_state & XLOG_STATE_IOERROR)
 				return -EIO;
-
-			if (log_flushed)
-				*log_flushed = 1;
 		} else {		/* just return */
 			spin_unlock(&log->l_icloglock);
 		}
@@ -3732,7 +3742,7 @@ xlog_ticket_alloc(
  * one of the iclogs.  This uses backup pointers stored in a different
  * part of the log in case we trash the log structure.
  */
-void
+STATIC void
 xlog_verify_dest_ptr(
 	struct xlog	*log,
 	void		*ptr)

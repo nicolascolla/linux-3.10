@@ -953,8 +953,11 @@ static int selinux_sb_clone_mnt_opts(const struct super_block *oldsb,
 	BUG_ON(!(oldsbsec->flags & SE_SBINITIALIZED));
 
 	/* if fs is reusing a sb, make sure that the contexts match */
-	if (newsbsec->flags & SE_SBINITIALIZED)
+	if (newsbsec->flags & SE_SBINITIALIZED) {
+		if ((kern_flags & SECURITY_LSM_NATIVE_LABELS) && !set_context)
+			*set_kern_flags |= SECURITY_LSM_NATIVE_LABELS;
 		return selinux_cmp_sb_context(oldsb, newsb);
+	}
 
 	mutex_lock(&newsbsec->lock);
 
@@ -3451,7 +3454,8 @@ static int file_map_prot_check(struct file *file, unsigned long prot, int shared
 	int rc = 0;
 
 	if (default_noexec &&
-	    (prot & PROT_EXEC) && (!file || (!shared && (prot & PROT_WRITE)))) {
+	    (prot & PROT_EXEC) && (!file || IS_PRIVATE(file_inode(file)) ||
+				   (!shared && (prot & PROT_WRITE)))) {
 		/*
 		 * We are making executable an anonymous mapping or a
 		 * private file mapping that will also be writable.
@@ -5113,7 +5117,7 @@ static unsigned int selinux_ip_postroute_compat(struct sk_buff *skb,
 						int ifindex,
 						u16 family)
 {
-	struct sock *sk = skb->sk;
+	struct sock *sk = skb_to_full_sk(skb);
 	struct sk_security_struct *sksec;
 	struct common_audit_data ad;
 	struct lsm_network_audit net = {0,};
@@ -5168,7 +5172,7 @@ static unsigned int selinux_ip_postroute(struct sk_buff *skb,
 	if (!secmark_active && !peerlbl_active)
 		return NF_ACCEPT;
 
-	sk = skb->sk;
+	sk = skb_to_full_sk(skb);
 
 #ifdef CONFIG_XFRM
 	/* If skb->dst->xfrm is non-NULL then the packet is undergoing an IPsec

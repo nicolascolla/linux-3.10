@@ -1288,20 +1288,6 @@ out:
 	mutex_unlock(&mdev->state_lock);
 }
 
-#ifdef CONFIG_NET_POLL_CONTROLLER
-static void mlx4_en_netpoll(struct net_device *dev)
-{
-	struct mlx4_en_priv *priv = netdev_priv(dev);
-	struct mlx4_en_cq *cq;
-	int i;
-
-	for (i = 0; i < priv->tx_ring_num[TX]; i++) {
-		cq = priv->tx_cq[TX][i];
-		napi_schedule(&cq->napi);
-	}
-}
-#endif
-
 static int mlx4_en_set_rss_steer_rules(struct mlx4_en_priv *priv)
 {
 	u64 reg_id;
@@ -2174,8 +2160,9 @@ static int mlx4_en_alloc_resources(struct mlx4_en_priv *priv)
 
 		if (mlx4_en_create_rx_ring(priv, &priv->rx_ring[i],
 					   prof->rx_ring_size, priv->stride,
-					   node))
+					   node, i))
 			goto err;
+
 	}
 
 #ifdef CONFIG_RFS_ACCEL
@@ -2925,7 +2912,6 @@ static int mlx4_xdp(struct net_device *dev, struct netdev_xdp *xdp)
 		return mlx4_xdp_set(dev, xdp->prog);
 	case XDP_QUERY_PROG:
 		xdp->prog_id = mlx4_xdp_query(dev);
-		xdp->prog_attached = !!xdp->prog_id;
 		return 0;
 	default:
 		return -EINVAL;
@@ -2947,9 +2933,6 @@ static const struct net_device_ops mlx4_netdev_ops = {
 	.ndo_tx_timeout		= mlx4_en_tx_timeout,
 	.ndo_vlan_rx_add_vid	= mlx4_en_vlan_rx_add_vid,
 	.ndo_vlan_rx_kill_vid	= mlx4_en_vlan_rx_kill_vid,
-#ifdef CONFIG_NET_POLL_CONTROLLER
-	.ndo_poll_controller	= mlx4_en_netpoll,
-#endif
 	.ndo_set_features	= mlx4_en_set_features,
 	.ndo_fix_features	= mlx4_en_fix_features,
 	.extended.ndo_setup_tc_rh = __mlx4_en_setup_tc,
@@ -2985,9 +2968,6 @@ static const struct net_device_ops mlx4_netdev_ops_master = {
 	.ndo_set_vf_link_state	= mlx4_en_set_vf_link_state,
 	.ndo_get_vf_stats       = mlx4_en_get_vf_stats,
 	.ndo_get_vf_config	= mlx4_en_get_vf_config,
-#ifdef CONFIG_NET_POLL_CONTROLLER
-	.ndo_poll_controller	= mlx4_en_netpoll,
-#endif
 	.ndo_set_features	= mlx4_en_set_features,
 	.ndo_fix_features	= mlx4_en_fix_features,
 	.extended.ndo_setup_tc_rh = __mlx4_en_setup_tc,
@@ -3081,6 +3061,10 @@ void mlx4_en_set_stats_bitmap(struct mlx4_dev *dev,
 
 	if (!mlx4_is_slave(dev))
 		bitmap_set(stats_bitmap->bitmap, last_i, NUM_PKT_STATS);
+
+	if (!mlx4_is_slave(dev))
+		bitmap_set(stats_bitmap->bitmap, last_i, NUM_PHY_STATS);
+	last_i += NUM_PHY_STATS;
 }
 
 struct mlx4_en_bond {
@@ -3319,12 +3303,11 @@ int mlx4_en_init_netdev(struct mlx4_en_dev *mdev, int port,
 					   MAX_TX_RINGS, GFP_KERNEL);
 		if (!priv->tx_ring[t]) {
 			err = -ENOMEM;
-			goto err_free_tx;
+			goto out;
 		}
 		priv->tx_cq[t] = kzalloc(sizeof(struct mlx4_en_cq *) *
 					 MAX_TX_RINGS, GFP_KERNEL);
 		if (!priv->tx_cq[t]) {
-			kfree(priv->tx_ring[t]);
 			err = -ENOMEM;
 			goto out;
 		}
@@ -3375,7 +3358,7 @@ int mlx4_en_init_netdev(struct mlx4_en_dev *mdev, int port,
 	dev->addr_len = ETH_ALEN;
 	mlx4_en_u64_to_mac(dev->dev_addr, mdev->dev->caps.def_mac[priv->port]);
 	if (!is_valid_ether_addr(dev->dev_addr)) {
-		en_err(priv, "Port: %d, invalid mac burned: %pM, quiting\n",
+		en_err(priv, "Port: %d, invalid mac burned: %pM, quitting\n",
 		       priv->port, dev->dev_addr);
 		err = -EINVAL;
 		goto out;
@@ -3508,8 +3491,8 @@ int mlx4_en_init_netdev(struct mlx4_en_dev *mdev, int port,
 		dev->gso_partial_features = NETIF_F_GSO_UDP_TUNNEL_CSUM;
 	}
 
-	/* MTU range: 46 - hw-specific max */
-	dev->extended->min_mtu = MLX4_EN_MIN_MTU;
+	/* MTU range: 68 - hw-specific max */
+	dev->extended->min_mtu = ETH_MIN_MTU;
 	dev->extended->max_mtu = priv->max_mtu;
 
 	mdev->pndev[port] = dev;
@@ -3578,11 +3561,6 @@ int mlx4_en_init_netdev(struct mlx4_en_dev *mdev, int port,
 
 	return 0;
 
-err_free_tx:
-	while (t--) {
-		kfree(priv->tx_ring[t]);
-		kfree(priv->tx_cq[t]);
-	}
 out:
 	mlx4_en_destroy_netdev(dev);
 	return err;
@@ -3629,10 +3607,6 @@ int mlx4_en_reset_config(struct net_device *dev,
 		port_up = 1;
 		mlx4_en_stop_port(dev, 1);
 	}
-
-	en_warn(priv, "Changing device configuration rx filter(%x) rx vlan(%x)\n",
-		ts_config.rx_filter,
-		!!(features & NETIF_F_HW_VLAN_CTAG_RX));
 
 	mlx4_en_safe_replace_resources(priv, tmp);
 

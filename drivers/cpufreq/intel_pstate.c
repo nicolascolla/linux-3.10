@@ -410,9 +410,30 @@ static void intel_pstate_set_itmt_prio(int cpu)
 		}
 	}
 }
+
+static int intel_pstate_get_cppc_guranteed(int cpu)
+{
+	struct cppc_perf_caps cppc_perf;
+	int ret;
+
+	ret = cppc_get_perf_caps(cpu, &cppc_perf);
+	if (ret)
+		return ret;
+
+	if (cppc_perf.guaranteed_perf)
+		return cppc_perf.guaranteed_perf;
+
+	return cppc_perf.nominal_perf;
+}
+
 #else
 static void intel_pstate_set_itmt_prio(int cpu)
 {
+}
+
+static int intel_pstate_get_cppc_guranteed(int cpu)
+{
+	return -ENOTSUPP;
 }
 #endif
 
@@ -786,9 +807,29 @@ static ssize_t show_energy_performance_preference(
 
 cpufreq_freq_attr_rw(energy_performance_preference);
 
+static ssize_t show_base_frequency(struct cpufreq_policy *policy, char *buf)
+{
+	struct cpudata *cpu;
+	u64 cap;
+	int ratio;
+
+	ratio = intel_pstate_get_cppc_guranteed(policy->cpu);
+	if (ratio <= 0) {
+		rdmsrl_on_cpu(policy->cpu, MSR_HWP_CAPABILITIES, &cap);
+		ratio = HWP_GUARANTEED_PERF(cap);
+	}
+
+	cpu = all_cpu_data[policy->cpu];
+
+	return sprintf(buf, "%d\n", ratio * cpu->pstate.scaling);
+}
+
+cpufreq_freq_attr_ro(base_frequency);
+
 static struct freq_attr *hwp_cpufreq_attrs[] = {
 	&energy_performance_preference,
 	&energy_performance_available_preferences,
+	&base_frequency,
 	NULL,
 };
 
@@ -1805,6 +1846,7 @@ static const struct x86_cpu_id intel_pstate_cpu_ids[] = {
 	ICPU(INTEL_FAM6_XEON_PHI_KNM,		knl_funcs),
 	ICPU(INTEL_FAM6_ATOM_GOLDMONT,		bxt_funcs),
 	ICPU(INTEL_FAM6_ATOM_GOLDMONT_PLUS,       bxt_funcs),
+	ICPU(INTEL_FAM6_SKYLAKE_X,		core_funcs),
 	{}
 };
 MODULE_DEVICE_TABLE(x86cpu, intel_pstate_cpu_ids);
@@ -2003,7 +2045,8 @@ static int intel_pstate_set_policy(struct cpufreq_policy *policy)
 static void intel_pstate_adjust_policy_max(struct cpufreq_policy *policy,
 					 struct cpudata *cpu)
 {
-	if (cpu->pstate.max_pstate_physical > cpu->pstate.max_pstate &&
+	if (!hwp_active &&
+	    cpu->pstate.max_pstate_physical > cpu->pstate.max_pstate &&
 	    policy->max < policy->cpuinfo.max_freq &&
 	    policy->max > cpu->pstate.max_freq) {
 		pr_debug("policy->max > max non turbo frequency\n");
@@ -2369,6 +2412,18 @@ static bool intel_pstate_no_acpi_pss(void)
 	return true;
 }
 
+static bool __init intel_pstate_no_acpi_pcch(void)
+{
+	acpi_status status;
+	acpi_handle handle;
+
+	status = acpi_get_handle(NULL, "\\_SB", &handle);
+	if (ACPI_FAILURE(status))
+		return true;
+
+	return !acpi_has_method(handle, "PCCH");
+}
+
 static bool intel_pstate_has_acpi_ppc(void)
 {
 	int i;
@@ -2440,7 +2495,13 @@ static bool intel_pstate_platform_pwr_mgmt_exists(void)
 						ACPI_OEM_TABLE_ID_SIZE))
 			switch (v_info->oem_pwr_table) {
 			case PSS:
-				return intel_pstate_no_acpi_pss();
+				if (!force_load)
+					return intel_pstate_no_acpi_pss();
+
+				if (!intel_pstate_no_acpi_pss())
+					return false;
+
+				return intel_pstate_no_acpi_pcch();
 			case PPC:
 				return intel_pstate_has_acpi_ppc() &&
 					(!force_load);

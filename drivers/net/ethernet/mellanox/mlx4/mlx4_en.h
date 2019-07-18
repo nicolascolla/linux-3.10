@@ -46,6 +46,7 @@
 #endif
 #include <linux/cpu_rmap.h>
 #include <linux/ptp_clock_kernel.h>
+#include <net/xdp.h>
 
 #include <linux/mlx4/device.h>
 #include <linux/mlx4/qp.h>
@@ -71,7 +72,7 @@
 #define MLX4_EN_PAGE_SIZE	(1 << MLX4_EN_PAGE_SHIFT)
 #define DEF_RX_RINGS		16
 #define MAX_RX_RINGS		128
-#define MIN_RX_RINGS		4
+#define MIN_RX_RINGS		1
 #define LOG_TXBB_SIZE		6
 #define TXBB_SIZE		BIT(LOG_TXBB_SIZE)
 #define HEADROOM		(2048 / TXBB_SIZE + 1)
@@ -137,6 +138,9 @@
 #define MLX4_EN_TX_COAL_PKTS	16
 #define MLX4_EN_TX_COAL_TIME	0x10
 
+#define MLX4_EN_MAX_COAL_PKTS	U16_MAX
+#define MLX4_EN_MAX_COAL_TIME	U16_MAX
+
 #define MLX4_EN_RX_RATE_LOW		400000
 #define MLX4_EN_RX_COAL_TIME_LOW	0
 #define MLX4_EN_RX_RATE_HIGH		450000
@@ -163,7 +167,6 @@
 #define MLX4_SELFTEST_LB_MIN_MTU (MLX4_LOOPBACK_TEST_PAYLOAD + NET_IP_ALIGN + \
 				  ETH_HLEN + PREAMBLE_LEN)
 
-#define MLX4_EN_MIN_MTU		46
 #define ETH_BCAST		0xffffffffffffULL
 
 #define MLX4_EN_LOOPBACK_RETRIES	5
@@ -358,6 +361,7 @@ struct mlx4_en_rx_ring {
 	unsigned long dropped;
 	int hwtstamp_rx_filter;
 	cpumask_var_t affinity_mask;
+	struct xdp_rxq_info xdp_rxq;
 };
 
 struct mlx4_en_cq {
@@ -555,8 +559,8 @@ struct mlx4_en_priv {
 	u16 rx_usecs_low;
 	u32 pkt_rate_high;
 	u16 rx_usecs_high;
-	u16 sample_interval;
-	u16 adaptive_rx_coal;
+	u32 sample_interval;
+	u32 adaptive_rx_coal;
 	u32 msg_enable;
 	u32 loopback_ok;
 	u32 validate_loopback;
@@ -611,6 +615,7 @@ struct mlx4_en_priv {
 	struct mlx4_en_flow_stats_tx tx_flowstats;
 	struct mlx4_en_port_stats port_stats;
 	struct mlx4_en_xdp_stats xdp_stats;
+	struct mlx4_en_phy_stats phy_stats;
 	struct mlx4_en_stats_bitmap stats_bitmap;
 	struct list_head mc_list;
 	struct list_head curr_list;
@@ -725,7 +730,7 @@ void mlx4_en_set_num_rx_rings(struct mlx4_en_dev *mdev);
 void mlx4_en_recover_from_oom(struct mlx4_en_priv *priv);
 int mlx4_en_create_rx_ring(struct mlx4_en_priv *priv,
 			   struct mlx4_en_rx_ring **pring,
-			   u32 size, u16 stride, int node);
+			   u32 size, u16 stride, int node, int queue_index);
 void mlx4_en_destroy_rx_ring(struct mlx4_en_priv *priv,
 			     struct mlx4_en_rx_ring **pring,
 			     u32 size, u16 stride);

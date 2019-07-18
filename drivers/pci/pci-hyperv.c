@@ -50,6 +50,7 @@
 #include <linux/kernel.h>
 #include <linux/module.h>
 #include <linux/pci.h>
+#include <linux/delay.h>
 #include <linux/semaphore.h>
 #include <linux/irqdomain.h>
 #include <linux/msi.h>
@@ -520,6 +521,8 @@ struct hv_pci_compl {
 
 struct x86_msi_ops hv_msi;
 
+static void hv_pci_onchannelcallback(void *context);
+
 /**
  * hv_pci_generic_compl() - Invoked for a completion packet
  * @context:		Set up by the sender of the packet.
@@ -552,6 +555,26 @@ static void put_pcichild(struct hv_pci_dev *hv_pcidev,
 
 static void get_hvpcibus(struct hv_pcibus_device *hv_pcibus);
 static void put_hvpcibus(struct hv_pcibus_device *hv_pcibus);
+
+/*
+ * There is no good way to get notified from vmbus_onoffer_rescind(),
+ * so let's use polling here, since this is not a hot path.
+ */
+static int wait_for_response(struct hv_device *hdev,
+			     struct completion *comp)
+{
+	while (true) {
+		if (hdev->channel->rescind) {
+			dev_warn_once(&hdev->device, "The device is gone.\n");
+			return -ENODEV;
+		}
+
+		if (wait_for_completion_timeout(comp, HZ / 10))
+			break;
+	}
+
+	return 0;
+}
 
 /**
  * devfn_to_wslot() - Convert from Linux PCI slot to Windows
@@ -662,6 +685,31 @@ static void _hv_pcifront_read_config(struct hv_pci_dev *hpdev, int where,
 		dev_err(&hpdev->hbus->hdev->device,
 			"Attempt to read beyond a function's config space.\n");
 	}
+}
+
+static u16 hv_pcifront_get_vendor_id(struct hv_pci_dev *hpdev)
+{
+	u16 ret;
+	unsigned long flags;
+	void __iomem *addr = hpdev->hbus->cfg_addr + CFG_PAGE_OFFSET +
+			     PCI_VENDOR_ID;
+
+	spin_lock_irqsave(&hpdev->hbus->config_lock, flags);
+
+	/* Choose the function to be read. (See comment above) */
+	writel(hpdev->desc.win_slot.slot, hpdev->hbus->cfg_addr);
+	/* Make sure the function was chosen before we start reading. */
+	mb();
+	/* Read from that function's config space. */
+	ret = readw(addr);
+	/*
+	 * mb() is not required here, because the spin_unlock_irqrestore()
+	 * is a barrier.
+	 */
+
+	spin_unlock_irqrestore(&hpdev->hbus->config_lock, flags);
+
+	return ret;
 }
 
 /**
@@ -991,6 +1039,7 @@ static void hv_compose_msi_msg(struct pci_dev *pdev, unsigned int irq,
 	struct hv_pcibus_device *hbus;
 	struct hv_pci_dev *hpdev;
 	struct pci_bus *pbus;
+	unsigned long flags;
 	struct compose_comp_ctxt comp;
 	struct tran_int_desc *int_desc;
 	struct {
@@ -1054,7 +1103,42 @@ static void hv_compose_msi_msg(struct pci_dev *pdev, unsigned int irq,
 		goto free_int_desc;
 	}
 
-	wait_for_completion(&comp.comp_pkt.host_event);
+	/*
+	 * Since this function is called with IRQ locks held, can't
+	 * do normal wait for completion; instead poll.
+	 */
+	while (!try_wait_for_completion(&comp.comp_pkt.host_event)) {
+		/* 0xFFFF means an invalid PCI VENDOR ID. */
+		if (hv_pcifront_get_vendor_id(hpdev) == 0xFFFF) {
+			dev_err_once(&hbus->hdev->device,
+				     "the device has gone\n");
+			goto free_int_desc;
+		}
+
+		/*
+		 * When the higher level interrupt code calls us with
+		 * interrupt disabled, we must poll the channel by calling
+		 * the channel callback directly when channel->target_cpu is
+		 * the current CPU. When the higher level interrupt code
+		 * calls us with interrupt enabled, let's add the
+		 * local_irq_save()/restore() to avoid race:
+		 * hv_pci_onchannelcallback() can also run in tasklet.
+		 */
+		local_irq_save(flags);
+
+		if (hbus->hdev->channel->target_cpu == smp_processor_id())
+			hv_pci_onchannelcallback(hbus);
+
+		local_irq_restore(flags);
+
+		if (hpdev->state == hv_pcichild_ejecting) {
+			dev_err_once(&hbus->hdev->device,
+				     "the device is being ejected\n");
+			goto free_int_desc;
+		}
+
+		udelay(100);
+	}
 
 	if (comp.comp_pkt.completion_status < 0) {
 		pr_err("Request for interrupt failed: 0x%x",
@@ -1432,7 +1516,8 @@ static struct hv_pci_dev *new_pcichild_device(struct hv_pcibus_device *hbus,
 	if (ret)
 		goto error;
 
-	wait_for_completion(&comp_pkt.host_event);
+	if (wait_for_response(hbus->hdev, &comp_pkt.host_event))
+		goto error;
 
 	hpdev->desc = *desc;
 	get_pcichild(hpdev, hv_pcidev_ref_initial);
@@ -1925,14 +2010,15 @@ static int hv_pci_protocol_negotiation(struct hv_device *hdev)
 				sizeof(struct pci_version_request),
 				(unsigned long)pkt, VM_PKT_DATA_INBAND,
 				VMBUS_DATA_PACKET_FLAG_COMPLETION_REQUESTED);
+		if (!ret)
+			ret = wait_for_response(hdev, &comp_pkt.host_event);
+
 		if (ret) {
 			dev_err(&hdev->device,
-				"PCI Pass-through VSP failed sending version reqquest: %#x",
+				"PCI Pass-through VSP failed to request version: %d",
 				ret);
 			goto exit;
 		}
-
-		wait_for_completion(&comp_pkt.host_event);
 
 		if (comp_pkt.completion_status >= 0) {
 			pci_protocol_version = pci_protocol_versions[i];
@@ -2142,10 +2228,11 @@ static int hv_pci_enter_d0(struct hv_device *hdev)
 	ret = vmbus_sendpacket(hdev->channel, d0_entry, sizeof(*d0_entry),
 			       (unsigned long)pkt, VM_PKT_DATA_INBAND,
 			       VMBUS_DATA_PACKET_FLAG_COMPLETION_REQUESTED);
+	if (!ret)
+		ret = wait_for_response(hdev, &comp_pkt.host_event);
+
 	if (ret)
 		goto exit;
-
-	wait_for_completion(&comp_pkt.host_event);
 
 	if (comp_pkt.completion_status < 0) {
 		dev_err(&hdev->device,
@@ -2186,11 +2273,10 @@ static int hv_pci_query_relations(struct hv_device *hdev)
 
 	ret = vmbus_sendpacket(hdev->channel, &message, sizeof(message),
 			       0, VM_PKT_DATA_INBAND, 0);
-	if (ret)
-		return ret;
+	if (!ret)
+		ret = wait_for_response(hdev, &comp);
 
-	wait_for_completion(&comp);
-	return 0;
+	return ret;
 }
 
 /**
@@ -2260,10 +2346,10 @@ static int hv_send_resources_allocated(struct hv_device *hdev)
 				size_res, (unsigned long)pkt,
 				VM_PKT_DATA_INBAND,
 				VMBUS_DATA_PACKET_FLAG_COMPLETION_REQUESTED);
+		if (!ret)
+			ret = wait_for_response(hdev, &comp_pkt.host_event);
 		if (ret)
 			break;
-
-		wait_for_completion(&comp_pkt.host_event);
 
 		if (comp_pkt.completion_status < 0) {
 			ret = -EPROTO;

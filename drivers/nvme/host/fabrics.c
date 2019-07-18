@@ -57,7 +57,7 @@ static struct nvmf_host *nvmf_host_add(const char *hostnqn)
 		goto out_unlock;
 
 	kref_init(&host->ref);
-	memcpy(host->nqn, hostnqn, NVMF_NQN_SIZE);
+	strlcpy(host->nqn, hostnqn, NVMF_NQN_SIZE);
 
 	list_add_tail(&host->list, &nvmf_hosts);
 out_unlock:
@@ -474,7 +474,7 @@ EXPORT_SYMBOL_GPL(nvmf_connect_io_queue);
 
 bool nvmf_should_reconnect(struct nvme_ctrl *ctrl)
 {
-	if (ctrl->opts->max_reconnects != -1 &&
+	if (ctrl->opts->max_reconnects == -1 ||
 	    ctrl->nr_reconnects < ctrl->opts->max_reconnects)
 		return true;
 
@@ -866,6 +866,36 @@ static int nvmf_check_required_opts(struct nvmf_ctrl_options *opts,
 	return 0;
 }
 
+bool nvmf_ip_options_match(struct nvme_ctrl *ctrl,
+		struct nvmf_ctrl_options *opts)
+{
+	if (!nvmf_ctlr_matches_baseopts(ctrl, opts) ||
+	    strcmp(opts->traddr, ctrl->opts->traddr) ||
+	    strcmp(opts->trsvcid, ctrl->opts->trsvcid))
+		return false;
+
+	/*
+	 * Checking the local address is rough. In most cases, none is specified
+	 * and the host port is selected by the stack.
+	 *
+	 * Assume no match if:
+	 * -  local address is specified and address is not the same
+	 * -  local address is not specified but remote is, or vice versa
+	 *    (admin using specific host_traddr when it matters).
+	 */
+	if ((opts->mask & NVMF_OPT_HOST_TRADDR) &&
+	    (ctrl->opts->mask & NVMF_OPT_HOST_TRADDR)) {
+		if (strcmp(opts->host_traddr, ctrl->opts->host_traddr))
+			return false;
+	} else if ((opts->mask & NVMF_OPT_HOST_TRADDR) ||
+		   (ctrl->opts->mask & NVMF_OPT_HOST_TRADDR)) {
+		return false;
+	}
+
+	return true;
+}
+EXPORT_SYMBOL_GPL(nvmf_ip_options_match);
+
 static int nvmf_check_allowed_opts(struct nvmf_ctrl_options *opts,
 		unsigned int allowed_opts)
 {
@@ -945,6 +975,7 @@ nvmf_create_ctrl(struct device *dev, const char *buf, size_t count)
 		ret = -EBUSY;
 		goto out_unlock;
 	}
+	up_read(&nvmf_transports_rwsem);
 
 	ret = nvmf_check_required_opts(opts, ops->required_opts);
 	if (ret)
@@ -961,11 +992,11 @@ nvmf_create_ctrl(struct device *dev, const char *buf, size_t count)
 	}
 
 	module_put(ops->module);
-	up_read(&nvmf_transports_rwsem);
 	return ctrl;
 
 out_module_put:
 	module_put(ops->module);
+	goto out_free_opts;
 out_unlock:
 	up_read(&nvmf_transports_rwsem);
 out_free_opts:

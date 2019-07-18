@@ -33,6 +33,7 @@ FEATURE_TESTS_BASIC :=                  \
         dwarf_getlocations              \
         fortify-source                  \
         sync-compare-and-swap           \
+        get_current_dir_name            \
         glibc                           \
         gtk2                            \
         gtk2-infobar                    \
@@ -56,12 +57,14 @@ FEATURE_TESTS_BASIC :=                  \
         libunwind-arm                   \
         libunwind-aarch64               \
         pthread-attr-setaffinity-np     \
+        pthread-barrier     		\
         stackprotector-all              \
         timerfd                         \
         libdw-dwarf-unwind              \
         zlib                            \
         lzma                            \
         get_cpuid                       \
+        bpf				\
         sched_getcpu			\
         sdt				\
         setns
@@ -79,7 +82,11 @@ FEATURE_TESTS_EXTRA :=                  \
          liberty-z                      \
          libunwind-debug-frame          \
          libunwind-debug-frame-arm      \
-         libunwind-debug-frame-aarch64
+         libunwind-debug-frame-aarch64  \
+         cxx                            \
+         llvm                           \
+         llvm-version                   \
+         clang
 
 FEATURE_TESTS ?= $(FEATURE_TESTS_BASIC)
 
@@ -105,7 +112,8 @@ FEATURE_DISPLAY ?=              \
         libdw-dwarf-unwind      \
         zlib                    \
         lzma                    \
-        get_cpuid
+        get_cpuid		\
+        bpf
 
 # Set FEATURE_CHECK_(C|LD)FLAGS-all for all FEATURE_TESTS features.
 # If in the future we need per-feature checks/flags for features not

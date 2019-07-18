@@ -47,6 +47,7 @@
 #include <net/dcbnl.h>
 #endif
 #include <net/netprio_cgroup.h>
+#include <net/xdp.h>
 
 #include <linux/netdev_features.h>
 #include <linux/neighbour.h>
@@ -564,6 +565,32 @@ static inline void napi_synchronize(const struct napi_struct *n)
 # define napi_synchronize(n)	barrier()
 #endif
 
+/**
+ *	napi_if_scheduled_mark_missed - if napi is running, set the
+ *	NAPIF_STATE_MISSED
+ *	@n: NAPI context
+ *
+ * If napi is running, set the NAPIF_STATE_MISSED, and return true if
+ * NAPI is scheduled.
+ **/
+static inline bool napi_if_scheduled_mark_missed(struct napi_struct *n)
+{
+	unsigned long val, new;
+
+	do {
+		val = READ_ONCE(n->state);
+		if (val & NAPIF_STATE_DISABLE)
+			return true;
+
+		if (!(val & NAPIF_STATE_SCHED))
+			return false;
+
+		new = val | NAPIF_STATE_MISSED;
+	} while (cmpxchg(&n->state, val, new) != val);
+
+	return true;
+}
+
 enum netdev_queue_state_t {
 	__QUEUE_STATE_DRV_XOFF,
 	__QUEUE_STATE_STACK_XOFF,
@@ -759,8 +786,8 @@ struct xps_dev_maps {
 	struct rcu_head rcu;
 	struct xps_map __rcu *cpu_map[0];
 };
-#define XPS_DEV_MAPS_SIZE (sizeof(struct xps_dev_maps) +		\
-    (nr_cpu_ids * sizeof(struct xps_map *)))
+#define XPS_DEV_MAPS_SIZE(_tcs) (sizeof(struct xps_dev_maps) +		\
+	(nr_cpu_ids * (_tcs) * sizeof(struct xps_map *)))
 #endif /* CONFIG_XPS */
 
 #define TC_MAX_QUEUE	16
@@ -919,9 +946,13 @@ struct tc_to_netdev {
  * int (*ndo_xdp)(struct net_device *dev, struct netdev_xdp *xdp);
  *	This function is used to set or query state related to XDP on the
  *	netdevice. See definition of enum xdp_netdev_command for details.
- * int (*ndo_xdp_xmit)(struct net_device *dev, struct xdp_buff *xdp);
- *	This function is used to submit a XDP packet for transmit on a
- *	netdevice.
+ * int (*ndo_xdp_xmit)(struct net_device *dev, int n, struct xdp_frame **xdp,
+ *			u32 flags);
+ *	This function is used to submit @n XDP packets for transmit on a
+ *	netdevice. Returns number of frames successfully transmitted, frames
+ *	that got dropped are freed/returned via xdp_return_frame().
+ *	Returns negative number, means general error invoking ndo, meaning
+ *	no frames were xmit'ed and core-caller will free all frames.
  * void (*ndo_xdp_flush)(struct net_device *dev);
  *	This function is used to inform the driver to flush a paticular
  *	xpd tx queue. Must be called on same CPU as xdp_xmit.
@@ -981,11 +1012,14 @@ struct net_device_ops_extended {
 						   void *type_data);
 	int			(*ndo_xdp)(struct net_device *dev,
 						  struct netdev_xdp *xdp);
-	int                     (*ndo_xdp_xmit)(struct net_device *dev,
-						struct xdp_buff *xdp);
+	int			(*ndo_xdp_xmit)(struct net_device *dev, int n,
+						struct xdp_frame **xdp,
+						u32 flags);
 	void                    (*ndo_xdp_flush)(struct net_device *dev);
 	int                     (*ndo_bpf)(struct net_device *dev,
 					   struct netdev_bpf *bpf);
+	int			(*ndo_xsk_async_xmit)(struct net_device *dev,
+						      u32 queue_id);
 };
 
 /* These structures hold the attributes of xdp state that are being passed
@@ -1000,11 +1034,12 @@ enum xdp_netdev_command {
 	 * when it is no longer used.
 	 */
 	XDP_SETUP_PROG,
-	/* Check if a bpf program is set on the device.  The callee should
-	 * return true if a program is currently attached and running.
-	 */
 	XDP_QUERY_PROG,
+	XDP_QUERY_XSK_UMEM,
+	XDP_SETUP_XSK_UMEM,
 };
+
+struct xdp_umem;
 
 struct netdev_xdp {
 	enum xdp_netdev_command command;
@@ -1013,9 +1048,13 @@ struct netdev_xdp {
 		struct bpf_prog *prog;
 		/* XDP_QUERY_PROG */
 		struct {
-			bool prog_attached;
 			u32 prog_id;
 		};
+		/* XDP_SETUP_XSK_UMEM */
+		struct {
+			struct xdp_umem *umem;
+			u16 queue_id;
+		} xsk;
 	};
 };
 
@@ -2425,45 +2464,51 @@ struct netdev_lag_lower_state_info {
 
 #include <linux/notifier.h>
 
-/* netdevice notifier chain. Please remember to update the rtnetlink
- * notification exclusion list in rtnetlink_event() when adding new
- * types.
+/* netdevice notifier chain. Please remember to update netdev_cmd_to_name()
+ * and the rtnetlink notification exclusion list in rtnetlink_event() when
+ * adding new types.
  */
-#define NETDEV_UP	0x0001	/* For now you can't veto a device up/down */
-#define NETDEV_DOWN	0x0002
-#define NETDEV_REBOOT	0x0003	/* Tell a protocol stack a network interface
+enum netdev_cmd {
+	NETDEV_UP	= 1,	/* For now you can't veto a device up/down */
+	NETDEV_DOWN,
+	NETDEV_REBOOT,		/* Tell a protocol stack a network interface
 				   detected a hardware crash and restarted
 				   - we can use this eg to kick tcp sessions
 				   once done */
-#define NETDEV_CHANGE	0x0004	/* Notify device state change */
-#define NETDEV_REGISTER 0x0005
-#define NETDEV_UNREGISTER	0x0006
-#define NETDEV_CHANGEMTU	0x0007 /* notify after mtu change happened */
-#define NETDEV_CHANGEADDR	0x0008
-#define NETDEV_GOING_DOWN	0x0009
-#define NETDEV_CHANGENAME	0x000A
-#define NETDEV_FEAT_CHANGE	0x000B
-#define NETDEV_BONDING_FAILOVER 0x000C
-#define NETDEV_PRE_UP		0x000D
-#define NETDEV_PRE_TYPE_CHANGE	0x000E
-#define NETDEV_POST_TYPE_CHANGE	0x000F
-#define NETDEV_POST_INIT	0x0010
-#define NETDEV_UNREGISTER_FINAL 0x0011
-#define NETDEV_RELEASE		0x0012
-#define NETDEV_NOTIFY_PEERS	0x0013
-#define NETDEV_JOIN		0x0014
-#define NETDEV_CHANGEUPPER	0x0015
-#define NETDEV_RESEND_IGMP	0x0016
-#define NETDEV_PRECHANGEMTU	0x0017 /* notify before mtu change happened */
-#define NETDEV_CHANGEINFODATA	0x0018
-#define NETDEV_BONDING_INFO	0x0019
-#define NETDEV_PRECHANGEUPPER	0x001A
-#define NETDEV_CHANGELOWERSTATE	0x001B
-#define NETDEV_OFFLOAD_PUSH_VXLAN	0x001C
-#define NETDEV_OFFLOAD_PUSH_GENEVE	0x001D
-#define NETDEV_UDP_TUNNEL_PUSH_INFO	0x001E
-#define NETDEV_CHANGE_TX_QUEUE_LEN	0x001F
-#define NETDEV_UDP_TUNNEL_DROP_INFO	0x0020
+	NETDEV_CHANGE,		/* Notify device state change */
+	NETDEV_REGISTER,
+	NETDEV_UNREGISTER,
+	NETDEV_CHANGEMTU,	/* notify after mtu change happened */
+	NETDEV_CHANGEADDR,
+	NETDEV_GOING_DOWN,
+	NETDEV_CHANGENAME,
+	NETDEV_FEAT_CHANGE,
+	NETDEV_BONDING_FAILOVER,
+	NETDEV_PRE_UP,
+	NETDEV_PRE_TYPE_CHANGE,
+	NETDEV_POST_TYPE_CHANGE,
+	NETDEV_POST_INIT,
+	NETDEV_UNREGISTER_FINAL,
+	NETDEV_RELEASE,
+	NETDEV_NOTIFY_PEERS,
+	NETDEV_JOIN,
+	NETDEV_CHANGEUPPER,
+	NETDEV_RESEND_IGMP,
+	NETDEV_PRECHANGEMTU,	/* notify before mtu change happened */
+	NETDEV_CHANGEINFODATA,
+	NETDEV_BONDING_INFO,
+	NETDEV_PRECHANGEUPPER,
+	NETDEV_CHANGELOWERSTATE,
+	NETDEV_OFFLOAD_PUSH_VXLAN,
+	NETDEV_OFFLOAD_PUSH_GENEVE,
+	NETDEV_UDP_TUNNEL_PUSH_INFO,
+	NETDEV_CHANGE_TX_QUEUE_LEN,
+	NETDEV_UDP_TUNNEL_DROP_INFO,
+	/* RHEL: New values need to be placed at the end to avoid
+	 * re-numbering of existing ones.
+	 */
+};
+const char *netdev_cmd_to_name(enum netdev_cmd cmd);
 
 /* (Un)registration functions for the notifiers that takes
  * 'struct net_device *' as parameter
@@ -2479,6 +2524,13 @@ int unregister_netdevice_notifier_rh(struct notifier_block *nb);
 
 struct netdev_notifier_info {
 	struct net_device *dev;
+};
+
+struct netdev_notifier_info_ext {
+	struct netdev_notifier_info info; /* must be first */
+	union {
+		u32 mtu;
+	} ext;
 };
 
 struct netdev_notifier_change_info {
@@ -3104,9 +3156,46 @@ static inline void netdev_tx_sent_queue(struct netdev_queue *dev_queue,
 #endif
 }
 
+/* Variant of netdev_tx_sent_queue() for drivers that are aware
+ * that they should not test BQL status themselves.
+ * We do want to change __QUEUE_STATE_STACK_XOFF only for the last
+ * skb of a batch.
+ * Returns true if the doorbell must be used to kick the NIC.
+ */
+static inline bool __netdev_tx_sent_queue(struct netdev_queue *dev_queue,
+					  unsigned int bytes,
+					  bool xmit_more)
+{
+	if (xmit_more) {
+#ifdef CONFIG_BQL
+		dql_queued(&dev_queue->dql, bytes);
+#endif
+		return netif_tx_queue_stopped(dev_queue);
+	}
+	netdev_tx_sent_queue(dev_queue, bytes);
+	return true;
+}
+
+/**
+ * 	netdev_sent_queue - report the number of bytes queued to hardware
+ * 	@dev: network device
+ * 	@bytes: number of bytes queued to the hardware device queue
+ *
+ * 	Report the number of bytes queued for sending/completion to the network
+ * 	device hardware queue. @bytes should be a good approximation and should
+ * 	exactly match netdev_completed_queue() @bytes
+ */
 static inline void netdev_sent_queue(struct net_device *dev, unsigned int bytes)
 {
 	netdev_tx_sent_queue(netdev_get_tx_queue(dev, 0), bytes);
+}
+
+static inline bool __netdev_sent_queue(struct net_device *dev,
+				       unsigned int bytes,
+				       bool xmit_more)
+{
+	return __netdev_tx_sent_queue(netdev_get_tx_queue(dev, 0), bytes,
+				      xmit_more);
 }
 
 static inline void netdev_tx_completed_queue(struct netdev_queue *dev_queue,
@@ -3133,6 +3222,16 @@ static inline void netdev_tx_completed_queue(struct netdev_queue *dev_queue,
 #endif
 }
 
+/**
+ * 	netdev_completed_queue - report bytes and packets completed by device
+ * 	@dev: network device
+ * 	@pkts: actual number of packets sent over the medium
+ * 	@bytes: actual number of bytes sent over the medium
+ *
+ * 	Report the number of bytes and packets transmitted by the network device
+ * 	hardware queue over the physical medium, @bytes must exactly match the
+ * 	@bytes amount passed to netdev_sent_queue()
+ */
 static inline void netdev_completed_queue(struct net_device *dev,
 					  unsigned int pkts, unsigned int bytes)
 {
@@ -3147,6 +3246,13 @@ static inline void netdev_tx_reset_queue(struct netdev_queue *q)
 #endif
 }
 
+/**
+ * 	netdev_reset_queue - reset the packets and bytes count of a network device
+ * 	@dev_queue: network device
+ *
+ * 	Reset the bytes and packet count of a network device and clear the
+ * 	software flow control OFF bit for this network device
+ */
 static inline void netdev_reset_queue(struct net_device *dev_queue)
 {
 	netdev_tx_reset_queue(netdev_get_tx_queue(dev_queue, 0));

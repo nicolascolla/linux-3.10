@@ -802,6 +802,26 @@ extern struct user_struct root_user;
 struct backing_dev_info;
 struct reclaim_state;
 
+#ifndef __GENKSYMS__
+enum vtime_state {
+	/* Task is sleeping or running in a CPU with VTIME inactive: */
+	VTIME_SLEEPING = 0,
+	/* Task runs in userspace in a CPU with VTIME active: */
+	VTIME_USER,
+	/* Task runs in kernelspace in a CPU with VTIME active: */
+	VTIME_SYS,
+};
+#endif /* __GENKSYMS__ */
+
+struct vtime {
+	seqlock_t		seqlock;
+	unsigned long long	starttime;
+	enum vtime_state	state;
+	u64			utime;
+	u64			stime;
+	u64			gtime;
+};
+
 #ifdef CONFIG_SCHED_INFO
 struct sched_info {
 	/* cumulative counters */
@@ -1485,13 +1505,21 @@ struct task_struct {
 	RH_KABI_DEPRECATE(struct cputime,	prev_cputime)
 #endif
 #ifdef CONFIG_VIRT_CPU_ACCOUNTING_GEN
-	seqlock_t vtime_seqlock;
-	unsigned long long vtime_snap;
+	RH_KABI_DEPRECATE(seqlock_t,		vtime_seqlock)
+	RH_KABI_DEPRECATE(unsigned long long,	vtime_snap)
+#ifndef __GENKSYMS__
+	enum {
+		KABI_VTIME_SLEEPING = 0,
+		KABI_VTIME_USER,
+		KABI_VTIME_SYS,
+	} vtime_state;
+#else
 	enum {
 		VTIME_SLEEPING = 0,
 		VTIME_USER,
 		VTIME_SYS,
 	} vtime_snap_whence;
+#endif /* __GENKSYMS__ */
 #endif
 	unsigned long nvcsw, nivcsw; /* context switch counts */
 	struct timespec start_time; 		/* monotonic time */
@@ -1804,7 +1832,7 @@ struct task_struct {
 #else
 	RH_KABI_RESERVE(7)
 #endif
-	RH_KABI_RESERVE(8)
+	RH_KABI_USE(8, int pagefault_disabled)
 #ifndef __GENKSYMS__
 #ifdef CONFIG_MEMCG
 	struct memcg_oom_info {
@@ -1839,6 +1867,7 @@ struct task_struct {
 	struct sched_statistics statistics;
 	struct wake_q_node wake_q;
 	struct prev_cputime prev_cputime;
+	struct vtime vtime;
 #endif /* __GENKSYMS__ */
 };
 
@@ -1999,6 +2028,19 @@ static inline pid_t task_pgrp_nr(struct task_struct *tsk)
 	return task_pgrp_nr_ns(tsk, &init_pid_ns);
 }
 
+static inline char task_state_to_char(struct task_struct *task)
+{
+	const char stat_nam[] = TASK_STATE_TO_CHAR_STR;
+	unsigned long state = task->state;
+
+	state = state ? __ffs(state) + 1 : 0;
+
+	/* Make sure the string lines up properly with the number of task states: */
+	BUILD_BUG_ON(sizeof(TASK_STATE_TO_CHAR_STR)-1 != ilog2(TASK_STATE_MAX)+1);
+
+	return state < sizeof(stat_nam) - 1 ? stat_nam[state] : '?';
+}
+
 /**
  * pid_alive - check that a task structure is not stale
  * @p: Task structure to be checked.
@@ -2141,6 +2183,7 @@ extern void thread_group_cputime_adjusted(struct task_struct *p, cputime_t *ut, 
 
 #define PFA_SPEC_SSB_DISABLE	   3	/* Speculative Store Bypass disabled */
 #define PFA_SPEC_SSB_FORCE_DISABLE 4	/* Speculative Store Bypass force disabled*/
+#define PFA_SPEC_SSB_NOEXEC		7	/* Speculative Store Bypass clear on execve() */
 
 #define TASK_PFA_TEST(name, func)                                      \
        static inline bool task_##func(struct task_struct *p)           \
@@ -2166,6 +2209,10 @@ TASK_PFA_CLEAR(SPREAD_SLAB, spread_slab)
 TASK_PFA_TEST(SPEC_SSB_DISABLE, spec_ssb_disable)
 TASK_PFA_SET(SPEC_SSB_DISABLE, spec_ssb_disable)
 TASK_PFA_CLEAR(SPEC_SSB_DISABLE, spec_ssb_disable)
+
+TASK_PFA_TEST(SPEC_SSB_NOEXEC, spec_ssb_noexec)
+TASK_PFA_SET(SPEC_SSB_NOEXEC, spec_ssb_noexec)
+TASK_PFA_CLEAR(SPEC_SSB_NOEXEC, spec_ssb_noexec)
 
 TASK_PFA_TEST(SPEC_SSB_FORCE_DISABLE, spec_ssb_force_disable)
 TASK_PFA_SET(SPEC_SSB_FORCE_DISABLE, spec_ssb_force_disable)
@@ -2605,6 +2652,28 @@ static inline unsigned long sigsp(unsigned long sp, struct ksignal *ksig)
  */
 extern struct mm_struct * mm_alloc(void);
 
+/**
+ * mmgrab() - Pin a &struct mm_struct.
+ * @mm: The &struct mm_struct to pin.
+ *
+ * Make sure that @mm will not get freed even after the owning task
+ * exits. This doesn't guarantee that the associated address space
+ * will still exist later on and mmget_not_zero() has to be used before
+ * accessing it.
+ *
+ * This is a preferred way to to pin @mm for a longer/unbounded amount
+ * of time.
+ *
+ * Use mmdrop() to release the reference acquired by mmgrab().
+ *
+ * See also <Documentation/vm/active_mm.txt> for an in-depth explanation
+ * of &mm_struct.mm_count vs &mm_struct.mm_users.
+ */
+static inline void mmgrab(struct mm_struct *mm)
+{
+	atomic_inc(&mm->mm_count);
+}
+
 /* mmdrop drops the mm and the page tables */
 extern void __mmdrop(struct mm_struct *);
 static inline void mmdrop(struct mm_struct *mm)
@@ -2616,6 +2685,27 @@ static inline void mmdrop(struct mm_struct *mm)
 	 */
 	if (unlikely(atomic_dec_and_test(&mm->mm_count)))
 		__mmdrop(mm);
+}
+
+/**
+ * mmget() - Pin the address space associated with a &struct mm_struct.
+ * @mm: The address space to pin.
+ *
+ * Make sure that the address space of the given &struct mm_struct doesn't
+ * go away. This does not protect against parts of the address space being
+ * modified or freed, however.
+ *
+ * Never use this function to pin this address space for an
+ * unbounded/indefinite amount of time.
+ *
+ * Use mmput() to release the reference acquired by mmget().
+ *
+ * See also <Documentation/vm/active_mm.txt> for an in-depth explanation
+ * of &mm_struct.mm_count vs &mm_struct.mm_users.
+ */
+static inline void mmget(struct mm_struct *mm)
+{
+	atomic_inc(&mm->mm_users);
 }
 
 static inline bool mmget_not_zero(struct mm_struct *mm)

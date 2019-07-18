@@ -135,7 +135,7 @@ struct blk_mq_queue_data {
 struct request_aux {
 	int internal_tag;
 	struct blk_issue_stat issue_stat;
-}____cacheline_aligned_in_smp;
+};
 
 /* None of these function pointers are covered by RHEL kABI */
 #ifdef __GENKSYMS__
@@ -257,6 +257,7 @@ enum {
 	BLK_MQ_F_SHOULD_SORT	= 1 << 1,
 	BLK_MQ_F_TAG_SHARED	= 1 << 2,
 	BLK_MQ_F_SG_MERGE	= 1 << 3,
+	BLK_MQ_F_TAG_LOCKED	= 1 << 4,
 	BLK_MQ_F_BLOCKING	= 1 << 6,
 	BLK_MQ_F_NO_SCHED	= 1 << 7,
 

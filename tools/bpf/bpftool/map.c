@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2017 Netronome Systems, Inc.
+ * Copyright (C) 2017-2018 Netronome Systems, Inc.
  *
  * This software is dual licensed under the GNU General License Version 2,
  * June 1991 as shown in the file COPYING in the top-level directory of this
@@ -283,11 +283,16 @@ static void print_entry_plain(struct bpf_map_info *info, unsigned char *key,
 static char **parse_bytes(char **argv, const char *name, unsigned char *val,
 			  unsigned int n)
 {
-	unsigned int i = 0;
+	unsigned int i = 0, base = 0;
 	char *endptr;
 
+	if (is_prefix(*argv, "hex")) {
+		base = 16;
+		argv++;
+	}
+
 	while (i < n && argv[i]) {
-		val[i] = strtoul(argv[i], &endptr, 0);
+		val[i] = strtoul(argv[i], &endptr, base);
 		if (*endptr) {
 			p_err("error parsing byte: %s", argv[i]);
 			return NULL;
@@ -869,16 +874,17 @@ static int do_help(int argc, char **argv)
 	fprintf(stderr,
 		"Usage: %s %s { show | list }   [MAP]\n"
 		"       %s %s dump    MAP\n"
-		"       %s %s update  MAP  key BYTES value VALUE [UPDATE_FLAGS]\n"
-		"       %s %s lookup  MAP  key BYTES\n"
-		"       %s %s getnext MAP [key BYTES]\n"
-		"       %s %s delete  MAP  key BYTES\n"
+		"       %s %s update  MAP  key DATA value VALUE [UPDATE_FLAGS]\n"
+		"       %s %s lookup  MAP  key DATA\n"
+		"       %s %s getnext MAP [key DATA]\n"
+		"       %s %s delete  MAP  key DATA\n"
 		"       %s %s pin     MAP  FILE\n"
 		"       %s %s help\n"
 		"\n"
 		"       MAP := { id MAP_ID | pinned FILE }\n"
+		"       DATA := { [hex] BYTES }\n"
 		"       " HELP_SPEC_PROGRAM "\n"
-		"       VALUE := { BYTES | MAP | PROG }\n"
+		"       VALUE := { DATA | MAP | PROG }\n"
 		"       UPDATE_FLAGS := { any | exist | noexist }\n"
 		"       " HELP_SPEC_OPTIONS "\n"
 		"",

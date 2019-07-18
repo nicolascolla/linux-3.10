@@ -84,6 +84,8 @@
 #define NES_FIRST_QPN           64
 #define NES_SW_CONTEXT_ALIGN    1024
 
+#define NES_MAX_MTU		9000
+
 #define NES_NIC_MAX_NICS        16
 #define NES_MAX_ARP_TABLE_SIZE  4096
 
@@ -147,18 +149,9 @@ do { \
 		printk(KERN_ERR PFX "%s[%u]: " fmt, __func__, __LINE__, ##args); \
 } while (0)
 
-#define assert(expr) \
-do { \
-	if (!(expr)) { \
-		printk(KERN_ERR PFX "Assertion failed! %s, %s, %s, line %d\n", \
-			   #expr, __FILE__, __func__, __LINE__); \
-	} \
-} while (0)
-
 #define NES_EVENT_TIMEOUT   1200000
 #else
-#define nes_debug(level, fmt, args...)
-#define assert(expr)          do {} while (0)
+#define nes_debug(level, fmt, args...) no_printk(fmt, ##args)
 
 #define NES_EVENT_TIMEOUT   100000
 #endif
@@ -170,8 +163,6 @@ do { \
 #include "nes_cm.h"
 #include "nes_mgt.h"
 
-extern int max_mtu;
-#define max_frame_len (max_mtu+ETH_HLEN)
 extern int interrupt_mod_interval;
 extern int nes_if_count;
 extern int mpa_version;

@@ -1,35 +1,5 @@
-/*
- * Copyright (C) 2017 Netronome Systems, Inc.
- *
- * This software is dual licensed under the GNU General License Version 2,
- * June 1991 as shown in the file COPYING in the top-level directory of this
- * source tree or the BSD 2-Clause License provided below.  You have the
- * option to license this software under the complete terms of either license.
- *
- * The BSD 2-Clause License:
- *
- *     Redistribution and use in source and binary forms, with or
- *     without modification, are permitted provided that the following
- *     conditions are met:
- *
- *      1. Redistributions of source code must retain the above
- *         copyright notice, this list of conditions and the following
- *         disclaimer.
- *
- *      2. Redistributions in binary form must reproduce the above
- *         copyright notice, this list of conditions and the following
- *         disclaimer in the documentation and/or other materials
- *         provided with the distribution.
- *
- * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND,
- * EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF
- * MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND
- * NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS
- * BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN
- * ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN
- * CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
- * SOFTWARE.
- */
+// SPDX-License-Identifier: (GPL-2.0-only OR BSD-2-Clause)
+/* Copyright (C) 2017-2018 Netronome Systems, Inc. */
 
 #include <net/pkt_cls.h>
 
@@ -142,7 +112,7 @@ static int nfp_bpf_setup_tc_block_cb(enum tc_setup_type type,
 				   "only offload of BPF classifiers supported");
 		return -EOPNOTSUPP;
 	}
-	if (!tc_can_offload_extack(nn->dp.netdev, cls_bpf->common.extack))
+	if (!tc_cls_can_offload_and_chain0(nn->dp.netdev, &cls_bpf->common))
 		return -EOPNOTSUPP;
 	if (!nfp_net_ebpf_capable(nn)) {
 		NL_SET_ERR_MSG_MOD(cls_bpf->common.extack,
@@ -154,8 +124,6 @@ static int nfp_bpf_setup_tc_block_cb(enum tc_setup_type type,
 				   "only ETH_P_ALL supported as filter protocol");
 		return -EOPNOTSUPP;
 	}
-	if (cls_bpf->common.chain_index)
-		return -EOPNOTSUPP;
 
 	/* Only support TC direct action */
 	if (!cls_bpf->exts_integrated ||
@@ -286,6 +254,12 @@ nfp_bpf_parse_cap_func(struct nfp_app_bpf *bpf, void __iomem *value, u32 length)
 	case BPF_FUNC_map_lookup_elem:
 		bpf->helpers.map_lookup = readl(&cap->func_addr);
 		break;
+	case BPF_FUNC_map_update_elem:
+		bpf->helpers.map_update = readl(&cap->func_addr);
+		break;
+	case BPF_FUNC_map_delete_elem:
+		bpf->helpers.map_delete = readl(&cap->func_addr);
+		break;
 	}
 
 	return 0;
@@ -311,6 +285,14 @@ nfp_bpf_parse_cap_maps(struct nfp_app_bpf *bpf, void __iomem *value, u32 length)
 	return 0;
 }
 
+static int
+nfp_bpf_parse_cap_random(struct nfp_app_bpf *bpf, void __iomem *value,
+			 u32 length)
+{
+	bpf->pseudo_random = true;
+	return 0;
+}
+
 static int nfp_bpf_parse_capabilities(struct nfp_app *app)
 {
 	struct nfp_cpp *cpp = app->pf->cpp;
@@ -323,7 +305,7 @@ static int nfp_bpf_parse_capabilities(struct nfp_app *app)
 		return PTR_ERR(mem) == -ENOENT ? 0 : PTR_ERR(mem);
 
 	start = mem;
-	while (mem - start + 8 < nfp_cpp_area_size(area)) {
+	while (mem - start + 8 <= nfp_cpp_area_size(area)) {
 		u8 __iomem *value;
 		u32 type, length;
 
@@ -347,6 +329,10 @@ static int nfp_bpf_parse_capabilities(struct nfp_app *app)
 			break;
 		case NFP_BPF_CAP_TYPE_MAPS:
 			if (nfp_bpf_parse_cap_maps(app->priv, value, length))
+				goto err_release_free;
+			break;
+		case NFP_BPF_CAP_TYPE_RANDOM:
+			if (nfp_bpf_parse_cap_random(app->priv, value, length))
 				goto err_release_free;
 			break;
 		default:

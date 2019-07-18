@@ -170,30 +170,58 @@ int bpf_map_precharge_memlock(u32 pages)
 	return 0;
 }
 
-static int bpf_map_charge_memlock(struct bpf_map *map)
+static int bpf_charge_memlock(struct user_struct *user, u32 pages)
 {
-	struct user_struct *user = get_current_user();
-	unsigned long memlock_limit;
+	unsigned long memlock_limit = rlimit(RLIMIT_MEMLOCK) >> PAGE_SHIFT;
 
-	memlock_limit = rlimit(RLIMIT_MEMLOCK) >> PAGE_SHIFT;
-
-	atomic_long_add(map->pages, &user->locked_vm);
-
-	if (atomic_long_read(&user->locked_vm) > memlock_limit) {
-		atomic_long_sub(map->pages, &user->locked_vm);
-		free_uid(user);
+	if (atomic_long_add_return(pages, &user->locked_vm) > memlock_limit) {
+		atomic_long_sub(pages, &user->locked_vm);
 		return -EPERM;
 	}
-	map->user = user;
 	return 0;
 }
 
-static void bpf_map_uncharge_memlock(struct bpf_map *map)
+static void bpf_uncharge_memlock(struct user_struct *user, u32 pages)
+{
+	atomic_long_sub(pages, &user->locked_vm);
+}
+
+static int bpf_map_init_memlock(struct bpf_map *map)
+{
+	struct user_struct *user = get_current_user();
+	int ret;
+
+	ret = bpf_charge_memlock(user, map->pages);
+	if (ret) {
+		free_uid(user);
+		return ret;
+	}
+	map->user = user;
+	return ret;
+}
+
+static void bpf_map_release_memlock(struct bpf_map *map)
 {
 	struct user_struct *user = map->user;
-
-	atomic_long_sub(map->pages, &user->locked_vm);
+	bpf_uncharge_memlock(user, map->pages);
 	free_uid(user);
+}
+
+int bpf_map_charge_memlock(struct bpf_map *map, u32 pages)
+{
+	int ret;
+
+	ret = bpf_charge_memlock(map->user, pages);
+	if (ret)
+		return ret;
+	map->pages += pages;
+	return ret;
+}
+
+void bpf_map_uncharge_memlock(struct bpf_map *map, u32 pages)
+{
+	bpf_uncharge_memlock(map->user, pages);
+	map->pages -= pages;
 }
 
 static int bpf_map_alloc_id(struct bpf_map *map)
@@ -236,7 +264,7 @@ static void bpf_map_free_deferred(struct work_struct *work)
 {
 	struct bpf_map *map = container_of(work, struct bpf_map, work);
 
-	bpf_map_uncharge_memlock(map);
+	bpf_map_release_memlock(map);
 	security_bpf_map_free(map);
 	/* implementation dependent freeing */
 	map->ops->map_free(map);
@@ -306,13 +334,15 @@ static int bpf_map_show_fdinfo(struct seq_file *m, struct file *filp)
 		   "value_size:\t%u\n"
 		   "max_entries:\t%u\n"
 		   "map_flags:\t%#x\n"
-		   "memlock:\t%llu\n",
+		   "memlock:\t%llu\n"
+		   "map_id:\t%u\n",
 		   map->map_type,
 		   map->key_size,
 		   map->value_size,
 		   map->max_entries,
 		   map->map_flags,
-		   map->pages * 1ULL << PAGE_SHIFT);
+		   map->pages * 1ULL << PAGE_SHIFT,
+		   map->id);
 
 	if (owner_prog_type) {
 		ret += seq_printf(m, "owner_prog_type:\t%u\n",
@@ -443,7 +473,7 @@ static int map_create(union bpf_attr *attr)
 	if (err)
 		goto free_map_nouncharge;
 
-	err = bpf_map_charge_memlock(map);
+	err = bpf_map_init_memlock(map);
 	if (err)
 		goto free_map_sec;
 
@@ -466,7 +496,7 @@ static int map_create(union bpf_attr *attr)
 	return err;
 
 free_map:
-	bpf_map_uncharge_memlock(map);
+	bpf_map_release_memlock(map);
 free_map_sec:
 	security_bpf_map_free(map);
 free_map_nouncharge:
@@ -953,6 +983,8 @@ static void __bpf_prog_put(struct bpf_prog *prog, bool do_idr_lock)
 	if (atomic_dec_and_test(&prog->aux->refcnt)) {
 		/* bpf_prog_free_id() must be called first */
 		bpf_prog_free_id(prog, do_idr_lock);
+		bpf_prog_kallsyms_del_all(prog);
+
 		call_rcu(&prog->aux->rcu, __bpf_prog_put_rcu);
 	}
 }
@@ -983,11 +1015,13 @@ static int bpf_prog_show_fdinfo(struct seq_file *m, struct file *filp)
 		   "prog_type:\t%u\n"
 		   "prog_jited:\t%u\n"
 		   "prog_tag:\t%s\n"
-		   "memlock:\t%llu\n",
+		   "memlock:\t%llu\n"
+		   "prog_id:\t%u\n",
 		   prog->type,
 		   prog->jited,
 		   prog_tag,
-		   prog->pages * 1ULL << PAGE_SHIFT);
+		   prog->pages * 1ULL << PAGE_SHIFT,
+		   prog->aux->id);
 
 	return ret;
 }
@@ -1241,9 +1275,11 @@ static int bpf_prog_load(union bpf_attr *attr)
 		return err;
 	}
 
+	bpf_prog_kallsyms_add(prog);
 	return err;
 
 free_used_maps:
+	bpf_prog_kallsyms_del_subprogs(prog);
 	free_used_maps(prog->aux);
 free_prog:
 	bpf_prog_uncharge_memlock(prog);
@@ -1588,20 +1624,8 @@ static int bpf_prog_get_info_by_fd(struct bpf_prog *prog,
 	if (!capable(CAP_SYS_ADMIN)) {
 		info.jited_prog_len = 0;
 		info.xlated_prog_len = 0;
+		info.nr_jited_ksyms = 0;
 		goto done;
-	}
-
-	ulen = info.jited_prog_len;
-	info.jited_prog_len = prog->jited_len;
-	if (info.jited_prog_len && ulen) {
-		if (bpf_dump_raw_ok()) {
-			uinsns = u64_to_user_ptr(info.jited_prog_insns);
-			ulen = min_t(u32, info.jited_prog_len, ulen);
-			if (copy_to_user(uinsns, prog->bpf_func, ulen))
-				return -EFAULT;
-		} else {
-			info.jited_prog_insns = 0;
-		}
 	}
 
 	ulen = info.xlated_prog_len;
@@ -1623,6 +1647,98 @@ static int bpf_prog_get_info_by_fd(struct bpf_prog *prog,
 		kfree(insns_sanitized);
 		if (fault)
 			return -EFAULT;
+	}
+
+	/* NOTE: the following code is supposed to be skipped for offload.
+	 * bpf_prog_offload_info_fill() is the place to fill similar fields
+	 * for offload.
+	 */
+	ulen = info.jited_prog_len;
+	if (prog->aux->func_cnt) {
+		u32 i;
+
+		info.jited_prog_len = 0;
+		for (i = 0; i < prog->aux->func_cnt; i++)
+			info.jited_prog_len += prog->aux->func[i]->jited_len;
+	} else {
+		info.jited_prog_len = prog->jited_len;
+	}
+
+	if (info.jited_prog_len && ulen) {
+		if (bpf_dump_raw_ok()) {
+			uinsns = u64_to_user_ptr(info.jited_prog_insns);
+			ulen = min_t(u32, info.jited_prog_len, ulen);
+
+			/* for multi-function programs, copy the JITed
+			 * instructions for all the functions
+			 */
+			if (prog->aux->func_cnt) {
+				u32 len, free, i;
+				u8 *img;
+
+				free = ulen;
+				for (i = 0; i < prog->aux->func_cnt; i++) {
+					len = prog->aux->func[i]->jited_len;
+					len = min_t(u32, len, free);
+					img = (u8 *) prog->aux->func[i]->bpf_func;
+					if (copy_to_user(uinsns, img, len))
+						return -EFAULT;
+					uinsns += len;
+					free -= len;
+					if (!free)
+						break;
+				}
+			} else {
+				if (copy_to_user(uinsns, prog->bpf_func, ulen))
+					return -EFAULT;
+			}
+		} else {
+			info.jited_prog_insns = 0;
+		}
+	}
+
+	ulen = info.nr_jited_ksyms;
+	info.nr_jited_ksyms = prog->aux->func_cnt;
+	if (info.nr_jited_ksyms && ulen) {
+		if (bpf_dump_raw_ok()) {
+			u64 __user *user_ksyms;
+			ulong ksym_addr;
+			u32 i;
+
+			/* copy the address of the kernel symbol
+			 * corresponding to each function
+			 */
+			ulen = min_t(u32, info.nr_jited_ksyms, ulen);
+			user_ksyms = u64_to_user_ptr(info.jited_ksyms);
+			for (i = 0; i < ulen; i++) {
+				ksym_addr = (ulong) prog->aux->func[i]->bpf_func;
+				ksym_addr &= PAGE_MASK;
+				if (put_user((u64) ksym_addr, &user_ksyms[i]))
+					return -EFAULT;
+			}
+		} else {
+			info.jited_ksyms = 0;
+		}
+	}
+
+	ulen = info.nr_jited_func_lens;
+	info.nr_jited_func_lens = prog->aux->func_cnt;
+	if (info.nr_jited_func_lens && ulen) {
+		if (bpf_dump_raw_ok()) {
+			u32 __user *user_lens;
+			u32 func_len, i;
+
+			/* copy the JITed image lengths for each function */
+			ulen = min_t(u32, info.nr_jited_func_lens, ulen);
+			user_lens = u64_to_user_ptr(info.jited_func_lens);
+			for (i = 0; i < ulen; i++) {
+				func_len = prog->aux->func[i]->jited_len;
+				if (put_user(func_len, &user_lens[i]))
+					return -EFAULT;
+			}
+		} else {
+			info.jited_func_lens = 0;
+		}
 	}
 
 done:

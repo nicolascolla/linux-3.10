@@ -1192,6 +1192,11 @@ static inline bool skb_flow_dissect_flow_keys_buf(struct flow_keys *flow,
 				  data, proto, nhoff, hlen, flags);
 }
 
+void
+skb_flow_dissect_tunnel_info(const struct sk_buff *skb,
+			     struct flow_dissector *flow_dissector,
+			     void *target_container);
+
 static inline __u32 skb_get_hash(struct sk_buff *skb)
 {
 	if (!skb->l4_hash && !skb->sw_hash)
@@ -2103,6 +2108,30 @@ static inline void skb_reserve(struct sk_buff *skb, int len)
 {
 	skb->data += len;
 	skb->tail += len;
+}
+
+/**
+ *	skb_tailroom_reserve - adjust reserved_tailroom
+ *	@skb: buffer to alter
+ *	@mtu: maximum amount of headlen permitted
+ *	@needed_tailroom: minimum amount of reserved_tailroom
+ *
+ *	Set reserved_tailroom so that headlen can be as large as possible but
+ *	not larger than mtu and tailroom cannot be smaller than
+ *	needed_tailroom.
+ *	The required headroom should already have been reserved before using
+ *	this function.
+ */
+static inline void skb_tailroom_reserve(struct sk_buff *skb, unsigned int mtu,
+					unsigned int needed_tailroom)
+{
+	SKB_LINEAR_ASSERT(skb);
+	if (mtu < skb_tailroom(skb) - needed_tailroom)
+		/* use at most mtu */
+		skb->reserved_tailroom = skb_tailroom(skb) - mtu;
+	else
+		/* use up to all available space */
+		skb->reserved_tailroom = needed_tailroom;
 }
 
 #define ENCAP_TYPE_ETHER	0
@@ -3302,6 +3331,10 @@ static inline ktime_t net_timedelta(ktime_t t)
 static inline ktime_t net_invalid_timestamp(void)
 {
 	return ktime_set(0, 0);
+}
+
+static inline void skb_metadata_set(struct sk_buff *skb, u8 meta_len)
+{
 }
 
 struct sk_buff *skb_clone_sk(struct sk_buff *skb);

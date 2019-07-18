@@ -35,6 +35,7 @@
 #define EFI_WRITE_PROTECTED	( 8 | (1UL << (BITS_PER_LONG-1)))
 #define EFI_OUT_OF_RESOURCES	( 9 | (1UL << (BITS_PER_LONG-1)))
 #define EFI_NOT_FOUND		(14 | (1UL << (BITS_PER_LONG-1)))
+#define EFI_ABORTED		(21 | (1UL << (BITS_PER_LONG-1)))
 #define EFI_SECURITY_VIOLATION	(26 | (1UL << (BITS_PER_LONG-1)))
 
 typedef unsigned long efi_status_t;
@@ -506,6 +507,10 @@ typedef efi_status_t efi_get_next_variable_t (unsigned long *name_size, efi_char
 typedef efi_status_t efi_set_variable_t (efi_char16_t *name, efi_guid_t *vendor, 
 					 u32 attr, unsigned long data_size,
 					 void *data);
+typedef efi_status_t
+efi_set_variable_nonblocking_t(efi_char16_t *name, efi_guid_t *vendor,
+			       u32 attr, unsigned long data_size, void *data);
+
 typedef efi_status_t efi_get_next_high_mono_count_t (u32 *count);
 typedef void efi_reset_system_t (int reset_type, efi_status_t status,
 				 unsigned long data_size, efi_char16_t *data);
@@ -524,7 +529,9 @@ typedef efi_status_t efi_query_capsule_caps_t(efi_capsule_header_t **capsules,
 					      unsigned long count,
 					      u64 *max_size,
 					      int *reset_type);
-typedef efi_status_t efi_query_variable_store_t(u32 attributes, unsigned long size);
+typedef efi_status_t efi_query_variable_store_t(u32 attributes,
+						unsigned long size,
+						bool nonblocking);
 
 void efi_native_runtime_setup(void);
 
@@ -859,6 +866,10 @@ extern struct efi {
 	RH_KABI_EXTEND(unsigned long esrt)
 	/* EFI facility flags */
 	RH_KABI_EXTEND(unsigned long flags)
+	/* Provide a non-blocking SetVariable() operation */
+	RH_KABI_EXTEND(efi_set_variable_nonblocking_t *set_variable_nonblocking)
+	/* Provide a non-blocking QueryVariableInfo() operation */
+	RH_KABI_EXTEND(efi_query_variable_info_t *query_variable_info_nonblocking)
 } efi;
 
 static inline int
@@ -883,13 +894,17 @@ extern void efi_enter_virtual_mode (void);	/* switch EFI to virtual mode, if pos
 #ifdef CONFIG_X86
 extern void efi_late_init(void);
 extern void efi_free_boot_services(void);
-extern efi_status_t efi_query_variable_store(u32 attributes, unsigned long size);
+extern efi_status_t efi_query_variable_store(u32 attributes,
+					     unsigned long size,
+					     bool nonblocking);
 extern void efi_find_mirror(void);
 #else
 static inline void efi_late_init(void) {}
 static inline void efi_free_boot_services(void) {}
 
-static inline efi_status_t efi_query_variable_store(u32 attributes, unsigned long size)
+static inline efi_status_t efi_query_variable_store(u32 attributes,
+						    unsigned long size,
+						    bool nonblocking)
 {
 	return EFI_SUCCESS;
 }
@@ -1122,20 +1137,11 @@ struct efivar_operations {
 	efi_get_variable_t *get_variable;
 	efi_get_next_variable_t *get_next_variable;
 	efi_set_variable_t *set_variable;
+	efi_set_variable_nonblocking_t *set_variable_nonblocking;
 	efi_query_variable_store_t *query_variable_store;
 };
 
 struct efivars {
-	/*
-	 * ->lock protects two things:
-	 * 1) ->list - adds, removals, reads, writes
-	 * 2) ops.[gs]et_variable() calls.
-	 * It must not be held when creating sysfs entries or calling kmalloc.
-	 * ops.get_next_variable() is only called from register_efivars()
-	 * or efivar_update_sysfs_entries(),
-	 * which is protected by the BKL, so that path is safe.
-	 */
-	spinlock_t lock;
 	struct kset *kset;
 	struct kobject *kobject;
 	const struct efivar_operations *ops;
@@ -1148,8 +1154,10 @@ struct efivars {
  * and we use a page for reading/writing.
  */
 
+#define EFI_VAR_NAME_LEN	1024
+
 struct efi_variable {
-	efi_char16_t  VariableName[1024/sizeof(efi_char16_t)];
+	efi_char16_t  VariableName[EFI_VAR_NAME_LEN/sizeof(efi_char16_t)];
 	efi_guid_t    VendorGuid;
 	unsigned long DataSize;
 	__u8          Data[1024];
@@ -1199,11 +1207,10 @@ int efivars_unregister(struct efivars *efivars);
 struct kobject *efivars_kobject(void);
 
 int efivar_init(int (*func)(efi_char16_t *, efi_guid_t, unsigned long, void *),
-		void *data, bool atomic, bool duplicates,
-		struct list_head *head);
+		void *data, bool duplicates, struct list_head *head);
 
-void efivar_entry_add(struct efivar_entry *entry, struct list_head *head);
-void efivar_entry_remove(struct efivar_entry *entry);
+int efivar_entry_add(struct efivar_entry *entry, struct list_head *head);
+int efivar_entry_remove(struct efivar_entry *entry);
 
 int __efivar_entry_delete(struct efivar_entry *entry);
 int efivar_entry_delete(struct efivar_entry *entry);
@@ -1220,7 +1227,7 @@ int efivar_entry_set_get_size(struct efivar_entry *entry, u32 attributes,
 int efivar_entry_set_safe(efi_char16_t *name, efi_guid_t vendor, u32 attributes,
 			  bool block, unsigned long size, void *data);
 
-void efivar_entry_iter_begin(void);
+int efivar_entry_iter_begin(void);
 void efivar_entry_iter_end(void);
 
 int __efivar_entry_iter(int (*func)(struct efivar_entry *, void *),
@@ -1232,7 +1239,10 @@ int efivar_entry_iter(int (*func)(struct efivar_entry *, void *),
 struct efivar_entry *efivar_entry_find(efi_char16_t *name, efi_guid_t guid,
 				       struct list_head *head, bool remove);
 
-bool efivar_validate(struct efi_variable *var, u8 *data, unsigned long len);
+bool efivar_validate(efi_guid_t vendor, efi_char16_t *var_name, u8 *data,
+		     unsigned long data_size);
+bool efivar_variable_is_removable(efi_guid_t vendor, const char *name,
+				  size_t len);
 
 extern struct work_struct efivar_work;
 void efivar_run_worker(void);
@@ -1303,7 +1313,11 @@ extern void efi_call_virt_check_flags(unsigned long flags, const char *call);
 ({									\
 	efi_status_t __s;						\
 	unsigned long __flags;						\
+	unsigned long __flags_orig;					\
 	bool ibrs_on;							\
+									\
+	/* RHEL7-ONLY: Block local interrupts while using efi_pgt */	\
+	local_irq_save(__flags_orig);					\
 									\
 	ibrs_on = arch_efi_call_virt_setup();				\
 									\
@@ -1313,13 +1327,20 @@ extern void efi_call_virt_check_flags(unsigned long flags, const char *call);
 									\
 	arch_efi_call_virt_teardown(ibrs_on);				\
 									\
+	/* RHEL7-ONLY: Back to task pgt, so restore local interrupts */	\
+	local_irq_restore(__flags_orig);				\
+									\
 	__s;								\
 })
 
 #define __efi_call_virt_pointer(p, f, args...)				\
 ({									\
 	unsigned long __flags;						\
+	unsigned long __flags_orig;					\
 	bool ibrs_on;							\
+									\
+	/* RHEL7-ONLY: Block local interrupts while using efi_pgt */	\
+	local_irq_save(__flags_orig);					\
 									\
 	ibrs_on = arch_efi_call_virt_setup();				\
 									\
@@ -1328,6 +1349,55 @@ extern void efi_call_virt_check_flags(unsigned long flags, const char *call);
 	efi_call_virt_check_flags(__flags, __stringify(f));		\
 									\
 	arch_efi_call_virt_teardown(ibrs_on);				\
+									\
+	/* RHEL7-ONLY: Back to task pgt, so restore local interrupts */	\
+	local_irq_restore(__flags_orig);				\
+									\
 })
+
+/*
+ * efi_runtime_service() function identifiers.
+ * "NONE" is used by efi_recover_from_page_fault() to check if the page
+ * fault happened while executing an efi runtime service.
+ */
+enum efi_rts_ids {
+	NONE,
+	GET_TIME,
+	SET_TIME,
+	GET_WAKEUP_TIME,
+	SET_WAKEUP_TIME,
+	GET_VARIABLE,
+	GET_NEXT_VARIABLE,
+	SET_VARIABLE,
+	QUERY_VARIABLE_INFO,
+	GET_NEXT_HIGH_MONO_COUNT,
+	RESET_SYSTEM,
+	UPDATE_CAPSULE,
+	QUERY_CAPSULE_CAPS,
+};
+
+/*
+ * efi_runtime_work:	Details of EFI Runtime Service work
+ * @arg<1-5>:		EFI Runtime Service function arguments
+ * @status:		Status of executing EFI Runtime Service
+ * @efi_rts_id:		EFI Runtime Service function identifier
+ * @efi_rts_comp:	Struct used for handling completions
+ */
+struct efi_runtime_work {
+	void *arg1;
+	void *arg2;
+	void *arg3;
+	void *arg4;
+	void *arg5;
+	efi_status_t status;
+	struct work_struct work;
+	enum efi_rts_ids efi_rts_id;
+	struct completion efi_rts_comp;
+};
+
+extern struct efi_runtime_work efi_rts_work;
+
+/* Workqueue to queue EFI Runtime Services */
+extern struct workqueue_struct *efi_rts_wq;
 
 #endif /* _LINUX_EFI_H */

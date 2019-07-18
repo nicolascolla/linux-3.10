@@ -1,35 +1,5 @@
-/*
- * Copyright (C) 2017 Netronome Systems, Inc.
- *
- * This software is dual licensed under the GNU General License Version 2,
- * June 1991 as shown in the file COPYING in the top-level directory of this
- * source tree or the BSD 2-Clause License provided below.  You have the
- * option to license this software under the complete terms of either license.
- *
- * The BSD 2-Clause License:
- *
- *     Redistribution and use in source and binary forms, with or
- *     without modification, are permitted provided that the following
- *     conditions are met:
- *
- *      1. Redistributions of source code must retain the above
- *         copyright notice, this list of conditions and the following
- *         disclaimer.
- *
- *      2. Redistributions in binary form must reproduce the above
- *         copyright notice, this list of conditions and the following
- *         disclaimer in the documentation and/or other materials
- *         provided with the distribution.
- *
- * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND,
- * EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF
- * MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND
- * NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS
- * BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN
- * ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN
- * CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
- * SOFTWARE.
- */
+// SPDX-License-Identifier: (GPL-2.0-only OR BSD-2-Clause)
+/* Copyright (C) 2017-2018 Netronome Systems, Inc. */
 
 #include <linux/bitfield.h>
 #include <net/pkt_cls.h>
@@ -56,7 +26,7 @@ nfp_flower_compile_meta_tci(struct nfp_flower_meta_tci *frame,
 						      FLOW_DISSECTOR_KEY_VLAN,
 						      target);
 		/* Populate the tci field. */
-		if (flow_vlan->vlan_id) {
+		if (flow_vlan->vlan_id || flow_vlan->vlan_priority) {
 			tmp_tci = FIELD_PREP(NFP_FLOWER_MASK_VLAN_PRIO,
 					     flow_vlan->vlan_priority) |
 				  FIELD_PREP(NFP_FLOWER_MASK_VLAN_VID,
@@ -82,10 +52,13 @@ nfp_flower_compile_port(struct nfp_flower_in_port *frame, u32 cmsg_port,
 		return 0;
 	}
 
-	if (tun_type)
+	if (tun_type) {
 		frame->in_port = cpu_to_be32(NFP_FL_PORT_TYPE_TUN | tun_type);
-	else
+	} else {
+		if (!cmsg_port)
+			return -EOPNOTSUPP;
 		frame->in_port = cpu_to_be32(cmsg_port);
+	}
 
 	return 0;
 }
@@ -123,6 +96,20 @@ nfp_flower_compile_mac(struct nfp_flower_mac_mpls *frame,
 			 NFP_FLOWER_MASK_MPLS_Q;
 
 		frame->mpls_lse = cpu_to_be32(t_mpls);
+	} else if (dissector_uses_key(flow->dissector,
+				      FLOW_DISSECTOR_KEY_BASIC)) {
+		/* Check for mpls ether type and set NFP_FLOWER_MASK_MPLS_Q
+		 * bit, which indicates an mpls ether type but without any
+		 * mpls fields.
+		 */
+		struct flow_dissector_key_basic *key_basic;
+
+		key_basic = skb_flow_dissector_target(flow->dissector,
+						      FLOW_DISSECTOR_KEY_BASIC,
+						      flow->key);
+		if (key_basic->n_proto == cpu_to_be16(ETH_P_MPLS_UC) ||
+		    key_basic->n_proto == cpu_to_be16(ETH_P_MPLS_MC))
+			frame->mpls_lse = cpu_to_be32(NFP_FLOWER_MASK_MPLS_Q);
 	}
 }
 
@@ -146,13 +133,71 @@ nfp_flower_compile_tport(struct nfp_flower_tp_ports *frame,
 }
 
 static void
+nfp_flower_compile_ip_ext(struct nfp_flower_ip_ext *frame,
+			  struct tc_cls_flower_offload *flow,
+			  bool mask_version)
+{
+	struct fl_flow_key *target = mask_version ? flow->mask : flow->key;
+
+	if (dissector_uses_key(flow->dissector, FLOW_DISSECTOR_KEY_BASIC)) {
+		struct flow_dissector_key_basic *basic;
+
+		basic = skb_flow_dissector_target(flow->dissector,
+						  FLOW_DISSECTOR_KEY_BASIC,
+						  target);
+		frame->proto = basic->ip_proto;
+	}
+
+	if (dissector_uses_key(flow->dissector, FLOW_DISSECTOR_KEY_IP)) {
+		struct flow_dissector_key_ip *flow_ip;
+
+		flow_ip = skb_flow_dissector_target(flow->dissector,
+						    FLOW_DISSECTOR_KEY_IP,
+						    target);
+		frame->tos = flow_ip->tos;
+		frame->ttl = flow_ip->ttl;
+	}
+
+	if (dissector_uses_key(flow->dissector, FLOW_DISSECTOR_KEY_TCP)) {
+		struct flow_dissector_key_tcp *tcp;
+		u32 tcp_flags;
+
+		tcp = skb_flow_dissector_target(flow->dissector,
+						FLOW_DISSECTOR_KEY_TCP, target);
+		tcp_flags = be16_to_cpu(tcp->flags);
+
+		if (tcp_flags & TCPHDR_FIN)
+			frame->flags |= NFP_FL_TCP_FLAG_FIN;
+		if (tcp_flags & TCPHDR_SYN)
+			frame->flags |= NFP_FL_TCP_FLAG_SYN;
+		if (tcp_flags & TCPHDR_RST)
+			frame->flags |= NFP_FL_TCP_FLAG_RST;
+		if (tcp_flags & TCPHDR_PSH)
+			frame->flags |= NFP_FL_TCP_FLAG_PSH;
+		if (tcp_flags & TCPHDR_URG)
+			frame->flags |= NFP_FL_TCP_FLAG_URG;
+	}
+
+	if (dissector_uses_key(flow->dissector, FLOW_DISSECTOR_KEY_CONTROL)) {
+		struct flow_dissector_key_control *key;
+
+		key = skb_flow_dissector_target(flow->dissector,
+						FLOW_DISSECTOR_KEY_CONTROL,
+						target);
+		if (key->flags & FLOW_DIS_IS_FRAGMENT)
+			frame->flags |= NFP_FL_IP_FRAGMENTED;
+		if (key->flags & FLOW_DIS_FIRST_FRAG)
+			frame->flags |= NFP_FL_IP_FRAG_FIRST;
+	}
+}
+
+static void
 nfp_flower_compile_ipv4(struct nfp_flower_ipv4 *frame,
 			struct tc_cls_flower_offload *flow,
 			bool mask_version)
 {
 	struct fl_flow_key *target = mask_version ? flow->mask : flow->key;
 	struct flow_dissector_key_ipv4_addrs *addr;
-	struct flow_dissector_key_basic *basic;
 
 	memset(frame, 0, sizeof(struct nfp_flower_ipv4));
 
@@ -165,22 +210,7 @@ nfp_flower_compile_ipv4(struct nfp_flower_ipv4 *frame,
 		frame->ipv4_dst = addr->dst;
 	}
 
-	if (dissector_uses_key(flow->dissector, FLOW_DISSECTOR_KEY_BASIC)) {
-		basic = skb_flow_dissector_target(flow->dissector,
-						  FLOW_DISSECTOR_KEY_BASIC,
-						  target);
-		frame->proto = basic->ip_proto;
-	}
-
-	if (dissector_uses_key(flow->dissector, FLOW_DISSECTOR_KEY_IP)) {
-		struct flow_dissector_key_ip *flow_ip;
-
-		flow_ip = skb_flow_dissector_target(flow->dissector,
-						    FLOW_DISSECTOR_KEY_IP,
-						    target);
-		frame->tos = flow_ip->tos;
-		frame->ttl = flow_ip->ttl;
-	}
+	nfp_flower_compile_ip_ext(&frame->ip_ext, flow, mask_version);
 }
 
 static void
@@ -190,7 +220,6 @@ nfp_flower_compile_ipv6(struct nfp_flower_ipv6 *frame,
 {
 	struct fl_flow_key *target = mask_version ? flow->mask : flow->key;
 	struct flow_dissector_key_ipv6_addrs *addr;
-	struct flow_dissector_key_basic *basic;
 
 	memset(frame, 0, sizeof(struct nfp_flower_ipv6));
 
@@ -203,22 +232,22 @@ nfp_flower_compile_ipv6(struct nfp_flower_ipv6 *frame,
 		frame->ipv6_dst = addr->dst;
 	}
 
-	if (dissector_uses_key(flow->dissector, FLOW_DISSECTOR_KEY_BASIC)) {
-		basic = skb_flow_dissector_target(flow->dissector,
-						  FLOW_DISSECTOR_KEY_BASIC,
-						  target);
-		frame->proto = basic->ip_proto;
-	}
+	nfp_flower_compile_ip_ext(&frame->ip_ext, flow, mask_version);
+}
 
-	if (dissector_uses_key(flow->dissector, FLOW_DISSECTOR_KEY_IP)) {
-		struct flow_dissector_key_ip *flow_ip;
+static int
+nfp_flower_compile_geneve_opt(void *key_buf, struct tc_cls_flower_offload *flow,
+			      bool mask_version)
+{
+	struct fl_flow_key *target = mask_version ? flow->mask : flow->key;
+	struct flow_dissector_key_enc_opts *opts;
 
-		flow_ip = skb_flow_dissector_target(flow->dissector,
-						    FLOW_DISSECTOR_KEY_IP,
-						    target);
-		frame->tos = flow_ip->tos;
-		frame->ttl = flow_ip->ttl;
-	}
+	opts = skb_flow_dissector_target(flow->dissector,
+					 FLOW_DISSECTOR_KEY_ENC_OPTS,
+					 target);
+	memcpy(key_buf, opts->data, opts->len);
+
+	return 0;
 }
 
 static void
@@ -229,6 +258,7 @@ nfp_flower_compile_ipv4_udp_tun(struct nfp_flower_ipv4_udp_tun *frame,
 	struct fl_flow_key *target = mask_version ? flow->mask : flow->key;
 	struct flow_dissector_key_ipv4_addrs *tun_ips;
 	struct flow_dissector_key_keyid *vni;
+	struct flow_dissector_key_ip *ip;
 
 	memset(frame, 0, sizeof(struct nfp_flower_ipv4_udp_tun));
 
@@ -252,18 +282,29 @@ nfp_flower_compile_ipv4_udp_tun(struct nfp_flower_ipv4_udp_tun *frame,
 		frame->ip_src = tun_ips->src;
 		frame->ip_dst = tun_ips->dst;
 	}
+
+	if (dissector_uses_key(flow->dissector, FLOW_DISSECTOR_KEY_ENC_IP)) {
+		ip = skb_flow_dissector_target(flow->dissector,
+					       FLOW_DISSECTOR_KEY_ENC_IP,
+					       target);
+		frame->tos = ip->tos;
+		frame->ttl = ip->ttl;
+	}
 }
 
-int nfp_flower_compile_flow_match(struct tc_cls_flower_offload *flow,
+int nfp_flower_compile_flow_match(struct nfp_app *app,
+				  struct tc_cls_flower_offload *flow,
 				  struct nfp_fl_key_ls *key_ls,
 				  struct net_device *netdev,
 				  struct nfp_fl_payload *nfp_flow,
 				  enum nfp_flower_tun_type tun_type)
 {
-	struct nfp_repr *netdev_repr;
+	u32 port_id;
 	int err;
 	u8 *ext;
 	u8 *msk;
+
+	port_id = nfp_flower_get_port_id_from_netdev(app, netdev);
 
 	memset(nfp_flow->unmasked_data, 0, key_ls->key_size);
 	memset(nfp_flow->mask_data, 0, key_ls->key_size);
@@ -292,15 +333,13 @@ int nfp_flower_compile_flow_match(struct tc_cls_flower_offload *flow,
 
 	/* Populate Exact Port data. */
 	err = nfp_flower_compile_port((struct nfp_flower_in_port *)ext,
-				      nfp_repr_get_port_id(netdev),
-				      false, tun_type);
+				      port_id, false, tun_type);
 	if (err)
 		return err;
 
 	/* Populate Mask Port Data. */
 	err = nfp_flower_compile_port((struct nfp_flower_in_port *)msk,
-				      nfp_repr_get_port_id(netdev),
-				      true, tun_type);
+				      port_id, true, tun_type);
 	if (err)
 		return err;
 
@@ -364,15 +403,22 @@ int nfp_flower_compile_flow_match(struct tc_cls_flower_offload *flow,
 		msk += sizeof(struct nfp_flower_ipv4_udp_tun);
 
 		/* Configure tunnel end point MAC. */
-		if (nfp_netdev_is_nfp_repr(netdev)) {
-			netdev_repr = netdev_priv(netdev);
-			nfp_tunnel_write_macs(netdev_repr->app);
+		nfp_tunnel_write_macs(app);
 
-			/* Store the tunnel destination in the rule data.
-			 * This must be present and be an exact match.
-			 */
-			nfp_flow->nfp_tun_ipv4_addr = tun_dst;
-			nfp_tunnel_add_ipv4_off(netdev_repr->app, tun_dst);
+		/* Store the tunnel destination in the rule data.
+		 * This must be present and be an exact match.
+		 */
+		nfp_flow->nfp_tun_ipv4_addr = tun_dst;
+		nfp_tunnel_add_ipv4_off(app, tun_dst);
+
+		if (key_ls->key_layer_two & NFP_FLOWER_LAYER2_GENEVE_OP) {
+			err = nfp_flower_compile_geneve_opt(ext, flow, false);
+			if (err)
+				return err;
+
+			err = nfp_flower_compile_geneve_opt(msk, flow, true);
+			if (err)
+				return err;
 		}
 	}
 

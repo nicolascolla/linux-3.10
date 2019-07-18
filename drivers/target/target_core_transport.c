@@ -206,19 +206,19 @@ void transport_subsystem_check_init(void)
 	if (sub_api_initialized)
 		return;
 
-	ret = request_module("target_core_iblock");
+	ret = IS_ENABLED(CONFIG_TCM_IBLOCK) && request_module("target_core_iblock");
 	if (ret != 0)
 		pr_err("Unable to load target_core_iblock\n");
 
-	ret = request_module("target_core_file");
+	ret = IS_ENABLED(CONFIG_TCM_FILEIO) && request_module("target_core_file");
 	if (ret != 0)
 		pr_err("Unable to load target_core_file\n");
 
-	ret = request_module("target_core_pscsi");
+	ret = IS_ENABLED(CONFIG_TCM_PSCSI) && request_module("target_core_pscsi");
 	if (ret != 0)
 		pr_err("Unable to load target_core_pscsi\n");
 
-	ret = request_module("target_core_user");
+	ret = IS_ENABLED(CONFIG_TCM_USER2) && request_module("target_core_user");
 	if (ret != 0)
 		pr_err("Unable to load target_core_user\n");
 
@@ -318,6 +318,7 @@ void __transport_register_session(
 {
 	const struct target_core_fabric_ops *tfo = se_tpg->se_tpg_tfo;
 	unsigned char buf[PR_REG_ISID_LEN];
+	unsigned long flags;
 
 	se_sess->se_tpg = se_tpg;
 	se_sess->fabric_sess_ptr = fabric_sess_ptr;
@@ -354,7 +355,7 @@ void __transport_register_session(
 			se_sess->sess_bin_isid = get_unaligned_be64(&buf[0]);
 		}
 
-		spin_lock_irq(&se_nacl->nacl_sess_lock);
+		spin_lock_irqsave(&se_nacl->nacl_sess_lock, flags);
 		/*
 		 * The se_nacl->nacl_sess pointer will be set to the
 		 * last active I_T Nexus for each struct se_node_acl.
@@ -363,12 +364,12 @@ void __transport_register_session(
 
 		list_add_tail(&se_sess->sess_acl_list,
 			      &se_nacl->acl_sess_list);
-		spin_unlock_irq(&se_nacl->nacl_sess_lock);
+		spin_unlock_irqrestore(&se_nacl->nacl_sess_lock, flags);
 	}
 	list_add_tail(&se_sess->sess_list, &se_tpg->tpg_sess_list);
 
 	pr_debug("TARGET_CORE[%s]: Registered fabric_sess_ptr: %p\n",
-		se_tpg->se_tpg_tfo->get_fabric_name(), se_sess->fabric_sess_ptr);
+		se_tpg->se_tpg_tfo->fabric_name, se_sess->fabric_sess_ptr);
 }
 EXPORT_SYMBOL(__transport_register_session);
 
@@ -387,7 +388,7 @@ void transport_register_session(
 EXPORT_SYMBOL(transport_register_session);
 
 struct se_session *
-target_alloc_session(struct se_portal_group *tpg,
+target_setup_session(struct se_portal_group *tpg,
 		     unsigned int tag_num, unsigned int tag_size,
 		     enum target_prot_op prot_op,
 		     const char *initiatorname, void *private,
@@ -429,7 +430,7 @@ target_alloc_session(struct se_portal_group *tpg,
 	transport_register_session(tpg, sess->se_node_acl, sess, private);
 	return sess;
 }
-EXPORT_SYMBOL(target_alloc_session);
+EXPORT_SYMBOL(target_setup_session);
 
 static void target_release_session(struct kref *kref)
 {
@@ -595,7 +596,7 @@ void transport_deregister_session(struct se_session *se_sess)
 	spin_unlock_irqrestore(&se_tpg->session_lock, flags);
 
 	pr_debug("TARGET_CORE[%s]: Deregistered fabric_sess\n",
-		se_tpg->se_tpg_tfo->get_fabric_name());
+		se_tpg->se_tpg_tfo->fabric_name);
 	/*
 	 * If last kref is dropping now for an explicit NodeACL, awake sleeping
 	 * ->acl_free_comp caller to wakeup configfs se_node_acl->acl_group
@@ -608,6 +609,13 @@ void transport_deregister_session(struct se_session *se_sess)
 	transport_free_session(se_sess);
 }
 EXPORT_SYMBOL(transport_deregister_session);
+
+void target_remove_session(struct se_session *se_sess)
+{
+	transport_deregister_session_configfs(se_sess);
+	transport_deregister_session(se_sess);
+}
+EXPORT_SYMBOL(target_remove_session);
 
 static void target_remove_from_state_list(struct se_cmd *cmd)
 {
@@ -859,7 +867,7 @@ void target_qf_do_work(struct work_struct *work)
 		atomic_dec_mb(&dev->dev_qf_count);
 
 		pr_debug("Processing %s cmd: %p QUEUE_FULL in work queue"
-			" context: %s\n", cmd->se_tfo->get_fabric_name(), cmd,
+			" context: %s\n", cmd->se_tfo->fabric_name, cmd,
 			(cmd->t_state == TRANSPORT_COMPLETE_QF_OK) ? "COMPLETE_OK" :
 			(cmd->t_state == TRANSPORT_COMPLETE_QF_WP) ? "WRITE_PENDING"
 			: "UNKNOWN");
@@ -1223,7 +1231,7 @@ target_cmd_size_check(struct se_cmd *cmd, unsigned int size)
 	} else if (size != cmd->data_length) {
 		pr_warn_ratelimited("TARGET_CORE[%s]: Expected Transfer Length:"
 			" %u does not match SCSI CDB Length: %u for SAM Opcode:"
-			" 0x%02x\n", cmd->se_tfo->get_fabric_name(),
+			" 0x%02x\n", cmd->se_tfo->fabric_name,
 				cmd->data_length, size, cmd->t_task_cdb[0]);
 
 		if (cmd->data_direction == DMA_TO_DEVICE) {
@@ -1375,7 +1383,7 @@ target_setup_cmd_from_cdb(struct se_cmd *cmd, unsigned char *cdb)
 	ret = dev->transport->parse_cdb(cmd);
 	if (ret == TCM_UNSUPPORTED_SCSI_OPCODE)
 		pr_warn_ratelimited("%s/%s: Unsupported SCSI Opcode 0x%02x, sending CHECK_CONDITION.\n",
-				    cmd->se_tfo->get_fabric_name(),
+				    cmd->se_tfo->fabric_name,
 				    cmd->se_sess->se_node_acl->initiatorname,
 				    cmd->t_task_cdb[0]);
 	if (ret)
@@ -1757,7 +1765,7 @@ EXPORT_SYMBOL(target_submit_tmr);
 void transport_generic_request_failure(struct se_cmd *cmd,
 		sense_reason_t sense_reason)
 {
-	int ret = 0, post_ret = 0;
+	int ret = 0, post_ret;
 
 	pr_debug("-----[ Storage Engine Exception; sense_reason %d\n",
 		 sense_reason);
@@ -1768,12 +1776,7 @@ void transport_generic_request_failure(struct se_cmd *cmd,
 	 */
 	transport_complete_task_attr(cmd);
 
-	/*
-	 * Handle special case for COMPARE_AND_WRITE failure, where the
-	 * callback is expected to drop the per device ->caw_sem.
-	 */
-	if ((cmd->se_cmd_flags & SCF_COMPARE_AND_WRITE) &&
-	     cmd->transport_complete_callback)
+	if (cmd->transport_complete_callback)
 		cmd->transport_complete_callback(cmd, false, &post_ret);
 
 	if (transport_check_aborted_status(cmd, 1))
@@ -1991,7 +1994,7 @@ void target_execute_cmd(struct se_cmd *cmd)
 	 * Determine if frontend context caller is requesting the stopping of
 	 * this command for frontend exceptions.
 	 *
-	 * If the received CDB has aleady been aborted stop processing it here.
+	 * If the received CDB has already been aborted stop processing it here.
 	 */
 	spin_lock_irq(&cmd->t_state_lock);
 	if (__transport_check_aborted_status(cmd, 1)) {
@@ -2506,7 +2509,7 @@ transport_generic_new_cmd(struct se_cmd *cmd)
 	}
 
 	/*
-	 * Determine is the TCM fabric module has already allocated physical
+	 * Determine if the TCM fabric module has already allocated physical
 	 * memory, and is directly calling transport_generic_map_mem_to_cmd()
 	 * beforehand.
 	 */

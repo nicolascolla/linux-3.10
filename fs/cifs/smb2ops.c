@@ -434,6 +434,7 @@ move_smb2_ea_to_cifs(char *dst, size_t dst_size,
 	int rc = 0;
 	unsigned int ea_name_len = ea_name ? strlen(ea_name) : 0;
 	char *name, *value;
+	size_t buf_size = dst_size;
 	size_t name_len, value_len, user_name_len;
 
 	while (src_size > 0) {
@@ -469,9 +470,10 @@ move_smb2_ea_to_cifs(char *dst, size_t dst_size,
 			/* 'user.' plus a terminating null */
 			user_name_len = 5 + 1 + name_len;
 
-			rc += user_name_len;
-
-			if (dst_size >= user_name_len) {
+			if (buf_size == 0) {
+				/* skip copy - calc size only */
+				rc += user_name_len;
+			} else if (dst_size >= user_name_len) {
 				dst_size -= user_name_len;
 				memcpy(dst, "user.", 5);
 				dst += 5;
@@ -479,8 +481,7 @@ move_smb2_ea_to_cifs(char *dst, size_t dst_size,
 				dst += name_len;
 				*dst = 0;
 				++dst;
-			} else if (dst_size == 0) {
-				/* skip copy - calc size only */
+				rc += user_name_len;
 			} else {
 				/* stop before overrun buffer */
 				rc = -ERANGE;
@@ -569,9 +570,15 @@ smb2_query_eas(const unsigned int xid, struct cifs_tcon *tcon,
 
 	SMB2_close(xid, tcon, fid.persistent_fid, fid.volatile_fid);
 
+	/*
+	 * If ea_name is NULL (listxattr) and there are no EAs, return 0 as it's
+	 * not an error. Otherwise, the specified ea_name was not found.
+	 */
 	if (!rc)
 		rc = move_smb2_ea_to_cifs(ea_data, buf_size, smb2_data,
 					  SMB2_MAX_EA_BUF, ea_name);
+	else if (!ea_name && rc == -ENODATA)
+		rc = 0;
 
 	kfree(smb2_data);
 	return rc;
@@ -1193,7 +1200,7 @@ smb2_query_dir_first(const unsigned int xid, struct cifs_tcon *tcon,
 	}
 
 	srch_inf->entries_in_buffer = 0;
-	srch_inf->index_of_last_entry = 0;
+	srch_inf->index_of_last_entry = 2;
 
 	rc = SMB2_query_directory(xid, tcon, fid->persistent_fid,
 				  fid->volatile_fid, 0, srch_inf);
@@ -1399,7 +1406,7 @@ smb2_get_dfs_refer(const unsigned int xid, struct cifs_ses *ses,
 	} while (rc == -EAGAIN);
 
 	if (rc) {
-		if (rc != -ENOENT)
+		if ((rc != -ENOENT) && (rc != -EOPNOTSUPP))
 			cifs_dbg(VFS, "ioctl error in smb2_get_dfs_refer rc=%d\n", rc);
 		goto out;
 	}

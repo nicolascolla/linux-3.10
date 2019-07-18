@@ -315,25 +315,6 @@ static int gfs2_read_sb(struct gfs2_sbd *sdp, int silent)
 	sdp->sd_heightsize[x] = ~0;
 	gfs2_assert(sdp, sdp->sd_max_height <= GFS2_MAX_META_HEIGHT);
 
-	sdp->sd_jheightsize[0] = sdp->sd_sb.sb_bsize -
-				 sizeof(struct gfs2_dinode);
-	sdp->sd_jheightsize[1] = sdp->sd_jbsize * sdp->sd_diptrs;
-	for (x = 2;; x++) {
-		u64 space, d;
-		u32 m;
-
-		space = sdp->sd_jheightsize[x - 1] * sdp->sd_inptrs;
-		d = space;
-		m = do_div(d, sdp->sd_inptrs);
-
-		if (d != sdp->sd_jheightsize[x - 1] || m)
-			break;
-		sdp->sd_jheightsize[x] = space;
-	}
-	sdp->sd_max_jheight = x;
-	sdp->sd_jheightsize[x] = ~0;
-	gfs2_assert(sdp, sdp->sd_max_jheight <= GFS2_MAX_META_HEIGHT);
-
 	sdp->sd_max_dents_per_leaf = (sdp->sd_sb.sb_bsize -
 				      sizeof(struct gfs2_leaf)) /
 				     GFS2_MIN_DIRENT_SIZE;
@@ -1433,7 +1414,7 @@ static void gfs2_kill_sb(struct super_block *sb)
 
 struct file_system_type gfs2_fs_type = {
 	.name = "gfs2",
-	.fs_flags = FS_REQUIRES_DEV,
+	.fs_flags = FS_REQUIRES_DEV | FS_HAS_INVALIDATE_RANGE,
 	.mount = gfs2_mount,
 	.kill_sb = gfs2_kill_sb,
 	.owner = THIS_MODULE,
@@ -1442,7 +1423,7 @@ MODULE_ALIAS_FS("gfs2");
 
 struct file_system_type gfs2meta_fs_type = {
 	.name = "gfs2meta",
-	.fs_flags = FS_REQUIRES_DEV,
+	.fs_flags = FS_REQUIRES_DEV | FS_HAS_INVALIDATE_RANGE,
 	.mount = gfs2_mount_meta,
 	.owner = THIS_MODULE,
 };

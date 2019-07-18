@@ -124,6 +124,9 @@ struct nvmf_ctrl_options {
  *	1. At minimum, 'required_opts' and 'allowed_opts' should
  *	   be set to the same enum parsing options defined earlier.
  *	2. create_ctrl() must be defined (even if it does nothing)
+ *	3. struct nvmf_transport_ops must be statically allocated in the
+ *	   modules .bss section so that a pure module_get on @module
+ *	   prevents the memory from beeing freed.
  */
 struct nvmf_transport_ops {
 	struct list_head	entry;
@@ -164,6 +167,8 @@ int nvmf_fail_nonready_command(struct nvme_ctrl *ctrl,
 bool __nvmf_check_ready(struct nvme_ctrl *ctrl, struct request *rq,
 		bool queue_live);
 
+bool nvmf_ip_options_match(struct nvme_ctrl *ctrl,
+		struct nvmf_ctrl_options *opts);
 static inline bool nvmf_check_ready(struct nvme_ctrl *ctrl, struct request *rq,
 		bool queue_live)
 {

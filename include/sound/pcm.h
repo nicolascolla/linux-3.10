@@ -462,6 +462,7 @@ struct snd_pcm_substream {
         /* -- timer section -- */
 	struct snd_timer *timer;		/* timer */
 	unsigned timer_running: 1;	/* time is running */
+	long wait_time;	/* time in ms for R/W to wait for avail */
 	/* -- next substream -- */
 	struct snd_pcm_substream *next;
 	/* -- linked substreams -- */
@@ -481,15 +482,6 @@ struct snd_pcm_substream {
 #endif
 #ifdef CONFIG_SND_VERBOSE_PROCFS
 	struct snd_info_entry *proc_root;
-	struct snd_info_entry *proc_info_entry;
-	struct snd_info_entry *proc_hw_params_entry;
-	struct snd_info_entry *proc_sw_params_entry;
-	struct snd_info_entry *proc_status_entry;
-	struct snd_info_entry *proc_prealloc_entry;
-	struct snd_info_entry *proc_prealloc_max_entry;
-#ifdef CONFIG_SND_PCM_XRUN_DEBUG
-	struct snd_info_entry *proc_xrun_injection_entry;
-#endif
 #endif /* CONFIG_SND_VERBOSE_PROCFS */
 	/* misc flags */
 	unsigned int hw_opened: 1;
@@ -511,10 +503,8 @@ struct snd_pcm_str {
 #endif
 #ifdef CONFIG_SND_VERBOSE_PROCFS
 	struct snd_info_entry *proc_root;
-	struct snd_info_entry *proc_info_entry;
 #ifdef CONFIG_SND_PCM_XRUN_DEBUG
 	unsigned int xrun_debug;	/* 0 = disabled, 1 = verbose, 2 = stacktrace */
-	struct snd_info_entry *proc_xrun_debug_entry;
 #endif
 #endif
 	struct snd_kcontrol *chmap_kctl; /* channel-mapping controls */
@@ -764,7 +754,7 @@ static inline snd_pcm_uframes_t snd_pcm_playback_avail(struct snd_pcm_runtime *r
 }
 
 /**
- * snd_pcm_playback_avail - Get the available (readable) space for capture
+ * snd_pcm_capture_avail - Get the available (readable) space for capture
  * @runtime: PCM runtime instance
  *
  * Result is between 0 ... (boundary - 1)
@@ -1199,12 +1189,12 @@ static inline void snd_pcm_gettime(struct snd_pcm_runtime *runtime,
  *  Memory
  */
 
-int snd_pcm_lib_preallocate_free(struct snd_pcm_substream *substream);
-int snd_pcm_lib_preallocate_free_for_all(struct snd_pcm *pcm);
-int snd_pcm_lib_preallocate_pages(struct snd_pcm_substream *substream,
+void snd_pcm_lib_preallocate_free(struct snd_pcm_substream *substream);
+void snd_pcm_lib_preallocate_free_for_all(struct snd_pcm *pcm);
+void snd_pcm_lib_preallocate_pages(struct snd_pcm_substream *substream,
 				  int type, struct device *data,
 				  size_t size, size_t max);
-int snd_pcm_lib_preallocate_pages_for_all(struct snd_pcm *pcm,
+void snd_pcm_lib_preallocate_pages_for_all(struct snd_pcm *pcm,
 					  int type, void *data,
 					  size_t size, size_t max);
 int snd_pcm_lib_malloc_pages(struct snd_pcm_substream *substream, size_t size);
@@ -1340,8 +1330,6 @@ int snd_pcm_lib_mmap_iomem(struct snd_pcm_substream *substream, struct vm_area_s
 #define SNDRV_PCM_INFO_MMAP_IOMEM	0
 #define snd_pcm_lib_mmap_iomem	NULL
 #endif
-
-#define snd_pcm_lib_mmap_vmalloc NULL
 
 /**
  * snd_pcm_limit_isa_dma_size - Get the max size fitting with ISA DMA transfer

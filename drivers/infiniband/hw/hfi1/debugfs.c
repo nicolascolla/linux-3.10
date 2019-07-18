@@ -502,6 +502,54 @@ DEBUGFS_SEQ_FILE_OPS(rcds);
 DEBUGFS_SEQ_FILE_OPEN(rcds)
 DEBUGFS_FILE_OPS(rcds);
 
+static void *_pios_seq_start(struct seq_file *s, loff_t *pos)
+{
+	struct hfi1_ibdev *ibd;
+	struct hfi1_devdata *dd;
+
+	ibd = (struct hfi1_ibdev *)s->private;
+	dd = dd_from_dev(ibd);
+	if (!dd->send_contexts || *pos >= dd->num_send_contexts)
+		return NULL;
+	return pos;
+}
+
+static void *_pios_seq_next(struct seq_file *s, void *v, loff_t *pos)
+{
+	struct hfi1_ibdev *ibd = (struct hfi1_ibdev *)s->private;
+	struct hfi1_devdata *dd = dd_from_dev(ibd);
+
+	++*pos;
+	if (!dd->send_contexts || *pos >= dd->num_send_contexts)
+		return NULL;
+	return pos;
+}
+
+static void _pios_seq_stop(struct seq_file *s, void *v)
+{
+}
+
+static int _pios_seq_show(struct seq_file *s, void *v)
+{
+	struct hfi1_ibdev *ibd = (struct hfi1_ibdev *)s->private;
+	struct hfi1_devdata *dd = dd_from_dev(ibd);
+	struct send_context_info *sci;
+	loff_t *spos = v;
+	loff_t i = *spos;
+	unsigned long flags;
+
+	spin_lock_irqsave(&dd->sc_lock, flags);
+	sci = &dd->send_contexts[i];
+	if (sci && sci->type != SC_USER && sci->allocated && sci->sc)
+		seqfile_dump_sci(s, i, sci);
+	spin_unlock_irqrestore(&dd->sc_lock, flags);
+	return 0;
+}
+
+DEBUGFS_SEQ_FILE_OPS(pios);
+DEBUGFS_SEQ_FILE_OPEN(pios)
+DEBUGFS_FILE_OPS(pios);
+
 /* read the per-device counters */
 static ssize_t dev_counters_read(struct file *file, char __user *buf,
 				 size_t count, loff_t *ppos)
@@ -1275,7 +1323,8 @@ DEBUGFS_FILE_OPS(fault_stats);
 
 static void fault_exit_opcode_debugfs(struct hfi1_ibdev *ibd)
 {
-	debugfs_remove_recursive(ibd->fault_opcode->dir);
+	if (ibd->fault_opcode)
+		debugfs_remove_recursive(ibd->fault_opcode->dir);
 	kfree(ibd->fault_opcode);
 	ibd->fault_opcode = NULL;
 }
@@ -1303,6 +1352,7 @@ static int fault_init_opcode_debugfs(struct hfi1_ibdev *ibd)
 					  &ibd->fault_opcode->attr);
 	if (IS_ERR(ibd->fault_opcode->dir)) {
 		kfree(ibd->fault_opcode);
+		ibd->fault_opcode = NULL;
 		return -ENOENT;
 	}
 
@@ -1326,7 +1376,8 @@ fail:
 
 static void fault_exit_packet_debugfs(struct hfi1_ibdev *ibd)
 {
-	debugfs_remove_recursive(ibd->fault_packet->dir);
+	if (ibd->fault_packet)
+		debugfs_remove_recursive(ibd->fault_packet->dir);
 	kfree(ibd->fault_packet);
 	ibd->fault_packet = NULL;
 }
@@ -1352,6 +1403,7 @@ static int fault_init_packet_debugfs(struct hfi1_ibdev *ibd)
 					  &ibd->fault_opcode->attr);
 	if (IS_ERR(ibd->fault_packet->dir)) {
 		kfree(ibd->fault_packet);
+		ibd->fault_packet = NULL;
 		return -ENOENT;
 	}
 
@@ -1464,6 +1516,7 @@ void hfi1_dbg_ibdev_init(struct hfi1_ibdev *ibd)
 	DEBUGFS_SEQ_FILE_CREATE(qp_stats, ibd->hfi1_ibdev_dbg, ibd);
 	DEBUGFS_SEQ_FILE_CREATE(sdes, ibd->hfi1_ibdev_dbg, ibd);
 	DEBUGFS_SEQ_FILE_CREATE(rcds, ibd->hfi1_ibdev_dbg, ibd);
+	DEBUGFS_SEQ_FILE_CREATE(pios, ibd->hfi1_ibdev_dbg, ibd);
 	DEBUGFS_SEQ_FILE_CREATE(sdma_cpu_list, ibd->hfi1_ibdev_dbg, ibd);
 	/* dev counter files */
 	for (i = 0; i < ARRAY_SIZE(cntr_ops); i++)

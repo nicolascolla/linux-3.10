@@ -504,7 +504,7 @@ int mce_available(struct cpuinfo_x86 *c)
 
 static void mce_schedule_work(void)
 {
-	if (!mce_gen_pool_empty() && keventd_up())
+	if (!mce_gen_pool_empty())
 		schedule_work(&mce_work);
 }
 
@@ -537,7 +537,7 @@ static void mce_report_event(struct pt_regs *regs)
  * be somewhat complicated (e.g. segment offset would require an instruction
  * parser). So only support physical addresses up to page granuality for now.
  */
-static int mce_usable_address(struct mce *m)
+int mce_usable_address(struct mce *m)
 {
 	if (!(m->status & MCI_STATUS_MISCV) || !(m->status & MCI_STATUS_ADDRV))
 		return 0;
@@ -552,6 +552,7 @@ static int mce_usable_address(struct mce *m)
 		return 0;
 	return 1;
 }
+EXPORT_SYMBOL_GPL(mce_usable_address);
 
 static int srao_decode_notifier(struct notifier_block *nb, unsigned long val,
 				void *data)
@@ -668,6 +669,18 @@ bool mce_is_memory_error(struct mce *m)
 	return false;
 }
 EXPORT_SYMBOL_GPL(mce_is_memory_error);
+
+bool mce_is_correctable(struct mce *m)
+{
+	if (m->cpuvendor == X86_VENDOR_AMD && m->status & MCI_STATUS_DEFERRED)
+		return false;
+
+	if (m->status & MCI_STATUS_UC)
+		return false;
+
+	return true;
+}
+EXPORT_SYMBOL_GPL(mce_is_correctable);
 
 DEFINE_PER_CPU(unsigned, mce_poll_count);
 

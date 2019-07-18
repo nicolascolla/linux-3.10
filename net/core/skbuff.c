@@ -3384,6 +3384,7 @@ normal:
 				net_warn_ratelimited(
 					"skb_segment: too many frags: %u %u\n",
 					pos, mss);
+				err = -EINVAL;
 				goto err;
 			}
 
@@ -3420,11 +3421,10 @@ skip_fraglist:
 
 perform_csum_check:
 		if (!csum) {
-			if (skb_has_shared_frag(nskb)) {
-				err = __skb_linearize(nskb);
-				if (err)
-					goto err;
-			}
+			if (skb_has_shared_frag(nskb) &&
+			    __skb_linearize(nskb))
+				goto err;
+
 			if (!nskb->remcsum_offload)
 				nskb->ip_summed = CHECKSUM_NONE;
 			SKB_GSO_CB(nskb)->csum =
@@ -3492,7 +3492,7 @@ int skb_gro_receive(struct sk_buff **head, struct sk_buff *skb)
 	struct sk_buff *lp, *p = *head;
 	unsigned int delta_truesize;
 
-	if (unlikely(p->len + len >= 65536))
+	if (unlikely(p->len + len >= 65536 || NAPI_GRO_CB(skb)->flush))
 		return -E2BIG;
 
 	lp = NAPI_GRO_CB(p)->last;
@@ -4401,10 +4401,14 @@ void skb_scrub_packet(struct sk_buff *skb, bool xnet)
 	nf_reset(skb);
 	nf_reset_trace(skb);
 
+#ifdef CONFIG_NET_SWITCHDEV
+	skb->offload_fwd_mark = 0;
+	skb->offload_mr_fwd_mark = 0;
+#endif
+
 	if (!xnet)
 		return;
 
-	skb_orphan(skb);
 	skb->mark = 0;
 }
 EXPORT_SYMBOL_GPL(skb_scrub_packet);

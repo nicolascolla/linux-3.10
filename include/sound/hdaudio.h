@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0 */
 /*
  * HD-audio core stuff
  */
@@ -7,8 +8,10 @@
 
 #include <linux/device.h>
 #include <linux/interrupt.h>
+#include <linux/pm_runtime.h>
 #include <linux/timecounter.h>
 #include <sound/core.h>
+#include <sound/pcm.h>
 #include <sound/memalloc.h>
 #include <sound/hda_verbs.h>
 #include <drm/i915_component.h>
@@ -131,7 +134,7 @@ int snd_hdac_get_sub_nodes(struct hdac_device *codec, hda_nid_t nid,
 			   hda_nid_t *start_id);
 unsigned int snd_hdac_calc_stream_format(unsigned int rate,
 					 unsigned int channels,
-					 unsigned int format,
+					 snd_pcm_format_t format,
 					 unsigned int maxbps,
 					 unsigned short spdif_ctls);
 int snd_hdac_query_supported_pcm(struct hdac_device *codec, hda_nid_t nid,
@@ -170,12 +173,38 @@ int snd_hdac_power_down(struct hdac_device *codec);
 int snd_hdac_power_up_pm(struct hdac_device *codec);
 int snd_hdac_power_down_pm(struct hdac_device *codec);
 int snd_hdac_keep_power_up(struct hdac_device *codec);
+
+/* call this at entering into suspend/resume callbacks in codec driver */
+static inline void snd_hdac_enter_pm(struct hdac_device *codec)
+{
+	atomic_inc(&codec->in_pm);
+}
+
+/* call this at leaving from suspend/resume callbacks in codec driver */
+static inline void snd_hdac_leave_pm(struct hdac_device *codec)
+{
+	atomic_dec(&codec->in_pm);
+}
+
+static inline bool snd_hdac_is_in_pm(struct hdac_device *codec)
+{
+	return atomic_read(&codec->in_pm);
+}
+
+static inline bool snd_hdac_is_power_on(struct hdac_device *codec)
+{
+	return !pm_runtime_suspended(&codec->dev);
+}
 #else
 static inline int snd_hdac_power_up(struct hdac_device *codec) { return 0; }
 static inline int snd_hdac_power_down(struct hdac_device *codec) { return 0; }
 static inline int snd_hdac_power_up_pm(struct hdac_device *codec) { return 0; }
 static inline int snd_hdac_power_down_pm(struct hdac_device *codec) { return 0; }
 static inline int snd_hdac_keep_power_up(struct hdac_device *codec) { return 0; }
+static inline void snd_hdac_enter_pm(struct hdac_device *codec) {}
+static inline void snd_hdac_leave_pm(struct hdac_device *codec) {}
+static inline bool snd_hdac_is_in_pm(struct hdac_device *codec) { return 0; }
+static inline bool snd_hdac_is_power_on(struct hdac_device *codec) { return 1; }
 #endif
 
 /*
@@ -316,9 +345,9 @@ struct hdac_bus {
 	spinlock_t reg_lock;
 	struct mutex cmd_mutex;
 
-	/* i915 component interface */
-	struct i915_audio_component *audio_component;
-	int i915_power_refcount;
+	/* DRM component interface */
+	struct drm_audio_component *audio_component;
+	int drm_power_refcount;
 };
 
 int snd_hdac_bus_init(struct hdac_bus *bus, struct device *dev,
@@ -334,6 +363,7 @@ void snd_hdac_bus_queue_event(struct hdac_bus *bus, u32 res, u32 res_ex);
 int snd_hdac_bus_add_device(struct hdac_bus *bus, struct hdac_device *codec);
 void snd_hdac_bus_remove_device(struct hdac_bus *bus,
 				struct hdac_device *codec);
+void snd_hdac_bus_process_unsol_events(struct work_struct *work);
 
 static inline void snd_hdac_codec_link_up(struct hdac_device *codec)
 {
@@ -357,6 +387,7 @@ void snd_hdac_bus_init_cmd_io(struct hdac_bus *bus);
 void snd_hdac_bus_stop_cmd_io(struct hdac_bus *bus);
 void snd_hdac_bus_enter_link_reset(struct hdac_bus *bus);
 void snd_hdac_bus_exit_link_reset(struct hdac_bus *bus);
+int snd_hdac_bus_reset_link(struct hdac_bus *bus, bool full_reset);
 
 void snd_hdac_bus_update_rirb(struct hdac_bus *bus);
 int snd_hdac_bus_handle_stream_irq(struct hdac_bus *bus, unsigned int status,
@@ -479,6 +510,9 @@ void snd_hdac_stream_sync(struct hdac_stream *azx_dev, bool start,
 			  unsigned int streams);
 void snd_hdac_stream_timecounter_init(struct hdac_stream *azx_dev,
 				      unsigned int streams);
+int snd_hdac_get_stream_stripe_ctl(struct hdac_bus *bus,
+				struct snd_pcm_substream *substream);
+
 /*
  * macros for easy use
  */

@@ -30,10 +30,11 @@
 #define HW_ATL_MPI_CONTROL_ADR  0x0368U
 #define HW_ATL_MPI_STATE_ADR    0x036CU
 
-#define HW_ATL_MPI_STATE_MSK    0x00FFU
-#define HW_ATL_MPI_STATE_SHIFT  0U
-#define HW_ATL_MPI_SPEED_MSK    0xFFFF0000U
-#define HW_ATL_MPI_SPEED_SHIFT  16U
+#define HW_ATL_MPI_STATE_MSK      0x00FFU
+#define HW_ATL_MPI_STATE_SHIFT    0U
+#define HW_ATL_MPI_SPEED_MSK      0x00FF0000U
+#define HW_ATL_MPI_SPEED_SHIFT    16U
+#define HW_ATL_MPI_DIRTY_WAKE_MSK 0x02000000U
 
 #define HW_ATL_MPI_DAISY_CHAIN_STATUS	0x704
 #define HW_ATL_MPI_BOOT_EXIT_CODE	0x388
@@ -324,17 +325,31 @@ static int hw_atl_utils_fw_upload_dwords(struct aq_hw_s *self, u32 a, u32 *p,
 		err = -ETIME;
 		goto err_exit;
 	}
+	if (IS_CHIP_FEATURE(REVISION_B1)) {
+		u32 offset = 0;
 
-	aq_hw_write_reg(self, 0x00000208U, a);
+		for (; offset < cnt; ++offset) {
+			aq_hw_write_reg(self, 0x328, p[offset]);
+			aq_hw_write_reg(self, 0x32C,
+					(0x80000000 | (0xFFFF & (offset * 4))));
+			hw_atl_mcp_up_force_intr_set(self, 1);
+			/* 1000 times by 10us = 10ms */
+			AQ_HW_WAIT_FOR((aq_hw_read_reg(self,
+						       0x32C) & 0xF0000000) !=
+				       0x80000000,
+				       10, 1000);
+		}
+	} else {
+		u32 offset = 0;
 
-	for (++cnt; --cnt;) {
-		u32 i = 0U;
+		aq_hw_write_reg(self, 0x208, a);
 
-		aq_hw_write_reg(self, 0x0000020CU, *(p++));
-		aq_hw_write_reg(self, 0x00000200U, 0xC000U);
+		for (; offset < cnt; ++offset) {
+			aq_hw_write_reg(self, 0x20C, p[offset]);
+			aq_hw_write_reg(self, 0x200, 0xC000);
 
-		for (i = 1024U;
-			(0x100U & aq_hw_read_reg(self, 0x00000200U)) && --i;) {
+			AQ_HW_WAIT_FOR((aq_hw_read_reg(self, 0x200U) &
+					0x100) == 0, 10, 1000);
 		}
 	}
 
@@ -398,7 +413,7 @@ struct aq_hw_atl_utils_fw_rpc_tid_s {
 
 #define hw_atl_utils_fw_rpc_init(_H_) hw_atl_utils_fw_rpc_wait(_H_, NULL)
 
-static int hw_atl_utils_fw_rpc_call(struct aq_hw_s *self, unsigned int rpc_size)
+int hw_atl_utils_fw_rpc_call(struct aq_hw_s *self, unsigned int rpc_size)
 {
 	int err = 0;
 	struct aq_hw_atl_utils_fw_rpc_tid_s sw;
@@ -422,8 +437,8 @@ err_exit:
 	return err;
 }
 
-static int hw_atl_utils_fw_rpc_wait(struct aq_hw_s *self,
-				    struct hw_aq_atl_utils_fw_rpc **rpc)
+int hw_atl_utils_fw_rpc_wait(struct aq_hw_s *self,
+			     struct hw_aq_atl_utils_fw_rpc **rpc)
 {
 	int err = 0;
 	struct aq_hw_atl_utils_fw_rpc_tid_s sw;
@@ -525,19 +540,20 @@ static int hw_atl_utils_mpi_set_speed(struct aq_hw_s *self, u32 speed)
 {
 	u32 val = aq_hw_read_reg(self, HW_ATL_MPI_CONTROL_ADR);
 
-	val = (val & HW_ATL_MPI_STATE_MSK) | (speed << HW_ATL_MPI_SPEED_SHIFT);
+	val = val & ~HW_ATL_MPI_SPEED_MSK;
+	val |= speed << HW_ATL_MPI_SPEED_SHIFT;
 	aq_hw_write_reg(self, HW_ATL_MPI_CONTROL_ADR, val);
 
 	return 0;
 }
 
-void hw_atl_utils_mpi_set(struct aq_hw_s *self,
-			  enum hal_atl_utils_fw_state_e state,
-			  u32 speed)
+static int hw_atl_utils_mpi_set_state(struct aq_hw_s *self,
+				      enum hal_atl_utils_fw_state_e state)
 {
 	int err = 0;
 	u32 transaction_id = 0;
 	struct hw_aq_atl_utils_mbox_header mbox;
+	u32 val = aq_hw_read_reg(self, HW_ATL_MPI_CONTROL_ADR);
 
 	if (state == MPI_RESET) {
 		hw_atl_utils_mpi_read_mbox(self, &mbox);
@@ -551,21 +567,21 @@ void hw_atl_utils_mpi_set(struct aq_hw_s *self,
 		if (err < 0)
 			goto err_exit;
 	}
+	/* On interface DEINIT we disable DW (raise bit)
+	 * Otherwise enable DW (clear bit)
+	 */
+	if (state == MPI_DEINIT || state == MPI_POWER)
+		val |= HW_ATL_MPI_DIRTY_WAKE_MSK;
+	else
+		val &= ~HW_ATL_MPI_DIRTY_WAKE_MSK;
 
-	aq_hw_write_reg(self, HW_ATL_MPI_CONTROL_ADR,
-			(speed << HW_ATL_MPI_SPEED_SHIFT) | state);
+	/* Set new state bits */
+	val = val & ~HW_ATL_MPI_STATE_MSK;
+	val |= state & HW_ATL_MPI_STATE_MSK;
 
-err_exit:;
-}
-
-static int hw_atl_utils_mpi_set_state(struct aq_hw_s *self,
-				      enum hal_atl_utils_fw_state_e state)
-{
-	u32 val = aq_hw_read_reg(self, HW_ATL_MPI_CONTROL_ADR);
-
-	val = state | (val & HW_ATL_MPI_SPEED_MSK);
 	aq_hw_write_reg(self, HW_ATL_MPI_CONTROL_ADR, val);
-	return 0;
+err_exit:
+	return err;
 }
 
 int hw_atl_utils_mpi_get_link_status(struct aq_hw_s *self)
@@ -721,16 +737,18 @@ void hw_atl_utils_hw_chip_features_init(struct aq_hw_s *self, u32 *p)
 	*p = chip_features;
 }
 
-int hw_atl_utils_hw_deinit(struct aq_hw_s *self)
+static int hw_atl_fw1x_deinit(struct aq_hw_s *self)
 {
-	hw_atl_utils_mpi_set(self, MPI_DEINIT, 0x0U);
+	hw_atl_utils_mpi_set_speed(self, 0);
+	hw_atl_utils_mpi_set_state(self, MPI_DEINIT);
 	return 0;
 }
 
 int hw_atl_utils_hw_set_power(struct aq_hw_s *self,
 			      unsigned int power_state)
 {
-	hw_atl_utils_mpi_set(self, MPI_POWER, 0x0U);
+	hw_atl_utils_mpi_set_speed(self, 0);
+	hw_atl_utils_mpi_set_state(self, MPI_POWER);
 	return 0;
 }
 
@@ -823,10 +841,12 @@ int hw_atl_utils_get_fw_version(struct aq_hw_s *self, u32 *fw_version)
 
 const struct aq_fw_ops aq_fw_1x_ops = {
 	.init = hw_atl_utils_mpi_create,
+	.deinit = hw_atl_fw1x_deinit,
 	.reset = NULL,
 	.get_mac_permanent = hw_atl_utils_get_mac_permanent,
 	.set_link_speed = hw_atl_utils_mpi_set_speed,
 	.set_state = hw_atl_utils_mpi_set_state,
 	.update_link_status = hw_atl_utils_mpi_get_link_status,
 	.update_stats = hw_atl_utils_update_stats,
+	.set_flow_control = NULL,
 };

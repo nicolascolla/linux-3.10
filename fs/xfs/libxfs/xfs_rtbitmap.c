@@ -672,7 +672,6 @@ xfs_rtmodify_range(
 		/*
 		 * Compute a mask of relevant bits.
 		 */
-		bit = 0;
 		mask = ((xfs_rtword_t)1 << lastbit) - 1;
 		/*
 		 * Set/clear the active bits.
@@ -1015,4 +1014,16 @@ xfs_rtfree_extent(
 		xfs_trans_log_inode(tp, mp->m_rbmip, XFS_ILOG_CORE);
 	}
 	return 0;
+}
+
+/*
+ * Verify that an realtime block number pointer doesn't point off the
+ * end of the realtime device.
+ */
+bool
+xfs_verify_rtbno(
+	struct xfs_mount	*mp,
+	xfs_rtblock_t		rtbno)
+{
+	return rtbno < mp->m_sb.sb_rblocks;
 }

@@ -80,10 +80,14 @@
 #define SECTOR_TO_BLOCK_SHIFT 3
 
 /*
+ * For btree insert:
  *  3 for btree insert +
  *  2 for btree lookup used within space map
+ * For btree remove:
+ *  2 for shadow spine +
+ *  4 for rebalance 3 child node
  */
-#define THIN_MAX_CONCURRENT_LOCKS 5
+#define THIN_MAX_CONCURRENT_LOCKS 6
 
 /* This should be plenty */
 #define SPACE_MAP_ROOT_SIZE 128
@@ -864,10 +868,8 @@ static void __set_metadata_reserve(struct dm_pool_metadata *pmd)
 	if (r) {
 		DMERR("could not get size of metadata device");
 		pmd->metadata_reserve = max_blocks;
-	} else {
-		sector_div(total, 10);
-		pmd->metadata_reserve = min(max_blocks, total);
-	}
+	} else
+		pmd->metadata_reserve = min(max_blocks, div_u64(total, 10));
 }
 
 struct dm_pool_metadata *dm_pool_metadata_open(struct block_device *bdev,
@@ -1717,7 +1719,7 @@ int dm_thin_remove_range(struct dm_thin_device *td,
 	return r;
 }
 
-int dm_pool_block_is_used(struct dm_pool_metadata *pmd, dm_block_t b, bool *result)
+int dm_pool_block_is_shared(struct dm_pool_metadata *pmd, dm_block_t b, bool *result)
 {
 	int r;
 	uint32_t ref_count;
@@ -1725,7 +1727,7 @@ int dm_pool_block_is_used(struct dm_pool_metadata *pmd, dm_block_t b, bool *resu
 	down_read(&pmd->root_lock);
 	r = dm_sm_get_count(pmd->data_sm, b, &ref_count);
 	if (!r)
-		*result = (ref_count != 0);
+		*result = (ref_count > 1);
 	up_read(&pmd->root_lock);
 
 	return r;

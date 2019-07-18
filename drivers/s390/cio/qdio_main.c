@@ -503,8 +503,8 @@ static inline void inbound_primed(struct qdio_q *q, int count)
 
 static int get_inbound_buffer_frontier(struct qdio_q *q)
 {
-	int count, stop;
 	unsigned char state = 0;
+	int count;
 
 	q->timestamp = get_tod_clock_fast();
 
@@ -513,9 +513,7 @@ static int get_inbound_buffer_frontier(struct qdio_q *q)
 	 * would return 0.
 	 */
 	count = min(atomic_read(&q->nr_buf_used), QDIO_MAX_BUFFERS_MASK);
-	stop = add_buf(q->first_to_check, count);
-
-	if (q->first_to_check == stop)
+	if (!count)
 		goto out;
 
 	/*
@@ -685,21 +683,20 @@ static inline unsigned long qdio_aob_for_buffer(struct qdio_output_q *q,
 	unsigned long phys_aob = 0;
 
 	if (!q->use_cq)
-		goto out;
+		return 0;
 
 	if (!q->aobs[bufnr]) {
 		struct qaob *aob = qdio_allocate_aob();
 		q->aobs[bufnr] = aob;
 	}
 	if (q->aobs[bufnr]) {
-		q->sbal_state[bufnr].flags = QDIO_OUTBUF_STATE_FLAG_NONE;
 		q->sbal_state[bufnr].aob = q->aobs[bufnr];
 		q->aobs[bufnr]->user1 = (u64) q->sbal_state[bufnr].user;
 		phys_aob = virt_to_phys(q->aobs[bufnr]);
 		WARN_ON_ONCE(phys_aob & 0xFF);
 	}
 
-out:
+	q->sbal_state[bufnr].flags = 0;
 	return phys_aob;
 }
 
@@ -777,8 +774,8 @@ void qdio_inbound_processing(unsigned long data)
 
 static int get_outbound_buffer_frontier(struct qdio_q *q)
 {
-	int count, stop;
 	unsigned char state = 0;
+	int count;
 
 	q->timestamp = get_tod_clock_fast();
 
@@ -794,8 +791,7 @@ static int get_outbound_buffer_frontier(struct qdio_q *q)
 	 * would return 0.
 	 */
 	count = min(atomic_read(&q->nr_buf_used), QDIO_MAX_BUFFERS_MASK);
-	stop = add_buf(q->first_to_check, count);
-	if (q->first_to_check == stop)
+	if (!count)
 		goto out;
 
 	count = get_buf_states(q, q->first_to_check, &state, count, 0, 1);
@@ -1256,8 +1252,10 @@ no_cleanup:
 	qdio_shutdown_thinint(irq_ptr);
 
 	/* restore interrupt handler */
-	if ((void *)cdev->handler == (void *)qdio_int_handler)
+	if ((void *)cdev->handler == (void *)qdio_int_handler) {
 		cdev->handler = irq_ptr->orig_handler;
+		cdev->private->intparm = 0;
+	}
 	spin_unlock_irqrestore(get_ccwdev_lock(cdev), flags);
 
 	qdio_set_state(irq_ptr, QDIO_IRQ_STATE_INACTIVE);

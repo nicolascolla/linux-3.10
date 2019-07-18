@@ -25,6 +25,9 @@
 #include <sys/timerfd.h>
 #endif
 #include <sys/time.h>
+#include <sys/types.h>
+#include <sys/stat.h>
+#include <fcntl.h>
 
 #include <linux/kernel.h>
 #include <linux/time64.h>
@@ -1387,8 +1390,6 @@ static int kvm_events_live(struct perf_kvm_stat *kvm,
 		err = -1;
 		goto out;
 	}
-
-	symbol_conf.nr_events = kvm->evlist->nr_entries;
 
 	if (perf_evlist__create_maps(kvm->evlist, &kvm->opts.target) < 0)
 		usage_with_options(live_usage, live_options);

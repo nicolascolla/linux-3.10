@@ -2211,7 +2211,7 @@ qlafx00_ioctl_iosb_entry(scsi_qla_host_t *vha, struct req_que *req,
 	srb_t *sp;
 	struct fc_bsg_job *bsg_job;
 	struct srb_iocb *iocb_job;
-	int res;
+	int res = 0;
 	struct qla_mt_iocb_rsp_fx00 fstatus;
 	uint8_t	*fw_sts_ptr;
 
@@ -2626,7 +2626,7 @@ qlafx00_status_cont_entry(struct rsp_que *rsp, sts_cont_entry_t *pkt)
  * qlafx00_multistatus_entry() - Process Multi response queue entries.
  * @vha: SCSI driver HA context
  * @rsp: response queue
- * @pkt:
+ * @pkt: received packet
  */
 static void
 qlafx00_multistatus_entry(struct scsi_qla_host *vha,
@@ -2685,12 +2685,10 @@ qlafx00_multistatus_entry(struct scsi_qla_host *vha,
  * @vha: SCSI driver HA context
  * @rsp: response queue
  * @pkt: Entry pointer
- * @estatus:
- * @etype:
  */
 static void
 qlafx00_error_entry(scsi_qla_host_t *vha, struct rsp_que *rsp,
-		    struct sts_entry_fx00 *pkt, uint8_t estatus, uint8_t etype)
+		    struct sts_entry_fx00 *pkt)
 {
 	srb_t *sp;
 	struct qla_hw_data *ha = vha->hw;
@@ -2698,9 +2696,6 @@ qlafx00_error_entry(scsi_qla_host_t *vha, struct rsp_que *rsp,
 	uint16_t que = 0;
 	struct req_que *req = NULL;
 	int res = DID_ERROR << 16;
-
-	ql_dbg(ql_dbg_async, vha, 0x507f,
-	    "type of error status in response: 0x%x\n", estatus);
 
 	req = ha->req_q_map[que];
 
@@ -2749,9 +2744,11 @@ qlafx00_process_response_queue(struct scsi_qla_host *vha,
 
 		if (pkt->entry_status != 0 &&
 		    pkt->entry_type != IOCTL_IOSB_TYPE_FX00) {
+			ql_dbg(ql_dbg_async, vha, 0x507f,
+			       "type of error status in response: 0x%x\n",
+			       pkt->entry_status);
 			qlafx00_error_entry(vha, rsp,
-			    (struct sts_entry_fx00 *)pkt, pkt->entry_status,
-			    pkt->entry_type);
+					    (struct sts_entry_fx00 *)pkt);
 			continue;
 		}
 
@@ -2871,7 +2868,7 @@ qlafx00_async_event(scsi_qla_host_t *vha)
 /**
  * qlafx00x_mbx_completion() - Process mailbox command completions.
  * @vha: SCSI driver HA context
- * @mb0:
+ * @mb0: value to be written into mailbox register 0
  */
 static void
 qlafx00_mbx_completion(scsi_qla_host_t *vha, uint32_t mb0)
@@ -2897,7 +2894,7 @@ qlafx00_mbx_completion(scsi_qla_host_t *vha, uint32_t mb0)
 
 /**
  * qlafx00_intr_handler() - Process interrupts for the ISPFX00.
- * @irq:
+ * @irq: interrupt number
  * @dev_id: SCSI driver HA context
  *
  * Called by system whenever the host adapter generates an interrupt.

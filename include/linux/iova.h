@@ -70,10 +70,12 @@ struct iova_fq {
 struct iova_domain {
 	spinlock_t	iova_rbtree_lock; /* Lock to protect update of rbtree */
 	struct rb_root	rbroot;		/* iova domain rbtree root */
-	struct rb_node	*cached32_node; /* Save last alloced node */
+	struct rb_node	*cached_node;	/* Save last alloced node */
+	struct rb_node	*cached32_node; /* Save last 32-bit alloced node */
 	unsigned long	granule;	/* pfn granularity for this domain */
 	unsigned long	start_pfn;	/* Lower limit for this domain */
 	unsigned long	dma_32bit_pfn;
+	struct iova	anchor;		/* rbtree lookup anchor */
 	struct iova_rcache rcaches[IOVA_RANGE_CACHE_MAX_SIZE];	/* IOVA range caches */
 
 	iova_flush_cb	flush_cb;	/* Call-Back function to flush IOMMU
@@ -131,6 +133,7 @@ static inline unsigned long iova_pfn(struct iova_domain *iovad, dma_addr_t iova)
 	return iova >> iova_shift(iovad);
 }
 
+#if IS_ENABLED(CONFIG_IOMMU_IOVA)
 int iova_cache_get(void);
 void iova_cache_put(void);
 
@@ -147,12 +150,12 @@ void queue_iova(struct iova_domain *iovad,
 		unsigned long pfn, unsigned long pages,
 		unsigned long data);
 unsigned long alloc_iova_fast(struct iova_domain *iovad, unsigned long size,
-			      unsigned long limit_pfn);
+			      unsigned long limit_pfn, bool flush_rcache);
 struct iova *reserve_iova(struct iova_domain *iovad, unsigned long pfn_lo,
 	unsigned long pfn_hi);
 void copy_reserved_iova(struct iova_domain *from, struct iova_domain *to);
 void init_iova_domain(struct iova_domain *iovad, unsigned long granule,
-	unsigned long start_pfn, unsigned long pfn_32bit);
+	unsigned long start_pfn);
 int init_iova_flush_queue(struct iova_domain *iovad,
 			  iova_flush_cb flush_cb, iova_entry_dtor entry_dtor);
 struct iova *find_iova(struct iova_domain *iovad, unsigned long pfn);
@@ -160,5 +163,108 @@ void put_iova_domain(struct iova_domain *iovad);
 struct iova *split_and_remove_iova(struct iova_domain *iovad,
 	struct iova *iova, unsigned long pfn_lo, unsigned long pfn_hi);
 void free_cpu_cached_iovas(unsigned int cpu, struct iova_domain *iovad);
+#else
+static inline int iova_cache_get(void)
+{
+	return -ENOTSUPP;
+}
+
+static inline void iova_cache_put(void)
+{
+}
+
+static inline struct iova *alloc_iova_mem(void)
+{
+	return NULL;
+}
+
+static inline void free_iova_mem(struct iova *iova)
+{
+}
+
+static inline void free_iova(struct iova_domain *iovad, unsigned long pfn)
+{
+}
+
+static inline void __free_iova(struct iova_domain *iovad, struct iova *iova)
+{
+}
+
+static inline struct iova *alloc_iova(struct iova_domain *iovad,
+				      unsigned long size,
+				      unsigned long limit_pfn,
+				      bool size_aligned)
+{
+	return NULL;
+}
+
+static inline void free_iova_fast(struct iova_domain *iovad,
+				  unsigned long pfn,
+				  unsigned long size)
+{
+}
+
+static inline void queue_iova(struct iova_domain *iovad,
+			      unsigned long pfn, unsigned long pages,
+			      unsigned long data)
+{
+}
+
+static inline unsigned long alloc_iova_fast(struct iova_domain *iovad,
+					    unsigned long size,
+					    unsigned long limit_pfn,
+					    bool flush_rcache)
+{
+	return 0;
+}
+
+static inline struct iova *reserve_iova(struct iova_domain *iovad,
+					unsigned long pfn_lo,
+					unsigned long pfn_hi)
+{
+	return NULL;
+}
+
+static inline void copy_reserved_iova(struct iova_domain *from,
+				      struct iova_domain *to)
+{
+}
+
+static inline void init_iova_domain(struct iova_domain *iovad,
+				    unsigned long granule,
+				    unsigned long start_pfn)
+{
+}
+
+static inline int init_iova_flush_queue(struct iova_domain *iovad,
+					iova_flush_cb flush_cb,
+					iova_entry_dtor entry_dtor)
+{
+	return -ENODEV;
+}
+
+static inline struct iova *find_iova(struct iova_domain *iovad,
+				     unsigned long pfn)
+{
+	return NULL;
+}
+
+static inline void put_iova_domain(struct iova_domain *iovad)
+{
+}
+
+static inline struct iova *split_and_remove_iova(struct iova_domain *iovad,
+						 struct iova *iova,
+						 unsigned long pfn_lo,
+						 unsigned long pfn_hi)
+{
+	return NULL;
+}
+
+static inline void free_cpu_cached_iovas(unsigned int cpu,
+					 struct iova_domain *iovad)
+{
+}
+#endif
 
 #endif

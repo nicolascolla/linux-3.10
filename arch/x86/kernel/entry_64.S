@@ -1455,7 +1455,7 @@ paranoid_swapgs_restore:
 	SWAPGS
 	/*
 	 * If swapgs needs to be called, there is a pretty good chance that
-	 * NMI/exception happens right before returning to userspace.
+	 * NMI/exception happen right before returning to userspace.
 	 * So clear the CPU buffers just in case.
 	 */
 	MDS_USER_CLEAR_CPU_BUFFERS

@@ -1775,9 +1775,30 @@ void __audit_inode(struct filename *name, const struct dentry *dentry,
 	struct inode *inode = dentry->d_inode;
 	struct audit_names *n;
 	bool parent = flags & AUDIT_INODE_PARENT;
+	struct audit_entry *e;
+	struct list_head *list = &audit_filter_list[AUDIT_FILTER_FS];
+	int i;
 
 	if (!context->in_syscall)
 		return;
+
+	rcu_read_lock();
+	if (!list_empty(list)) {
+		list_for_each_entry_rcu(e, list, list) {
+			for (i = 0; i < e->rule.field_count; i++) {
+				struct audit_field *f = &e->rule.fields[i];
+
+				if (f->type == AUDIT_FSTYPE
+				    && audit_comparator(inode->i_sb->s_magic,
+							f->op, f->val)
+				    && e->rule.action == AUDIT_NEVER) {
+					rcu_read_unlock();
+					return;
+				}
+			}
+		}
+	}
+	rcu_read_unlock();
 
 	if (!name)
 		goto out_alloc;
@@ -1846,7 +1867,7 @@ out:
 		n->type = AUDIT_TYPE_NORMAL;
 	}
 	handle_path(dentry);
-	audit_copy_inode(n, dentry, inode);
+	audit_copy_inode(n, dentry, inode, flags & AUDIT_INODE_NOEVAL);
 }
 
 /**
@@ -1871,9 +1892,30 @@ void __audit_inode_child(struct inode *parent,
 	struct inode *inode = dentry->d_inode;
 	const char *dname = dentry->d_name.name;
 	struct audit_names *n, *found_parent = NULL, *found_child = NULL;
+	struct audit_entry *e;
+	struct list_head *list = &audit_filter_list[AUDIT_FILTER_FS];
+	int i;
 
 	if (!context->in_syscall)
 		return;
+
+	rcu_read_lock();
+	if (!list_empty(list)) {
+		list_for_each_entry_rcu(e, list, list) {
+			for (i = 0; i < e->rule.field_count; i++) {
+				struct audit_field *f = &e->rule.fields[i];
+
+				if (f->type == AUDIT_FSTYPE
+				    && audit_comparator(parent->i_sb->s_magic,
+							f->op, f->val)
+				    && e->rule.action == AUDIT_NEVER) {
+					rcu_read_unlock();
+					return;
+				}
+			}
+		}
+	}
+	rcu_read_unlock();
 
 	if (inode)
 		handle_one(inode);
@@ -1919,7 +1961,7 @@ void __audit_inode_child(struct inode *parent,
 		n = audit_alloc_name(context, AUDIT_TYPE_PARENT);
 		if (!n)
 			return;
-		audit_copy_inode(n, NULL, parent);
+		audit_copy_inode(n, NULL, parent, 0);
 	}
 
 	if (!found_child) {
@@ -1938,7 +1980,7 @@ void __audit_inode_child(struct inode *parent,
 	}
 
 	if (inode)
-		audit_copy_inode(found_child, dentry, inode);
+		audit_copy_inode(found_child, dentry, inode, 0);
 	else
 		found_child->ino = AUDIT_INO_UNSET;
 }

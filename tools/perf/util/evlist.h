@@ -6,7 +6,6 @@
 #include <linux/refcount.h>
 #include <linux/list.h>
 #include <api/fd/array.h>
-#include <fcntl.h>
 #include <stdio.h>
 #include "../perf.h"
 #include "event.h"
@@ -49,6 +48,8 @@ struct perf_evlist {
 	struct perf_evsel *selected;
 	struct events_stats stats;
 	struct perf_env	*env;
+	u64		first_sample_time;
+	u64		last_sample_time;
 };
 
 struct perf_evsel_str_handler {
@@ -300,8 +301,17 @@ void perf_evlist__set_tracking_event(struct perf_evlist *evlist,
 
 void perf_event_attr__set_max_precise_ip(struct perf_event_attr *attr);
 
+struct perf_evsel *
+perf_evlist__find_evsel_by_str(struct perf_evlist *evlist, const char *str);
+
 struct perf_evsel *perf_evlist__event2evsel(struct perf_evlist *evlist,
 					    union perf_event *event);
 
 bool perf_evlist__exclude_kernel(struct perf_evlist *evlist);
+
+void perf_evlist__force_leader(struct perf_evlist *evlist);
+
+struct perf_evsel *perf_evlist__reset_weak_group(struct perf_evlist *evlist,
+						 struct perf_evsel *evsel);
+
 #endif /* __PERF_EVLIST_H */

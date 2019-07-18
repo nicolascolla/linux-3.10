@@ -124,7 +124,6 @@ int pci_iov_add_virtfn(struct pci_dev *dev, int id, int reset)
 	struct pci_sriov *iov = dev->sriov;
 	struct pci_bus *bus;
 
-	mutex_lock(&iov->dev->sriov->lock);
 	bus = virtfn_add_bus(dev->bus, pci_iov_virtfn_bus(dev, id));
 	if (!bus)
 		goto failed;
@@ -159,7 +158,6 @@ int pci_iov_add_virtfn(struct pci_dev *dev, int id, int reset)
 		__pci_reset_function(virtfn);
 
 	pci_device_add(virtfn, virtfn->bus);
-	mutex_unlock(&iov->dev->sriov->lock);
 
 	sprintf(buf, "virtfn%u", id);
 	rc = sysfs_create_link(&dev->dev.kobj, &virtfn->dev.kobj, buf);
@@ -179,12 +177,10 @@ failed2:
 	sysfs_remove_link(&dev->dev.kobj, buf);
 failed1:
 	pci_dev_put(dev);
-	mutex_lock(&iov->dev->sriov->lock);
 	pci_stop_and_remove_bus_device(virtfn);
 failed0:
 	virtfn_remove_bus(dev->bus, bus);
 failed:
-	mutex_unlock(&iov->dev->sriov->lock);
 
 	return rc;
 }
@@ -193,7 +189,6 @@ void pci_iov_remove_virtfn(struct pci_dev *dev, int id, int reset)
 {
 	char buf[VIRTFN_ID_LEN];
 	struct pci_dev *virtfn;
-	struct pci_sriov *iov = dev->sriov;
 
 	virtfn = pci_get_domain_bus_and_slot(pci_domain_nr(dev->bus),
 					     pci_iov_virtfn_bus(dev, id),
@@ -216,10 +211,8 @@ void pci_iov_remove_virtfn(struct pci_dev *dev, int id, int reset)
 	if (virtfn->dev.kobj.sd)
 		sysfs_remove_link(&virtfn->dev.kobj, "physfn");
 
-	mutex_lock(&iov->dev->sriov->lock);
 	pci_stop_and_remove_bus_device(virtfn);
 	virtfn_remove_bus(dev->bus, virtfn->bus);
-	mutex_unlock(&iov->dev->sriov->lock);
 
 	/* balance pci_get_domain_bus_and_slot() */
 	pci_dev_put(virtfn);
@@ -760,3 +753,39 @@ int pci_sriov_get_totalvfs(struct pci_dev *dev)
 	return dev->sriov->total_VFs;
 }
 EXPORT_SYMBOL_GPL(pci_sriov_get_totalvfs);
+
+/**
+ * pci_sriov_configure_simple - helper to configure SR-IOV
+ * @dev: the PCI device
+ * @nr_virtfn: number of virtual functions to enable, 0 to disable
+ *
+ * Enable or disable SR-IOV for devices that don't require any PF setup
+ * before enabling SR-IOV.  Return value is negative on error, or number of
+ * VFs allocated on success.
+ */
+int pci_sriov_configure_simple(struct pci_dev *dev, int nr_virtfn)
+{
+	int rc;
+
+	might_sleep();
+
+	if (!dev->is_physfn)
+		return -ENODEV;
+
+	if (pci_vfs_assigned(dev)) {
+		pci_warn(dev, "Cannot modify SR-IOV while VFs are assigned\n");
+		return -EPERM;
+	}
+
+	if (nr_virtfn == 0) {
+		sriov_disable(dev);
+		return 0;
+	}
+
+	rc = sriov_enable(dev, nr_virtfn);
+	if (rc < 0)
+		return rc;
+
+	return nr_virtfn;
+}
+EXPORT_SYMBOL_GPL(pci_sriov_configure_simple);

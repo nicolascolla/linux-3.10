@@ -11,13 +11,12 @@
  */
 
 #ifdef CONFIG_X86_32
-/*
- * Some non-Intel clones support out of order store. wmb() ceases to be a
- * nop for these.
- */
-#define mb() alternative("lock; addl $0,0(%%esp)", "mfence", X86_FEATURE_XMM2)
-#define rmb() alternative("lock; addl $0,0(%%esp)", "lfence", X86_FEATURE_XMM2)
-#define wmb() alternative("lock; addl $0,0(%%esp)", "sfence", X86_FEATURE_XMM)
+#define mb() asm volatile(ALTERNATIVE("lock; addl $0,-4(%%esp)", "mfence", \
+				      X86_FEATURE_XMM2) ::: "memory", "cc")
+#define rmb() asm volatile(ALTERNATIVE("lock; addl $0,-4(%%esp)", "lfence", \
+				       X86_FEATURE_XMM2) ::: "memory", "cc")
+#define wmb() asm volatile(ALTERNATIVE("lock; addl $0,-4(%%esp)", "sfence", \
+				       X86_FEATURE_XMM2) ::: "memory", "cc")
 #else
 #define mb() 	asm volatile("mfence":::"memory")
 #define rmb()	asm volatile("lfence":::"memory")
@@ -59,7 +58,11 @@ static inline unsigned long array_index_mask_nospec(unsigned long index,
 #define dma_wmb()	barrier()
 
 #ifdef CONFIG_SMP
-#define smp_mb()	mb()
+#ifdef CONFIG_X86_32
+#define smp_mb()	asm volatile("lock; addl $0,-4(%%esp)" ::: "memory", "cc")
+#else
+#define smp_mb()	asm volatile("lock; addl $0,-4(%%rsp)" ::: "memory", "cc")
+#endif
 #define smp_rmb()	dma_rmb()
 #define smp_wmb()	barrier()
 #define smp_store_mb(var, value) do { (void)xchg(&var, value); } while (0)
@@ -69,9 +72,6 @@ static inline unsigned long array_index_mask_nospec(unsigned long index,
 #define smp_wmb()	barrier()
 #define smp_store_mb(var, value) do { WRITE_ONCE(var, value); barrier(); } while (0)
 #endif /* SMP */
-
-#define read_barrier_depends()		do { } while (0)
-#define smp_read_barrier_depends()	do { } while (0)
 
 #if defined(CONFIG_X86_PPRO_FENCE)
 
@@ -84,12 +84,12 @@ static inline unsigned long array_index_mask_nospec(unsigned long index,
 do {									\
 	compiletime_assert_atomic_type(*p);				\
 	smp_mb();							\
-	ACCESS_ONCE(*p) = (v);						\
+	WRITE_ONCE(*p, v);						\
 } while (0)
 
 #define smp_load_acquire(p)						\
 ({									\
-	typeof(*p) ___p1 = ACCESS_ONCE(*p);				\
+	typeof(*p) ___p1 = READ_ONCE(*p);				\
 	compiletime_assert_atomic_type(*p);				\
 	smp_mb();							\
 	___p1;								\
@@ -101,12 +101,12 @@ do {									\
 do {									\
 	compiletime_assert_atomic_type(*p);				\
 	barrier();							\
-	ACCESS_ONCE(*p) = (v);						\
+	WRITE_ONCE(*p, v);						\
 } while (0)
 
 #define smp_load_acquire(p)						\
 ({									\
-	typeof(*p) ___p1 = ACCESS_ONCE(*p);				\
+	typeof(*p) ___p1 = READ_ONCE(*p);				\
 	compiletime_assert_atomic_type(*p);				\
 	barrier();							\
 	___p1;								\
@@ -129,5 +129,7 @@ static __always_inline void rdtsc_barrier(void)
 {
 	alternative(ASM_NOP3, "lfence", X86_FEATURE_LFENCE_RDTSC);
 }
+
+#include <asm-generic/barrier.h>
 
 #endif /* _ASM_X86_BARRIER_H */

@@ -503,7 +503,7 @@ xfs_trans_brelse(xfs_trans_t	*tp,
 	if (XFS_FORCED_SHUTDOWN(tp->t_mountp) && freed) {
 		xfs_trans_ail_remove(&bip->bli_item, SHUTDOWN_LOG_IO_ERROR);
 		xfs_buf_item_relse(bp);
-	} else if (!xfs_buf_item_dirty(bip)) {
+	} else if (!(bip->bli_flags & XFS_BLI_DIRTY)) {
 /***
 		ASSERT(bp->b_pincount == 0);
 ***/
@@ -628,16 +628,12 @@ xfs_trans_log_buf(
 	struct xfs_buf_log_item	*bip = bp->b_fspriv;
 
 	ASSERT(first <= last && last < BBTOB(bp->b_length));
+	ASSERT(!(bip->bli_flags & XFS_BLI_ORDERED));
 
 	xfs_trans_dirty_buf(tp, bp);
 
-	/*
-	 * If we have an ordered buffer we are not logging any dirty range but
-	 * it still needs to be marked dirty and that it has been logged.
-	 */
 	trace_xfs_trans_log_buf(bip);
-	if (!(bip->bli_flags & XFS_BLI_ORDERED))
-		xfs_buf_item_log(bip, first, last);
+	xfs_buf_item_log(bip, first, last);
 }
 
 
@@ -790,14 +786,13 @@ xfs_trans_inode_alloc_buf(
 }
 
 /*
- * Mark the buffer as ordered for this transaction. This means
- * that the contents of the buffer are not recorded in the transaction
- * but it is tracked in the AIL as though it was. This allows us
- * to record logical changes in transactions rather than the physical
- * changes we make to the buffer without changing writeback ordering
- * constraints of metadata buffers.
+ * Mark the buffer as ordered for this transaction. This means that the contents
+ * of the buffer are not recorded in the transaction but it is tracked in the
+ * AIL as though it was. This allows us to record logical changes in
+ * transactions rather than the physical changes we make to the buffer without
+ * changing writeback ordering constraints of metadata buffers.
  */
-void
+bool
 xfs_trans_ordered_buf(
 	struct xfs_trans	*tp,
 	struct xfs_buf		*bp)
@@ -808,8 +803,18 @@ xfs_trans_ordered_buf(
 	ASSERT(bip != NULL);
 	ASSERT(atomic_read(&bip->bli_refcount) > 0);
 
+	if (xfs_buf_item_dirty_format(bip))
+		return false;
+
 	bip->bli_flags |= XFS_BLI_ORDERED;
 	trace_xfs_buf_item_ordered(bip);
+
+	/*
+	 * We don't log a dirty range of an ordered buffer but it still needs
+	 * to be marked dirty and that it has been logged.
+	 */
+	xfs_trans_dirty_buf(tp, bp);
+	return true;
 }
 
 /*

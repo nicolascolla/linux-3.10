@@ -641,19 +641,36 @@ struct perf_event_mmap_page {
  */
 #define PERF_RECORD_MISC_PROC_MAP_PARSE_TIMEOUT	(1 << 12)
 /*
- * PERF_RECORD_MISC_MMAP_DATA and PERF_RECORD_MISC_COMM_EXEC are used on
- * different events so can reuse the same bit position.
- * Ditto PERF_RECORD_MISC_SWITCH_OUT.
+ * Following PERF_RECORD_MISC_* are used on different
+ * events, so can reuse the same bit position:
+ *
+ *   PERF_RECORD_MISC_MMAP_DATA  - PERF_RECORD_MMAP* events
+ *   PERF_RECORD_MISC_COMM_EXEC  - PERF_RECORD_COMM event
+ *   PERF_RECORD_MISC_FORK_EXEC  - PERF_RECORD_FORK event (perf internal)
+ *   PERF_RECORD_MISC_SWITCH_OUT - PERF_RECORD_SWITCH* events
  */
 #define PERF_RECORD_MISC_MMAP_DATA		(1 << 13)
 #define PERF_RECORD_MISC_COMM_EXEC		(1 << 13)
+#define PERF_RECORD_MISC_FORK_EXEC		(1 << 13)
 #define PERF_RECORD_MISC_SWITCH_OUT		(1 << 13)
 /*
- * Indicates that the content of PERF_SAMPLE_IP points to
- * the actual instruction that triggered the event. See also
- * perf_event_attr::precise_ip.
+ * These PERF_RECORD_MISC_* flags below are safely reused
+ * for the following events:
+ *
+ *   PERF_RECORD_MISC_EXACT_IP           - PERF_RECORD_SAMPLE of precise events
+ *   PERF_RECORD_MISC_SWITCH_OUT_PREEMPT - PERF_RECORD_SWITCH* events
+ *
+ *
+ * PERF_RECORD_MISC_EXACT_IP:
+ *   Indicates that the content of PERF_SAMPLE_IP points to
+ *   the actual instruction that triggered the event. See also
+ *   perf_event_attr::precise_ip.
+ *
+ * PERF_RECORD_MISC_SWITCH_OUT_PREEMPT:
+ *   Indicates that thread was preempted in TASK_RUNNING state.
  */
 #define PERF_RECORD_MISC_EXACT_IP		(1 << 14)
+#define PERF_RECORD_MISC_SWITCH_OUT_PREEMPT	(1 << 14)
 /*
  * Reserve the last bit to indicate some extended misc field
  */
@@ -876,6 +893,7 @@ enum perf_event_type {
 	 *	struct perf_event_header	header;
 	 *	u32				pid;
 	 *	u32				tid;
+	 *	struct sample_id		sample_id;
 	 * };
 	 */
 	PERF_RECORD_ITRACE_START		= 12,

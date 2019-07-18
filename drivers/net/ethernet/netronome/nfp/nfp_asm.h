@@ -1,35 +1,5 @@
-/*
- * Copyright (C) 2016-2017 Netronome Systems, Inc.
- *
- * This software is dual licensed under the GNU General License Version 2,
- * June 1991 as shown in the file COPYING in the top-level directory of this
- * source tree or the BSD 2-Clause License provided below.  You have the
- * option to license this software under the complete terms of either license.
- *
- * The BSD 2-Clause License:
- *
- *     Redistribution and use in source and binary forms, with or
- *     without modification, are permitted provided that the following
- *     conditions are met:
- *
- *      1. Redistributions of source code must retain the above
- *         copyright notice, this list of conditions and the following
- *         disclaimer.
- *
- *      2. Redistributions in binary form must reproduce the above
- *         copyright notice, this list of conditions and the following
- *         disclaimer in the documentation and/or other materials
- *         provided with the distribution.
- *
- * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND,
- * EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF
- * MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND
- * NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS
- * BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN
- * ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN
- * CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
- * SOFTWARE.
- */
+/* SPDX-License-Identifier: (GPL-2.0-only OR BSD-2-Clause) */
+/* Copyright (C) 2016-2018 Netronome Systems, Inc. */
 
 #ifndef __NFP_ASM_H__
 #define __NFP_ASM_H__ 1
@@ -39,6 +9,7 @@
 #include <linux/types.h>
 
 #define REG_NONE	0
+#define REG_WIDTH	4
 
 #define RE_REG_NO_DST	0x020
 #define RE_REG_IMM	0x020
@@ -237,6 +208,8 @@ enum cmd_tgt_map {
 	CMD_TGT_READ32_SWAP,
 	CMD_TGT_READ_LE,
 	CMD_TGT_READ_SWAP_LE,
+	CMD_TGT_ADD,
+	CMD_TGT_ADD_IMM,
 	__CMD_TGT_MAP_SIZE,
 };
 
@@ -250,9 +223,12 @@ enum cmd_mode {
 
 enum cmd_ctx_swap {
 	CMD_CTX_SWAP = 0,
+	CMD_CTX_SWAP_DEFER1 = 1,
+	CMD_CTX_SWAP_DEFER2 = 2,
 	CMD_CTX_NO_SWAP = 3,
 };
 
+#define CMD_OVE_DATA	GENMASK(5, 3)
 #define CMD_OVE_LEN	BIT(7)
 #define CMD_OV_LEN	GENMASK(12, 8)
 
@@ -288,6 +264,7 @@ static inline u32 nfp_get_ind_csr_ctx_ptr_offs(u32 read_offset)
 #define NFP_CSR_ACT_LM_ADDR1	0x6c
 #define NFP_CSR_ACT_LM_ADDR2	0x94
 #define NFP_CSR_ACT_LM_ADDR3	0x9c
+#define NFP_CSR_PSEUDO_RND_NUM	0x148
 
 /* Software register representation, independent of operand type */
 #define NN_REG_TYPE	GENMASK(31, 24)

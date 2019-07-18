@@ -1235,6 +1235,7 @@ static inline struct qib_ibport *to_iport(struct ib_device *ibdev, u8 port)
 #define QIB_BADINTR           0x8000 /* severe interrupt problems */
 #define QIB_DCA_ENABLED       0x10000 /* Direct Cache Access enabled */
 #define QIB_HAS_QSFP          0x20000 /* device (card instance) has QSFP */
+#define QIB_SHUTDOWN          0x40000 /* device is shutting down */
 
 /*
  * values for ppd->lflags (_ib_port_ related flags)
@@ -1396,13 +1397,13 @@ static inline u32 qib_get_hdrqtail(const struct qib_ctxtdata *rcd)
  */
 
 extern const char ib_qib_version[];
+extern const struct attribute_group qib_attr_group;
 
 int qib_device_create(struct qib_devdata *);
 void qib_device_remove(struct qib_devdata *);
 
 int qib_create_port_files(struct ib_device *ibdev, u8 port_num,
 			  struct kobject *kobj);
-int qib_verbs_register_sysfs(struct qib_devdata *);
 void qib_verbs_unregister_sysfs(struct qib_devdata *);
 /* Hook for sysfs read of QSFP */
 extern int qib_qsfp_dump(struct qib_pportdata *ppd, char *buf, int len);

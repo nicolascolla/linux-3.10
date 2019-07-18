@@ -112,8 +112,21 @@ enum wacom_worker {
 	WACOM_WORKER_MODE_CHANGE,
 };
 
+struct wacom;
+
+struct wacom_led {
+	struct wacom *wacom;
+	unsigned int group;
+	unsigned int id;
+	u8 llv;
+	u8 hlv;
+	bool held;
+};
+
 struct wacom_group_leds {
 	u8 select; /* status led selector (0..3) */
+	struct wacom_led *leds;
+	unsigned int count;
 };
 
 struct wacom_battery {
@@ -153,11 +166,15 @@ struct wacom {
 	struct delayed_work init_work;
 	struct wacom_remote *remote;
 	struct work_struct mode_change_work;
+	bool generic_has_leds;
 	struct wacom_leds {
 		struct wacom_group_leds *groups;
+		unsigned int count;
 		u8 llv;       /* status led brightness no button (1..127) */
 		u8 hlv;       /* status led brightness button pressed (1..127) */
 		u8 img_lum;   /* OLED matrix display brightness */
+		u8 max_llv;   /* maximum brightness of LED (llv) */
+		u8 max_hlv;   /* maximum brightness of LED (hlv) */
 	} led;
 	struct wacom_battery battery;
 	bool resources;
@@ -201,4 +218,5 @@ void wacom_wac_event(struct hid_device *hdev, struct hid_field *field,
 void wacom_wac_report(struct hid_device *hdev, struct hid_report *report);
 void wacom_battery_work(struct work_struct *work);
 int wacom_equivalent_usage(int usage);
+int wacom_initialize_leds(struct wacom *wacom);
 #endif

@@ -120,7 +120,8 @@ tcp_timewait_state_process(struct inet_timewait_sock *tw, struct sk_buff *skb,
 		tcp_parse_options(skb, &tmp_opt, 0, NULL);
 
 		if (tmp_opt.saw_tstamp) {
-			tmp_opt.rcv_tsecr	-= tcptw->tw_ts_offset;
+			if (tmp_opt.rcv_tsecr)
+				tmp_opt.rcv_tsecr -= tcptw->tw_ts_offset;
 			tmp_opt.ts_recent	= tcptw->tw_ts_recent;
 			tmp_opt.ts_recent_stamp	= tcptw->tw_ts_recent_stamp;
 			paws_reject = tcp_paws_reject(&tmp_opt, th->rst);
@@ -211,9 +212,10 @@ kill:
 				inet_twsk_put(tw);
 				return TCP_TW_SUCCESS;
 			}
+		} else {
+			inet_twsk_schedule(tw, &tcp_death_row, TCP_TIMEWAIT_LEN,
+					   TCP_TIMEWAIT_LEN);
 		}
-		inet_twsk_schedule(tw, &tcp_death_row, TCP_TIMEWAIT_LEN,
-				   TCP_TIMEWAIT_LEN);
 
 		if (tmp_opt.saw_tstamp) {
 			tcptw->tw_ts_recent	  = tmp_opt.rcv_tsval;
@@ -465,7 +467,7 @@ struct sock *tcp_create_openreq_child(struct sock *sk, struct request_sock *req,
 
 		newtp->rcv_wup = newtp->copied_seq =
 		newtp->rcv_nxt = treq->rcv_isn + 1;
-		newtp->segs_in = 0;
+		newtp->segs_in = 1;
 
 		newtp->snd_sml = newtp->snd_una =
 		newtp->snd_nxt = newtp->snd_up = treq->snt_isn + 1;
@@ -770,7 +772,12 @@ struct sock *tcp_check_req(struct sock *sk, struct sk_buff *skb,
 	inet_csk_reqsk_queue_unlink(sk, req, prev);
 	inet_csk_reqsk_queue_removed(sk, req);
 
-	inet_csk_reqsk_queue_add(sk, req, child);
+	if (!inet_csk_reqsk_queue_add(sk, req, child)) {
+		bh_unlock_sock(child);
+		sock_put(child);
+		reqsk_free(req);
+		return NULL;
+	}
 	return child;
 
 listen_overflow:
@@ -817,6 +824,7 @@ int tcp_child_process(struct sock *parent, struct sock *child,
 	int ret = 0;
 	int state = child->sk_state;
 
+	tcp_sk(child)->segs_in += max_t(u16, 1, skb_shinfo(skb)->gso_segs);
 	if (!sock_owned_by_user(child)) {
 		ret = tcp_rcv_state_process(child, skb, tcp_hdr(skb),
 					    skb->len);

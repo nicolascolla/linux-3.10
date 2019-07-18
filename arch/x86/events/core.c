@@ -429,26 +429,6 @@ int x86_setup_perfctr(struct perf_event *event)
 	if (config == -1LL)
 		return -EINVAL;
 
-	/*
-	 * Branch tracing:
-	 */
-	if (attr->config == PERF_COUNT_HW_BRANCH_INSTRUCTIONS &&
-	    !attr->freq && hwc->sample_period == 1) {
-		/* BTS is not supported by this architecture. */
-		if (!x86_pmu.bts_active)
-			return -EOPNOTSUPP;
-
-		/* BTS is currently only allowed for user-mode. */
-		if (!attr->exclude_kernel)
-			return -EOPNOTSUPP;
-
-		/* disallow bts if conflicting events are present */
-		if (x86_add_exclusive(x86_lbr_exclusive_lbr))
-			return -EBUSY;
-
-		event->destroy = hw_perf_lbr_event_destroy;
-	}
-
 	hwc->config |= config;
 
 	return 0;
@@ -1153,16 +1133,13 @@ int x86_perf_event_set_period(struct perf_event *event)
 
 	per_cpu(pmc_prev_left[idx], smp_processor_id()) = left;
 
-	if (!(hwc->flags & PERF_X86_EVENT_AUTO_RELOAD) ||
-	    local64_read(&hwc->prev_count) != (u64)-left) {
-		/*
-		 * The hw event starts counting from this event offset,
-		 * mark it to be able to extra future deltas:
-		 */
-		local64_set(&hwc->prev_count, (u64)-left);
+	/*
+	 * The hw event starts counting from this event offset,
+	 * mark it to be able to extra future deltas:
+	 */
+	local64_set(&hwc->prev_count, (u64)-left);
 
-		wrmsrl(hwc->event_base, (u64)(-left) & x86_pmu.cntval_mask);
-	}
+	wrmsrl(hwc->event_base, (u64)(-left) & x86_pmu.cntval_mask);
 
 	/*
 	 * Due to erratum on certan cpu we need
@@ -1336,8 +1313,9 @@ void x86_pmu_stop(struct perf_event *event, int flags)
 	struct cpu_hw_events *cpuc = &__get_cpu_var(cpu_hw_events);
 	struct hw_perf_event *hwc = &event->hw;
 
-	if (__test_and_clear_bit(hwc->idx, cpuc->active_mask)) {
+	if (test_bit(hwc->idx, cpuc->active_mask)) {
 		x86_pmu.disable(event);
+		__clear_bit(hwc->idx, cpuc->active_mask);
 		cpuc->events[hwc->idx] = NULL;
 		WARN_ON_ONCE(hwc->state & PERF_HES_STOPPED);
 		hwc->state |= PERF_HES_STOPPED;
@@ -1434,16 +1412,8 @@ int x86_pmu_handle_irq(struct pt_regs *regs)
 	apic_write(APIC_LVTPC, APIC_DM_NMI);
 
 	for (idx = 0; idx < x86_pmu.num_counters; idx++) {
-		if (!test_bit(idx, cpuc->active_mask)) {
-			/*
-			 * Though we deactivated the counter some cpus
-			 * might still deliver spurious interrupts still
-			 * in flight. Catch them:
-			 */
-			if (__test_and_clear_bit(idx, cpuc->running))
-				handled++;
+		if (!test_bit(idx, cpuc->active_mask))
 			continue;
-		}
 
 		event = cpuc->events[idx];
 
@@ -1620,9 +1590,9 @@ __init struct attribute **merge_attr(struct attribute **a, struct attribute **b)
 	struct attribute **new;
 	int j, i;
 
-	for (j = 0; a[j]; j++)
+	for (j = 0; a && a[j]; j++)
 		;
-	for (i = 0; b[i]; i++)
+	for (i = 0; b && b[i]; i++)
 		j++;
 	j++;
 
@@ -1631,9 +1601,9 @@ __init struct attribute **merge_attr(struct attribute **a, struct attribute **b)
 		return NULL;
 
 	j = 0;
-	for (i = 0; a[i]; i++)
+	for (i = 0; a && a[i]; i++)
 		new[j++] = a[i];
-	for (i = 0; b[i]; i++)
+	for (i = 0; b && b[i]; i++)
 		new[j++] = b[i];
 	new[j] = NULL;
 
@@ -1824,6 +1794,8 @@ early_initcall(init_hw_perf_events);
 
 static inline void x86_pmu_read(struct perf_event *event)
 {
+	if (x86_pmu.read)
+		return x86_pmu.read(event);
 	x86_perf_event_update(event);
 }
 
@@ -1925,7 +1897,7 @@ static int x86_pmu_commit_txn(struct pmu *pmu)
  */
 static void free_fake_cpuc(struct cpu_hw_events *cpuc)
 {
-	kfree(cpuc->shared_regs);
+	intel_cpuc_finish(cpuc);
 	kfree(cpuc);
 }
 
@@ -1937,14 +1909,11 @@ static struct cpu_hw_events *allocate_fake_cpuc(void)
 	cpuc = kzalloc(sizeof(*cpuc), GFP_KERNEL);
 	if (!cpuc)
 		return ERR_PTR(-ENOMEM);
-
-	/* only needed, if we have extra_regs */
-	if (x86_pmu.extra_regs) {
-		cpuc->shared_regs = allocate_shared_regs(cpu);
-		if (!cpuc->shared_regs)
-			goto error;
-	}
 	cpuc->is_fake = 1;
+
+	if (intel_cpuc_prepare(cpuc, cpu) != NOTIFY_OK)
+		goto error;
+
 	return cpuc;
 error:
 	free_fake_cpuc(cpuc);

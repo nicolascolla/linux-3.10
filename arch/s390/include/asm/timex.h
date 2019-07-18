@@ -81,21 +81,28 @@ static inline int ptff_query(unsigned int nr)
 	return (*ptr & (0x80 >> (nr & 7))) != 0;
 }
 
-static inline int ptff(void *ptff_block, size_t len, unsigned int func)
-{
-	typedef struct { char _[len]; } addrtype;
-	register unsigned int reg0 asm("0") = func;
-	register unsigned long reg1 asm("1") = (unsigned long) ptff_block;
-	int rc;
-
-	asm volatile(
-		"	.word	0x0104\n"
-		"	ipm	%0\n"
-		"	srl	%0,28\n"
-		: "=d" (rc), "+m" (*(addrtype *) ptff_block)
-		: "d" (reg0), "d" (reg1) : "cc");
-	return rc;
-}
+/*
+ * ptff - Perform timing facility function
+ * @ptff_block: Pointer to ptff parameter block
+ * @len: Length of parameter block
+ * @func: Function code
+ * Returns: Condition code (0 on success)
+ */
+#define ptff(ptff_block, len, func)					\
+({									\
+	struct addrtype { char _[len]; };				\
+	register unsigned int reg0 asm("0") = func;			\
+	register unsigned long reg1 asm("1") = (unsigned long) (ptff_block);\
+	int rc;								\
+									\
+	asm volatile(							\
+		"	.word	0x0104\n"				\
+		"	ipm	%0\n"					\
+		"	srl	%0,28\n"				\
+		: "=d" (rc), "+m" (*(struct addrtype *) reg1)		\
+		: "d" (reg0), "d" (reg1) : "cc");			\
+	rc;								\
+})
 
 static inline unsigned long long local_tick_disable(void)
 {
@@ -113,20 +120,22 @@ static inline void local_tick_enable(unsigned long long comp)
 	set_clock_comparator(S390_lowcore.clock_comparator);
 }
 
-#define CLOCK_TICK_RATE	1193180 /* Underlying HZ */
+#define CLOCK_TICK_RATE		1193180 /* Underlying HZ */
+#define STORE_CLOCK_EXT_SIZE	16	/* stcke writes 16 bytes */
 
 typedef unsigned long long cycles_t;
 
-static inline void get_tod_clock_ext(char clk[16])
+static inline void get_tod_clock_ext(char *clk)
 {
-	typedef struct { char _[sizeof(clk)]; } addrtype;
+	typedef struct { char _[STORE_CLOCK_EXT_SIZE]; } addrtype;
 
 	asm volatile("stcke %0" : "=Q" (*(addrtype *) clk) : : "cc");
 }
 
 static inline unsigned long long get_tod_clock(void)
 {
-	unsigned char clk[16];
+	unsigned char clk[STORE_CLOCK_EXT_SIZE];
+
 	get_tod_clock_ext(clk);
 	return *((unsigned long long *)&clk[1]);
 }

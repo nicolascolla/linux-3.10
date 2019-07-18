@@ -153,6 +153,7 @@
  * MDS_USER_CLEAR_CPU_BUFFERS macro is the assembly equivalent of
  * mds_user_clear_cpu_buffers(). Like the C version, the __KERNEL_DS
  * is used for verw.
+ * Note: The ZF flag will be clobbered after calling this macro.
  */
 .macro MDS_USER_CLEAR_CPU_BUFFERS
 	STATIC_JUMP .Lverw_\@, mds_user_clear
@@ -186,7 +187,6 @@ enum spectre_v2_mitigation {
 	SPECTRE_V2_NONE,
 	SPECTRE_V2_RETPOLINE_MINIMAL,
 	SPECTRE_V2_RETPOLINE_NO_IBPB,
-	SPECTRE_V2_RETPOLINE_SKYLAKE,
 	SPECTRE_V2_RETPOLINE_UNSAFE_MODULE,
 	SPECTRE_V2_RETPOLINE,
 	SPECTRE_V2_RETPOLINE_IBRS_USER,
@@ -280,6 +280,10 @@ static inline void mds_clear_cpu_buffers(void)
  * mds_user_clear_cpu_buffers - Mitigation for MDS vulnerability
  *
  * Clear CPU buffers if the corresponding static key is enabled
+ *
+ * RHEL7: This inline function from upstream isn't being used. The
+ * equivalent MDS_USER_CLEAR_CPU_BUFFERS assembly macro is used in
+ * the entry code to achieve the same effect.
  */
 static inline void mds_user_clear_cpu_buffers(void)
 {

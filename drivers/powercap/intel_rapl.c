@@ -192,6 +192,7 @@ struct rapl_package {
 					* notify interrupt enable status.
 					*/
 	struct list_head plist;
+	int lead_cpu; /* one active cpu per package for access */
 };
 
 struct rapl_defaults {
@@ -266,20 +267,6 @@ static struct rapl_package *find_package_by_id(int id)
 	}
 
 	return NULL;
-}
-
-/* caller to ensure CPU hotplug lock is held */
-static int find_active_cpu_on_package(int package_id)
-{
-	int i;
-
-	for_each_online_cpu(i) {
-		if (topology_physical_package_id(i) == package_id)
-			return i;
-	}
-	/* all CPUs on this package are offline */
-
-	return -ENODEV;
 }
 
 /* caller must hold cpu hotplug lock */
@@ -441,6 +428,7 @@ static int contraint_to_pl(struct rapl_domain *rd, int cid)
 			return i;
 		}
 	}
+	pr_err("Cannot find matching power limit for constraint %d\n", cid);
 
 	return -EINVAL;
 }
@@ -456,6 +444,10 @@ static int set_power_limit(struct powercap_zone *power_zone, int cid,
 	get_online_cpus();
 	rd = power_zone_to_rapl_domain(power_zone);
 	id = contraint_to_pl(rd, cid);
+	if (id < 0) {
+		ret = id;
+		goto set_exit;
+	}
 
 	rp = rd->rp;
 
@@ -495,6 +487,11 @@ static int get_current_power_limit(struct powercap_zone *power_zone, int cid,
 	get_online_cpus();
 	rd = power_zone_to_rapl_domain(power_zone);
 	id = contraint_to_pl(rd, cid);
+	if (id < 0) {
+		ret = id;
+		goto get_exit;
+	}
+
 	switch (rd->rpl[id].prim_id) {
 	case PL1_ENABLE:
 		prim = POWER_LIMIT1;
@@ -511,6 +508,7 @@ static int get_current_power_limit(struct powercap_zone *power_zone, int cid,
 	else
 		*data = val;
 
+get_exit:
 	put_online_cpus();
 
 	return ret;
@@ -526,6 +524,10 @@ static int set_time_window(struct powercap_zone *power_zone, int cid,
 	get_online_cpus();
 	rd = power_zone_to_rapl_domain(power_zone);
 	id = contraint_to_pl(rd, cid);
+	if (id < 0) {
+		ret = id;
+		goto set_time_exit;
+	}
 
 	switch (rd->rpl[id].prim_id) {
 	case PL1_ENABLE:
@@ -537,6 +539,8 @@ static int set_time_window(struct powercap_zone *power_zone, int cid,
 	default:
 		ret = -EINVAL;
 	}
+
+set_time_exit:
 	put_online_cpus();
 	return ret;
 }
@@ -551,6 +555,10 @@ static int get_time_window(struct powercap_zone *power_zone, int cid, u64 *data)
 	get_online_cpus();
 	rd = power_zone_to_rapl_domain(power_zone);
 	id = contraint_to_pl(rd, cid);
+	if (id < 0) {
+		ret = id;
+		goto get_time_exit;
+	}
 
 	switch (rd->rpl[id].prim_id) {
 	case PL1_ENABLE:
@@ -565,6 +573,8 @@ static int get_time_window(struct powercap_zone *power_zone, int cid, u64 *data)
 	}
 	if (!ret)
 		*data = val;
+
+get_time_exit:
 	put_online_cpus();
 
 	return ret;
@@ -706,7 +716,7 @@ static u64 rapl_unit_xlate(struct rapl_domain *rd, enum unit_type type,
 	case ENERGY_UNIT:
 		scale = ENERGY_UNIT_SCALE;
 		/* per domain unit takes precedence */
-		if (rd && rd->domain_energy_unit)
+		if (rd->domain_energy_unit)
 			units = rd->domain_energy_unit;
 		else
 			units = rp->energy_unit;
@@ -795,10 +805,8 @@ static int rapl_read_data_raw(struct rapl_domain *rd,
 	msr = rd->msrs[rp->id];
 	if (!msr)
 		return -EINVAL;
-	/* use physical package id to look up active cpus */
-	cpu = find_active_cpu_on_package(rd->rp->id);
-	if (cpu < 0)
-		return cpu;
+
+	cpu = rd->rp->lead_cpu;
 
 	/* special-case package domain, which uses a different bit*/
 	if (prim == FW_LOCK && rd->id == RAPL_DOMAIN_PACKAGE) {
@@ -863,10 +871,7 @@ static int rapl_write_data_raw(struct rapl_domain *rd,
 	struct msrl_action ma;
 	int ret;
 
-	cpu = find_active_cpu_on_package(rd->rp->id);
-	if (cpu < 0)
-		return cpu;
-
+	cpu = rd->rp->lead_cpu;
 	bits = rapl_unit_xlate(rd, rp->unit, value, 1);
 	bits |= bits << rp->shift;
 	memset(&ma, 0, sizeof(ma));
@@ -974,18 +979,10 @@ static void power_limit_irq_save_cpu(void *info)
 
 static void package_power_limit_irq_save(struct rapl_package *rp)
 {
-	int cpu;
-
 	if (!boot_cpu_has(X86_FEATURE_PTS) || !boot_cpu_has(X86_FEATURE_PLN))
 		return;
 
-	cpu = find_active_cpu_on_package(rp->id);
-	if (cpu < 0)
-		return;
-	if (!boot_cpu_has(X86_FEATURE_PTS) || !boot_cpu_has(X86_FEATURE_PLN))
-		return;
-
-	smp_call_function_single(cpu, power_limit_irq_save_cpu, rp, 1);
+	smp_call_function_single(rp->lead_cpu, power_limit_irq_save_cpu, rp, 1);
 }
 
 static void power_limit_irq_restore_cpu(void *info)
@@ -1006,20 +1003,14 @@ static void power_limit_irq_restore_cpu(void *info)
 /* restore per package power limit interrupt enable state */
 static void package_power_limit_irq_restore(struct rapl_package *rp)
 {
-	int cpu;
-
 	if (!boot_cpu_has(X86_FEATURE_PTS) || !boot_cpu_has(X86_FEATURE_PLN))
-		return;
-
-	cpu = find_active_cpu_on_package(rp->id);
-	if (cpu < 0)
 		return;
 
 	/* irq enable state not saved, nothing to restore */
 	if (!(rp->power_limit_irq & PACKAGE_PLN_INT_SAVED))
 		return;
 
-	smp_call_function_single(cpu, power_limit_irq_restore_cpu, rp, 1);
+	smp_call_function_single(rp->lead_cpu, power_limit_irq_restore_cpu, rp, 1);
 }
 
 static void set_floor_freq_default(struct rapl_domain *rd, bool mode)
@@ -1170,6 +1161,7 @@ static const struct x86_cpu_id rapl_ids[] __initconst = {
 	RAPL_CPU(INTEL_FAM6_KABYLAKE_MOBILE,	rapl_defaults_core),
 	RAPL_CPU(INTEL_FAM6_KABYLAKE_DESKTOP,	rapl_defaults_core),
 	RAPL_CPU(INTEL_FAM6_CANNONLAKE_MOBILE,	rapl_defaults_core),
+	RAPL_CPU(INTEL_FAM6_ICELAKE_MOBILE,	rapl_defaults_core),
 
 	RAPL_CPU(INTEL_FAM6_ATOM_SILVERMONT,	rapl_defaults_byt),
 	RAPL_CPU(INTEL_FAM6_ATOM_AIRMONT,	rapl_defaults_cht),
@@ -1178,6 +1170,7 @@ static const struct x86_cpu_id rapl_ids[] __initconst = {
 	RAPL_CPU(INTEL_FAM6_ATOM_GOLDMONT,	rapl_defaults_core),
 	RAPL_CPU(INTEL_FAM6_ATOM_GOLDMONT_PLUS,	rapl_defaults_core),
 	RAPL_CPU(INTEL_FAM6_ATOM_GOLDMONT_X,	rapl_defaults_core),
+	RAPL_CPU(INTEL_FAM6_ATOM_TREMONT_X,	rapl_defaults_core),
 
 	RAPL_CPU(INTEL_FAM6_XEON_PHI_KNL,	rapl_defaults_hsw_server),
 	RAPL_CPU(INTEL_FAM6_XEON_PHI_KNM,	rapl_defaults_hsw_server),
@@ -1185,24 +1178,20 @@ static const struct x86_cpu_id rapl_ids[] __initconst = {
 };
 MODULE_DEVICE_TABLE(x86cpu, rapl_ids);
 
-/* read once for all raw primitive data for all packages, domains */
-static void rapl_update_domain_data(void)
+/* Read once for all raw primitive data for domains */
+static void rapl_update_domain_data(struct rapl_package *rp)
 {
 	int dmn, prim;
 	u64 val;
-	struct rapl_package *rp;
 
-	list_for_each_entry(rp, &rapl_packages, plist) {
-		for (dmn = 0; dmn < rp->nr_domains; dmn++) {
-			pr_debug("update package %d domain %s data\n", rp->id,
-				rp->domains[dmn].name);
-			/* exclude non-raw primitives */
-			for (prim = 0; prim < NR_RAW_PRIMITIVES; prim++)
-				if (!rapl_read_data_raw(&rp->domains[dmn], prim,
-								rpi[prim].unit,
-								&val))
-					rp->domains[dmn].rdd.primitives[prim] =
-									val;
+	for (dmn = 0; dmn < rp->nr_domains; dmn++) {
+		pr_debug("update package %d domain %s data\n", rp->id,
+			 rp->domains[dmn].name);
+		/* exclude non-raw primitives */
+		for (prim = 0; prim < NR_RAW_PRIMITIVES; prim++) {
+			if (!rapl_read_data_raw(&rp->domains[dmn], prim,
+						rpi[prim].unit, &val))
+				rp->domains[dmn].rdd.primitives[prim] =	val;
 		}
 	}
 
@@ -1248,10 +1237,12 @@ static int rapl_unregister_powercap(void)
 static int rapl_package_register_powercap(struct rapl_package *rp)
 {
 	struct rapl_domain *rd;
-	int ret = 0;
 	char dev_name[17]; /* max domain name = 7 + 1 + 8 for int + 1 for null*/
 	struct powercap_zone *power_zone = NULL;
-	int nr_pl;
+	int nr_pl, ret;;
+
+	/* Update the domain data of the new package */
+	rapl_update_domain_data(rp);
 
 	/* first we register package domain as the parent zone*/
 	for (rd = rp->domains; rd < rp->domains + rp->nr_domains; rd++) {
@@ -1271,8 +1262,7 @@ static int rapl_package_register_powercap(struct rapl_package *rp)
 			if (IS_ERR(power_zone)) {
 				pr_debug("failed to register package, %d\n",
 					rp->id);
-				ret = PTR_ERR(power_zone);
-				goto exit_package;
+				return PTR_ERR(power_zone);
 			}
 			/* track parent zone in per package/socket data */
 			rp->power_zone = power_zone;
@@ -1282,8 +1272,7 @@ static int rapl_package_register_powercap(struct rapl_package *rp)
 	}
 	if (!power_zone) {
 		pr_err("no package domain found, unknown topology!\n");
-		ret = -ENODEV;
-		goto exit_package;
+		return -ENODEV;
 	}
 	/* now register domains as children of the socket/package*/
 	for (rd = rp->domains; rd < rp->domains + rp->nr_domains; rd++) {
@@ -1304,9 +1293,8 @@ static int rapl_package_register_powercap(struct rapl_package *rp)
 			goto err_cleanup;
 		}
 	}
+	return 0;
 
-exit_package:
-	return ret;
 err_cleanup:
 	/* clean up previously initialized domains within the package if we
 	 * failed after the first domain setup.
@@ -1330,8 +1318,7 @@ static int rapl_register_powercap(void)
 		pr_debug("failed to register powercap control_type.\n");
 		return PTR_ERR(control_type);
 	}
-	/* read the initial data */
-	rapl_update_domain_data();
+
 	list_for_each_entry(rp, &rapl_packages, plist)
 		if (rapl_package_register_powercap(rp))
 			goto err_cleanup_package;
@@ -1490,7 +1477,8 @@ static int rapl_detect_topology(void)
 			/* add the new package to the list */
 			new_package->id = phy_package_id;
 			new_package->nr_cpus = 1;
-
+			/* use the first active cpu of the package to access */
+			new_package->lead_cpu = i;
 			/* check if the package contains valid domains */
 			if (rapl_detect_domains(new_package, i) ||
 				rapl_defaults->check_unit(new_package, i)) {
@@ -1534,9 +1522,8 @@ static void rapl_remove_package(struct rapl_package *rp)
 /* called from CPU hotplug notifier, hotplug lock held */
 static int rapl_add_package(int cpu)
 {
-	int ret = 0;
-	int phy_package_id;
 	struct rapl_package *rp;
+	int ret, phy_package_id;
 
 	phy_package_id = topology_physical_package_id(cpu);
 	rp = kzalloc(sizeof(struct rapl_package), GFP_KERNEL);
@@ -1546,16 +1533,19 @@ static int rapl_add_package(int cpu)
 	/* add the new package to the list */
 	rp->id = phy_package_id;
 	rp->nr_cpus = 1;
+	rp->lead_cpu = cpu;
+
 	/* check if the package contains valid domains */
 	if (rapl_detect_domains(rp, cpu) ||
 		rapl_defaults->check_unit(rp, cpu)) {
 		ret = -ENODEV;
 		goto err_free_package;
 	}
-	if (!rapl_package_register_powercap(rp)) {
+	ret = rapl_package_register_powercap(rp);
+	if (!ret) {
 		INIT_LIST_HEAD(&rp->plist);
 		list_add(&rp->plist, &rapl_packages);
-		return ret;
+		return 0;
 	}
 
 err_free_package:
@@ -1572,32 +1562,63 @@ err_free_package:
  * associated domains. Cooling devices are handled accordingly at
  * per-domain level.
  */
-static int rapl_cpu_callback(struct notifier_block *nfb,
-				unsigned long action, void *hcpu)
+static int rapl_cpu_online(unsigned int cpu)
 {
-	unsigned long cpu = (unsigned long)hcpu;
-	int phy_package_id;
 	struct rapl_package *rp;
+	int phy_package_id;
 
 	phy_package_id = topology_physical_package_id(cpu);
+
+	rp = find_package_by_id(phy_package_id);
+	if (rp)
+		rp->nr_cpus++;
+	else
+		rapl_add_package(cpu);
+	return 0;
+}
+
+static int rapl_cpu_down_prep(unsigned int cpu)
+{
+	int phy_package_id;
+	struct rapl_package *rp;
+	int lead_cpu;
+
+	phy_package_id = topology_physical_package_id(cpu);
+	rp = find_package_by_id(phy_package_id);
+	if (!rp)
+		return 0;
+	if (--rp->nr_cpus == 0) {
+		rapl_remove_package(rp);
+	} else if (cpu == rp->lead_cpu) {
+		/* choose another active cpu in the package */
+		lead_cpu = cpumask_any_but(topology_core_cpumask(cpu), cpu);
+		if (lead_cpu < nr_cpu_ids) {
+			rp->lead_cpu = lead_cpu;
+		} else {
+			/* should never go here */
+			pr_err("no active cpu available for package %d\n",
+			       phy_package_id);
+		}
+	}
+	return 0;
+}
+
+static int rapl_cpu_callback(struct notifier_block *nfb,
+			     unsigned long action, void *hcpu)
+{
+	unsigned long cpu = (unsigned long)hcpu;
+
 	switch (action) {
 	case CPU_ONLINE:
 	case CPU_ONLINE_FROZEN:
 	case CPU_DOWN_FAILED:
 	case CPU_DOWN_FAILED_FROZEN:
-		rp = find_package_by_id(phy_package_id);
-		if (rp)
-			++rp->nr_cpus;
-		else
-			rapl_add_package(cpu);
+		rapl_cpu_online(cpu);
 		break;
 	case CPU_DOWN_PREPARE:
 	case CPU_DOWN_PREPARE_FROZEN:
-		rp = find_package_by_id(phy_package_id);
-		if (!rp)
-			break;
-		if (--rp->nr_cpus == 0)
-			rapl_remove_package(rp);
+		rapl_cpu_down_prep(cpu);
+		break;
 	}
 
 	return NOTIFY_OK;

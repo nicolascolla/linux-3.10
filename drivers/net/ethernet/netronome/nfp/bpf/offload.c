@@ -1,35 +1,5 @@
-/*
- * Copyright (C) 2016-2017 Netronome Systems, Inc.
- *
- * This software is dual licensed under the GNU General License Version 2,
- * June 1991 as shown in the file COPYING in the top-level directory of this
- * source tree or the BSD 2-Clause License provided below.  You have the
- * option to license this software under the complete terms of either license.
- *
- * The BSD 2-Clause License:
- *
- *     Redistribution and use in source and binary forms, with or
- *     without modification, are permitted provided that the following
- *     conditions are met:
- *
- *      1. Redistributions of source code must retain the above
- *         copyright notice, this list of conditions and the following
- *         disclaimer.
- *
- *      2. Redistributions in binary form must reproduce the above
- *         copyright notice, this list of conditions and the following
- *         disclaimer in the documentation and/or other materials
- *         provided with the distribution.
- *
- * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND,
- * EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF
- * MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND
- * NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS
- * BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN
- * ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN
- * CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
- * SOFTWARE.
- */
+// SPDX-License-Identifier: (GPL-2.0-only OR BSD-2-Clause)
+/* Copyright (C) 2016-2018 Netronome Systems, Inc. */
 
 /*
  * nfp_net_offload.c
@@ -164,6 +134,41 @@ static int nfp_bpf_destroy(struct nfp_net *nn, struct bpf_prog *prog)
 	return 0;
 }
 
+/* Atomic engine requires values to be in big endian, we need to byte swap
+ * the value words used with xadd.
+ */
+static void nfp_map_bpf_byte_swap(struct nfp_bpf_map *nfp_map, void *value)
+{
+	u32 *word = value;
+	unsigned int i;
+
+	for (i = 0; i < DIV_ROUND_UP(nfp_map->offmap->map.value_size, 4); i++)
+		if (nfp_map->use_map[i] == NFP_MAP_USE_ATOMIC_CNT)
+			word[i] = (__force u32)cpu_to_be32(word[i]);
+}
+
+static int
+nfp_bpf_map_lookup_entry(struct bpf_offloaded_map *offmap,
+			 void *key, void *value)
+{
+	int err;
+
+	err = nfp_bpf_ctrl_lookup_entry(offmap, key, value);
+	if (err)
+		return err;
+
+	nfp_map_bpf_byte_swap(offmap->dev_priv, value);
+	return 0;
+}
+
+static int
+nfp_bpf_map_update_entry(struct bpf_offloaded_map *offmap,
+			 void *key, void *value, u64 flags)
+{
+	nfp_map_bpf_byte_swap(offmap->dev_priv, value);
+	return nfp_bpf_ctrl_update_entry(offmap, key, value, flags);
+}
+
 static int
 nfp_bpf_map_get_next_key(struct bpf_offloaded_map *offmap,
 			 void *key, void *next_key)
@@ -183,8 +188,8 @@ nfp_bpf_map_delete_elem(struct bpf_offloaded_map *offmap, void *key)
 
 static const struct bpf_map_dev_ops nfp_bpf_map_ops = {
 	.map_get_next_key	= nfp_bpf_map_get_next_key,
-	.map_lookup_elem	= nfp_bpf_ctrl_lookup_entry,
-	.map_update_elem	= nfp_bpf_ctrl_update_entry,
+	.map_lookup_elem	= nfp_bpf_map_lookup_entry,
+	.map_update_elem	= nfp_bpf_map_update_entry,
 	.map_delete_elem	= nfp_bpf_map_delete_elem,
 };
 
@@ -192,6 +197,7 @@ static int
 nfp_bpf_map_alloc(struct nfp_app_bpf *bpf, struct bpf_offloaded_map *offmap)
 {
 	struct nfp_bpf_map *nfp_map;
+	unsigned int use_map_size;
 	long long int res;
 
 	if (!bpf->maps.types)
@@ -226,7 +232,10 @@ nfp_bpf_map_alloc(struct nfp_app_bpf *bpf, struct bpf_offloaded_map *offmap)
 		return -ENOMEM;
 	}
 
-	nfp_map = kzalloc(sizeof(*nfp_map), GFP_USER);
+	use_map_size = DIV_ROUND_UP(offmap->map.value_size, 4) *
+		       FIELD_SIZEOF(struct nfp_bpf_map, use_map[0]);
+
+	nfp_map = kzalloc(sizeof(*nfp_map) + use_map_size, GFP_USER);
 	if (!nfp_map)
 		return -ENOMEM;
 

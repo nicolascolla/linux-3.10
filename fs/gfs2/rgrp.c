@@ -463,6 +463,13 @@ void gfs2_rgrp_verify(struct gfs2_rgrpd *rgd)
  * @blk: The data block number
  * @exact: True if this needs to be an exact match
  *
+ * The @exact argument should be set to true by most callers. The exception
+ * is when we need to match blocks which are not represented by the rgrp
+ * bitmap, but which are part of the rgrp (i.e. padding blocks) which are
+ * there for alignment purposes. Another way of looking at it is that @exact
+ * matches only valid data/metadata blocks, but with @exact false, it will
+ * match any block within the extent of the rgrp.
+ *
  * Returns: The resource group, or NULL if not found
  */
 
@@ -679,6 +686,7 @@ void gfs2_clear_rgrpd(struct gfs2_sbd *sdp)
 
 		if (gl) {
 			glock_clear_object(gl, rgd);
+			gfs2_rgrp_brelse(rgd);
 			gfs2_glock_add_to_lru(gl);
 			gfs2_glock_put(gl);
 		}
@@ -1105,7 +1113,7 @@ static u32 count_unlinked(struct gfs2_rgrpd *rgd)
  * @rgd: the struct gfs2_rgrpd describing the RG to read in
  *
  * Read in all of a Resource Group's header and bitmap blocks.
- * Caller must eventually call gfs2_rgrp_relse() to free the bitmaps.
+ * Caller must eventually call gfs2_rgrp_brelse() to free the bitmaps.
  *
  * Returns: errno
  */

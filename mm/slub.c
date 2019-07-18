@@ -158,8 +158,16 @@ static inline void *fixup_red_left(struct kmem_cache *s, void *p)
  */
 #define MAX_PARTIAL 10
 
-#define DEBUG_DEFAULT_FLAGS (SLAB_DEBUG_FREE | SLAB_RED_ZONE | \
+#define DEBUG_DEFAULT_FLAGS (SLAB_CONSISTENCY_CHECKS | SLAB_RED_ZONE | \
 				SLAB_POISON | SLAB_STORE_USER)
+
+/*
+ * These debug flags cannot use CMPXCHG because there might be consistency
+ * issues when checking or reading debug information
+ */
+#define SLAB_NO_CMPXCHG (SLAB_CONSISTENCY_CHECKS | SLAB_STORE_USER | \
+				SLAB_TRACE)
+
 
 /*
  * Debugging flags that require metadata to be stored in the slab.  These get
@@ -175,7 +183,7 @@ static inline void *fixup_red_left(struct kmem_cache *s, void *p)
 		SLAB_TRACE | SLAB_DESTROY_BY_RCU | SLAB_NOLEAKTRACE | \
 		SLAB_FAILSLAB)
 
-#define SLUB_MERGE_SAME (SLAB_DEBUG_FREE | SLAB_RECLAIM_ACCOUNT | \
+#define SLUB_MERGE_SAME (SLAB_CONSISTENCY_CHECKS | SLAB_RECLAIM_ACCOUNT | \
 		SLAB_CACHE_DMA | SLAB_NOTRACK)
 
 #define OO_SHIFT	16
@@ -1093,19 +1101,31 @@ static void setup_object_debug(struct kmem_cache *s, struct page *page,
 	init_tracking(s, object);
 }
 
-static noinline int alloc_debug_processing(struct kmem_cache *s, struct page *page,
+static inline int alloc_consistency_checks(struct kmem_cache *s, struct page *page,
 					void *object, unsigned long addr)
 {
 	if (!check_slab(s, page))
-		goto bad;
+		return 0;
 
 	if (!check_valid_pointer(s, page, object)) {
 		object_err(s, page, object, "Freelist Pointer check fails");
-		goto bad;
+		return 0;
 	}
 
 	if (!check_object(s, page, object, SLUB_RED_INACTIVE))
-		goto bad;
+		return 0;
+
+	return 1;
+}
+
+static noinline int alloc_debug_processing(struct kmem_cache *s,
+					struct page *page,
+					void *object, unsigned long addr)
+{
+	if (s->flags & SLAB_CONSISTENCY_CHECKS) {
+		if (!alloc_consistency_checks(s, page, object, addr))
+			goto bad;
+	}
 
 	/* Success perform special debug activities for allocs */
 	if (s->flags & SLAB_STORE_USER)
@@ -1128,37 +1148,21 @@ bad:
 	return 0;
 }
 
-/* Supports checking bulk free of a constructed freelist */
-static noinline struct kmem_cache_node *free_debug_processing(
-	struct kmem_cache *s, struct page *page,
-	void *head, void *tail, int bulk_cnt,
-	unsigned long addr, unsigned long *flags)
+static inline int free_consistency_checks(struct kmem_cache *s,
+		struct page *page, void *object, unsigned long addr)
 {
-	struct kmem_cache_node *n = get_node(s, page_to_nid(page));
-	void *object = head;
-	int cnt = 0;
-
-	spin_lock_irqsave(&n->list_lock, *flags);
-	slab_lock(page);
-
-	if (!check_slab(s, page))
-		goto fail;
-
-next_object:
-	cnt++;
-
 	if (!check_valid_pointer(s, page, object)) {
 		slab_err(s, page, "Invalid object pointer 0x%p", object);
-		goto fail;
+		return 0;
 	}
 
 	if (on_freelist(s, page, object)) {
 		object_err(s, page, object, "Object already free");
-		goto fail;
+		return 0;
 	}
 
 	if (!check_object(s, page, object, SLUB_RED_ACTIVE))
-		goto out;
+		return 0;
 
 	if (unlikely(s != page->slab_cache)) {
 		if (!PageSlab(page)) {
@@ -1172,7 +1176,37 @@ next_object:
 		} else
 			object_err(s, page, object,
 					"page slab pointer corrupt.");
-		goto fail;
+		return 0;
+	}
+	return 1;
+}
+
+/* Supports checking bulk free of a constructed freelist */
+static noinline int free_debug_processing(
+	struct kmem_cache *s, struct page *page,
+	void *head, void *tail, int bulk_cnt,
+	unsigned long addr)
+{
+	struct kmem_cache_node *n = get_node(s, page_to_nid(page));
+	void *object = head;
+	int cnt = 0;
+	unsigned long uninitialized_var(flags);
+	int ret = 0;
+
+	spin_lock_irqsave(&n->list_lock, flags);
+	slab_lock(page);
+
+	if (s->flags & SLAB_CONSISTENCY_CHECKS) {
+		if (!check_slab(s, page))
+			goto out;
+	}
+
+next_object:
+	cnt++;
+
+	if (s->flags & SLAB_CONSISTENCY_CHECKS) {
+		if (!free_consistency_checks(s, page, object, addr))
+			goto out;
 	}
 
 	if (s->flags & SLAB_STORE_USER)
@@ -1186,23 +1220,18 @@ next_object:
 		object = get_freepointer(s, object);
 		goto next_object;
 	}
+	ret = 1;
+
 out:
 	if (cnt != bulk_cnt)
 		slab_err(s, page, "Bulk freelist count(%d) invalid(%d)\n",
 			 bulk_cnt, cnt);
 
 	slab_unlock(page);
-	/*
-	 * Keep node_lock to preserve integrity
-	 * until the object is actually freed
-	 */
-	return n;
-
-fail:
-	slab_unlock(page);
-	spin_unlock_irqrestore(&n->list_lock, *flags);
-	slab_fix(s, "Object at 0x%p not freed", object);
-	return NULL;
+	spin_unlock_irqrestore(&n->list_lock, flags);
+	if (!ret)
+		slab_fix(s, "Object at 0x%p not freed", object);
+	return ret;
 }
 
 static int __init setup_slub_debug(char *str)
@@ -1243,7 +1272,7 @@ static int __init setup_slub_debug(char *str)
 	for (; *str && *str != ','; str++) {
 		switch (tolower(*str)) {
 		case 'f':
-			slub_debug |= SLAB_DEBUG_FREE;
+			slub_debug |= SLAB_CONSISTENCY_CHECKS;
 			break;
 		case 'z':
 			slub_debug |= SLAB_RED_ZONE;
@@ -1275,16 +1304,54 @@ out:
 
 __setup("slub_debug", setup_slub_debug);
 
+/*
+ * kmem_cache_flags - apply debugging options to the cache
+ * @object_size:	the size of an object without meta data
+ * @flags:		flags to set
+ * @name:		name of the cache
+ * @ctor:		constructor function
+ *
+ * Debug option(s) are applied to @flags. In addition to the debug
+ * option(s), if a slab name (or multiple) is specified i.e.
+ * slub_debug=<Debug-Options>,<slab name1>,<slab name2> ...
+ * then only the select slabs will receive the debug option(s).
+ */
 static unsigned long kmem_cache_flags(unsigned long object_size,
 	unsigned long flags, const char *name,
 	void (*ctor)(void *))
 {
-	/*
-	 * Enable debugging if selected on the kernel commandline.
-	 */
-	if (slub_debug && (!slub_debug_slabs || (name &&
-		!strncmp(slub_debug_slabs, name, strlen(slub_debug_slabs)))))
-		flags |= slub_debug;
+	char *iter;
+	size_t len;
+
+	/* If slub_debug = 0, it folds into the if conditional. */
+	if (!slub_debug_slabs)
+		return flags | slub_debug;
+
+	len = strlen(name);
+	iter = slub_debug_slabs;
+	while (*iter) {
+		char *end, *glob;
+		size_t cmplen;
+
+		end = strchr(iter, ',');
+		if (!end)
+			end = iter + strlen(iter);
+
+		glob = strnchr(iter, end - iter, '*');
+		if (glob)
+			cmplen = glob - iter;
+		else
+			cmplen = max_t(size_t, len, (end - iter));
+
+		if (!strncmp(name, iter, cmplen)) {
+			flags |= slub_debug;
+			break;
+		}
+
+		if (!*end)
+			break;
+		iter = end + 1;
+	}
 
 	return flags;
 }
@@ -1295,10 +1362,10 @@ static inline void setup_object_debug(struct kmem_cache *s,
 static inline int alloc_debug_processing(struct kmem_cache *s,
 	struct page *page, void *object, unsigned long addr) { return 0; }
 
-static inline struct kmem_cache_node *free_debug_processing(
+static inline int free_debug_processing(
 	struct kmem_cache *s, struct page *page,
 	void *head, void *tail, int bulk_cnt,
-	unsigned long addr, unsigned long *flags) { return NULL; }
+	unsigned long addr) { return 0; }
 
 static inline int slab_pad_check(struct kmem_cache *s, struct page *page)
 			{ return 1; }
@@ -1493,7 +1560,7 @@ static void __free_slab(struct kmem_cache *s, struct page *page)
 	int order = compound_order(page);
 	int pages = 1 << order;
 
-	if (kmem_cache_debug(s)) {
+	if (s->flags & SLAB_CONSISTENCY_CHECKS) {
 		void *p;
 
 		slab_pad_check(s, page);
@@ -2607,8 +2674,7 @@ static void __slab_free(struct kmem_cache *s, struct page *page,
 	stat(s, FREE_SLOWPATH);
 
 	if (kmem_cache_debug(s) &&
-	    !(n = free_debug_processing(s, page, head, tail, cnt,
-					addr, &flags)))
+	    !free_debug_processing(s, page, head, tail, cnt, addr))
 		return;
 
 	do {
@@ -3324,7 +3390,7 @@ static int kmem_cache_open(struct kmem_cache *s, unsigned long flags)
 
 #if defined(CONFIG_HAVE_CMPXCHG_DOUBLE) && \
     defined(CONFIG_HAVE_ALIGNED_STRUCT_PAGE)
-	if (system_has_cmpxchg_double() && (s->flags & SLAB_DEBUG_FLAGS) == 0)
+	if (system_has_cmpxchg_double() && (s->flags & SLAB_NO_CMPXCHG) == 0)
 		/* Enable fast mode */
 		s->flags |= __CMPXCHG_DOUBLE;
 #endif
@@ -4926,16 +4992,16 @@ SLAB_ATTR_RO(total_objects);
 
 static ssize_t sanity_checks_show(struct kmem_cache *s, char *buf)
 {
-	return sprintf(buf, "%d\n", !!(s->flags & SLAB_DEBUG_FREE));
+	return sprintf(buf, "%d\n", !!(s->flags & SLAB_CONSISTENCY_CHECKS));
 }
 
 static ssize_t sanity_checks_store(struct kmem_cache *s,
 				const char *buf, size_t length)
 {
-	s->flags &= ~SLAB_DEBUG_FREE;
+	s->flags &= ~SLAB_CONSISTENCY_CHECKS;
 	if (buf[0] == '1') {
 		s->flags &= ~__CMPXCHG_DOUBLE;
-		s->flags |= SLAB_DEBUG_FREE;
+		s->flags |= SLAB_CONSISTENCY_CHECKS;
 	}
 	return length;
 }
@@ -4971,7 +5037,6 @@ static ssize_t red_zone_store(struct kmem_cache *s,
 
 	s->flags &= ~SLAB_RED_ZONE;
 	if (buf[0] == '1') {
-		s->flags &= ~__CMPXCHG_DOUBLE;
 		s->flags |= SLAB_RED_ZONE;
 	}
 	calculate_sizes(s, -1);
@@ -4992,7 +5057,6 @@ static ssize_t poison_store(struct kmem_cache *s,
 
 	s->flags &= ~SLAB_POISON;
 	if (buf[0] == '1') {
-		s->flags &= ~__CMPXCHG_DOUBLE;
 		s->flags |= SLAB_POISON;
 	}
 	calculate_sizes(s, -1);
@@ -5447,7 +5511,7 @@ static char *create_unique_id(struct kmem_cache *s)
 		*p++ = 'd';
 	if (s->flags & SLAB_RECLAIM_ACCOUNT)
 		*p++ = 'a';
-	if (s->flags & SLAB_DEBUG_FREE)
+	if (s->flags & SLAB_CONSISTENCY_CHECKS)
 		*p++ = 'F';
 	if (!(s->flags & SLAB_NOTRACK))
 		*p++ = 't';

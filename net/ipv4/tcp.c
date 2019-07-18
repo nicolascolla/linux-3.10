@@ -278,6 +278,7 @@
 
 #include <asm/uaccess.h>
 #include <asm/ioctls.h>
+#include <asm/unaligned.h>
 #include <net/busy_poll.h>
 
 int sysctl_tcp_fin_timeout __read_mostly = TCP_FIN_TIMEOUT;
@@ -841,17 +842,13 @@ static unsigned int tcp_xmit_size_goal(struct sock *sk, u32 mss_now,
 				       int large_allowed)
 {
 	struct tcp_sock *tp = tcp_sk(sk);
-	u32 new_size_goal, size_goal, hlen;
+	u32 new_size_goal, size_goal;
 
 	if (!large_allowed || !sk_can_gso(sk))
 		return mss_now;
 
-	/* Maybe we should/could use sk->sk_prot->max_header here ? */
-	hlen = inet_csk(sk)->icsk_af_ops->net_header_len +
-	       inet_csk(sk)->icsk_ext_hdr_len +
-	       tp->tcp_header_len;
-
-	new_size_goal = sk->sk_gso_max_size - 1 - hlen;
+	/* Note : tcp_tso_autosize() will eventually split this later */
+	new_size_goal = sk->sk_gso_max_size - 1 - MAX_TCP_HEADER;
 	new_size_goal = tcp_bound_to_half_wnd(tp, new_size_goal);
 
 	/* We try hard to avoid divides here */
@@ -2458,7 +2455,7 @@ static int do_tcp_setsockopt(struct sock *sk, int level,
 	case TCP_REPAIR_QUEUE:
 		if (!tp->repair)
 			err = -EPERM;
-		else if (val < TCP_QUEUES_NR)
+		else if ((unsigned int)val < TCP_QUEUES_NR)
 			tp->repair_queue = val;
 		else
 			err = -EINVAL;
@@ -2590,8 +2587,10 @@ static int do_tcp_setsockopt(struct sock *sk, int level,
 
 #ifdef CONFIG_TCP_MD5SIG
 	case TCP_MD5SIG:
-		/* Read the IP->Key mappings from userspace */
-		err = tp->af_specific->md5_parse(sk, optval, optlen);
+		if ((1 << sk->sk_state) & (TCPF_CLOSE | TCPF_LISTEN))
+			err = tp->af_specific->md5_parse(sk, optval, optlen);
+		else
+			err = -EINVAL;
 		break;
 #endif
 	case TCP_USER_TIMEOUT:
@@ -2667,6 +2666,7 @@ void tcp_get_info(struct sock *sk, struct tcp_info *info)
 	const struct inet_connection_sock *icsk = inet_csk(sk);
 	u32 now = tcp_time_stamp;
 	unsigned int start;
+	u64 rate64;
 	u32 rate;
 
 	memset(info, 0, sizeof(*info));
@@ -2729,15 +2729,17 @@ void tcp_get_info(struct sock *sk, struct tcp_info *info)
 	info->tcpi_total_retrans = tp->total_retrans;
 
 	rate = READ_ONCE(sk->sk_pacing_rate);
-	info->tcpi_pacing_rate = rate != ~0U ? rate : ~0ULL;
+	rate64 = rate != ~0U ? rate : ~0ULL;
+	put_unaligned(rate64, &info->tcpi_pacing_rate);
 
 	rate = READ_ONCE(sk->sk_max_pacing_rate);
-	info->tcpi_max_pacing_rate = rate != ~0U ? rate : ~0ULL;
+	rate64 = rate != ~0U ? rate : ~0ULL;
+	put_unaligned(rate64, &info->tcpi_max_pacing_rate);
 
 	do {
 		start = u64_stats_fetch_begin_irq(&tp->syncp);
-		info->tcpi_bytes_acked = tp->bytes_acked;
-		info->tcpi_bytes_received = tp->bytes_received;
+		put_unaligned(tp->bytes_acked, &info->tcpi_bytes_acked);
+		put_unaligned(tp->bytes_received, &info->tcpi_bytes_received);
 	} while (u64_stats_fetch_retry_irq(&tp->syncp, start));
 	info->tcpi_segs_out = tp->segs_out;
 	info->tcpi_segs_in = tp->segs_in;

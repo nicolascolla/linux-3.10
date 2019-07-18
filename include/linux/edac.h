@@ -17,6 +17,7 @@
 #include <linux/completion.h>
 #include <linux/workqueue.h>
 #include <linux/debugfs.h>
+#include <linux/numa.h>
 
 struct device;
 
@@ -793,10 +794,5 @@ struct mem_ctl_info {
 	u16 fake_inject_count;
 #endif
 };
-
-/*
- * Maximum number of memory controllers in the coherent fabric.
- */
-#define EDAC_MAX_MCS	16
 
 #endif

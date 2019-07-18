@@ -649,7 +649,14 @@ find_cifs_entry(const unsigned int xid, struct cifs_tcon *tcon,
 		/* scan and find it */
 		int i;
 		char *cur_ent;
-		char *end_of_smb = cfile->srch_inf.ntwrk_buf_start +
+		char *end_of_smb;
+
+		if (cfile->srch_inf.ntwrk_buf_start == NULL) {
+			cifs_dbg(VFS, "ntwrk_buf_start is NULL during readdir\n");
+			return -EIO;
+		}
+
+		end_of_smb = cfile->srch_inf.ntwrk_buf_start +
 			server->ops->calc_smb_size(
 					cfile->srch_inf.ntwrk_buf_start);
 
@@ -876,7 +883,7 @@ int cifs_readdir(struct file *file, void *direntry, filldir_t filldir)
 			*tmp_buf = 0;
 			rc = cifs_filldir(current_entry, file, filldir,
 					  direntry, tmp_buf, max_len);
-			if (rc == -EOVERFLOW) {
+			if (rc) {
 				rc = 0;
 				break;
 			}

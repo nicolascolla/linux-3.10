@@ -117,8 +117,8 @@ _decode_session6(struct sk_buff *skb, struct flowi *fl, int reverse)
 {
 	struct flowi6 *fl6 = &fl->u.ip6;
 	int onlyproto = 0;
-	u16 offset = skb_network_header_len(skb);
 	const struct ipv6hdr *hdr = ipv6_hdr(skb);
+	u32 offset = sizeof(*hdr);
 	struct ipv6_opt_hdr *exthdr;
 	const unsigned char *nh = skb_network_header(skb);
 	u8 nexthdr = nh[IP6CB(skb)->nhoff];
@@ -177,6 +177,7 @@ _decode_session6(struct sk_buff *skb, struct flowi *fl, int reverse)
 
 #if IS_ENABLED(CONFIG_IPV6_MIP6)
 		case IPPROTO_MH:
+			offset += ipv6_optlen(exthdr);
 			if (!onlyproto && pskb_may_pull(skb, nh + offset + 3 - skb->data)) {
 				struct ip6_mh *mh;
 				mh = (struct ip6_mh *)exthdr;

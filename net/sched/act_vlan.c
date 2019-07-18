@@ -154,6 +154,8 @@ static int tcf_vlan_init(struct net *net, struct nlattr *nla,
 			case htons(ETH_P_8021AD):
 				break;
 			default:
+				if (exists)
+					tcf_idr_release(*a, bind);
 				return -EPROTONOSUPPORT;
 			}
 		} else {
@@ -177,10 +179,9 @@ static int tcf_vlan_init(struct net *net, struct nlattr *nla,
 			return ret;
 
 		ret = ACT_P_CREATED;
-	} else {
+	} else if (!ovr) {
 		tcf_idr_release(*a, bind);
-		if (!ovr)
-			return -EEXIST;
+		return -EEXIST;
 	}
 
 	v = to_vlan(*a);

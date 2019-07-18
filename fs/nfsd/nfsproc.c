@@ -206,18 +206,19 @@ nfsd_proc_write(struct svc_rqst *rqstp, struct nfsd_writeargs *argp,
 					struct nfsd_attrstat  *resp)
 {
 	__be32	nfserr;
-	int	stable = 1;
 	unsigned long cnt = argp->len;
+	unsigned int nvecs;
 
 	dprintk("nfsd: WRITE    %s %d bytes at %d\n",
 		SVCFH_fmt(&argp->fh),
 		argp->len, argp->offset);
 
-	nfserr = nfsd_write(rqstp, fh_copy(&resp->fh, &argp->fh), NULL,
-				   argp->offset,
-				   rqstp->rq_vec, argp->vlen,
-			           &cnt,
-				   &stable);
+	nvecs = svc_fill_write_vector(rqstp, &argp->first, cnt);
+	if (!nvecs)
+		return nfserr_io;
+	nfserr = nfsd_write(rqstp, fh_copy(&resp->fh, &argp->fh),
+			    argp->offset, rqstp->rq_vec, nvecs,
+			    &cnt, NFS_DATA_SYNC);
 	return nfsd_return_attrs(nfserr, resp);
 }
 

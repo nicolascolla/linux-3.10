@@ -36,6 +36,8 @@ MODULE_PARM_DESC(log_ecn_error, "Log packets received with corrupted ECN");
 
 #define GENEVE_VER 0
 #define GENEVE_BASE_HLEN (sizeof(struct udphdr) + sizeof(struct genevehdr))
+#define GENEVE_IPV4_HLEN (ETH_HLEN + sizeof(struct iphdr) + GENEVE_BASE_HLEN)
+#define GENEVE_IPV6_HLEN (ETH_HLEN + sizeof(struct ipv6hdr) + GENEVE_BASE_HLEN)
 
 /* per-network namespace private data for this module */
 struct geneve_net {
@@ -234,7 +236,8 @@ static void geneve_rx(struct geneve_dev *geneve, struct geneve_sock *gs,
 		}
 		/* Update tunnel dst according to Geneve options. */
 		ip_tunnel_info_opts_set(&tun_dst->u.tun_info,
-					gnvh->options, gnvh->opt_len * 4);
+					gnvh->options, gnvh->opt_len * 4,
+					TUNNEL_GENEVE_OPT);
 	} else {
 		/* Drop packets w/ critical options,
 		 * since we don't support any...
@@ -381,6 +384,59 @@ drop:
 	/* Consume bad packet */
 	kfree_skb(skb);
 	return 0;
+}
+
+/* Callback from net/ipv{4,6}/udp.c to check that we have a tunnel for errors */
+static int geneve_udp_encap_err_lookup(struct sock *sk, struct sk_buff *skb)
+{
+	struct genevehdr *geneveh;
+	struct geneve_sock *gs;
+	u8 zero_vni[3] = { 0 };
+	u8 *vni = zero_vni;
+
+	if (skb->len < GENEVE_BASE_HLEN)
+		return -EINVAL;
+
+	geneveh = geneve_hdr(skb);
+	if (geneveh->ver != GENEVE_VER)
+		return -EINVAL;
+
+	if (geneveh->proto_type != htons(ETH_P_TEB))
+		return -EINVAL;
+
+	gs = rcu_dereference_sk_user_data(sk);
+	if (!gs)
+		return -ENOENT;
+
+	if (geneve_get_sk_family(gs) == AF_INET) {
+		struct iphdr *iph = ip_hdr(skb);
+		__be32 addr4 = 0;
+
+		if (!gs->collect_md) {
+			vni = geneve_hdr(skb)->vni;
+			addr4 = iph->daddr;
+		}
+
+		return geneve_lookup(gs, addr4, vni) ? 0 : -ENOENT;
+	}
+
+#if IS_ENABLED(CONFIG_IPV6)
+	if (geneve_get_sk_family(gs) == AF_INET6) {
+		struct ipv6hdr *ip6h = ipv6_hdr(skb);
+		struct in6_addr addr6;
+
+		memset(&addr6, 0, sizeof(struct in6_addr));
+
+		if (!gs->collect_md) {
+			vni = geneve_hdr(skb)->vni;
+			addr6 = ip6h->daddr;
+		}
+
+		return geneve6_lookup(gs, addr6, vni) ? 0 : -ENOENT;
+	}
+#endif
+
+	return -EPFNOSUPPORT;
 }
 
 static struct socket *geneve_create_sock(struct net *net, bool ipv6,
@@ -539,6 +595,7 @@ static struct geneve_sock *geneve_socket_create(struct net *net, __be16 port,
 	tunnel_cfg.gro_receive = geneve_gro_receive;
 	tunnel_cfg.gro_complete = geneve_gro_complete;
 	tunnel_cfg.encap_rcv = geneve_udp_encap_recv;
+	tunnel_cfg.encap_err_lookup = geneve_udp_encap_err_lookup;
 	tunnel_cfg.encap_destroy = NULL;
 	setup_udp_tunnel_sock(net, sock, &tunnel_cfg);
 	list_add(&gs->list, &gn->sock_list);
@@ -677,7 +734,8 @@ static void geneve_build_header(struct genevehdr *geneveh,
 	geneveh->proto_type = htons(ETH_P_TEB);
 	geneveh->rsvd2 = 0;
 
-	ip_tunnel_info_opts_get(geneveh->options, info);
+	if (info->key.tun_flags & TUNNEL_GENEVE_OPT)
+		ip_tunnel_info_opts_get(geneveh->options, info);
 }
 
 static int geneve_build_skb(struct dst_entry *dst, struct sk_buff *skb,
@@ -830,6 +888,9 @@ static int geneve_xmit_skb(struct sk_buff *skb, struct net_device *dev,
 	if (IS_ERR(rt))
 		return PTR_ERR(rt);
 
+	skb_tunnel_check_pmtu(skb, &rt->dst,
+			      GENEVE_IPV4_HLEN + info->options_len);
+
 	sport = udp_flow_src_port(geneve->net, skb, 1, USHRT_MAX, true);
 	if (geneve->collect_md) {
 		tos = ip_tunnel_ecn_encap(key->tos, ip_hdr(skb), skb);
@@ -868,6 +929,8 @@ static int geneve6_xmit_skb(struct sk_buff *skb, struct net_device *dev,
 	dst = geneve_get_v6_dst(skb, dev, &fl6, info);
 	if (IS_ERR(dst))
 		return PTR_ERR(dst);
+
+	skb_tunnel_check_pmtu(skb, dst, GENEVE_IPV6_HLEN + info->options_len);
 
 	sport = udp_flow_src_port(geneve->net, skb, 1, USHRT_MAX, true);
 	if (geneve->collect_md) {

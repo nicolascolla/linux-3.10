@@ -21,6 +21,7 @@
 #include "xfs_log_format.h"
 #include "xfs_trans_resv.h"
 #include "xfs_mount.h"
+#include "xfs_errortag.h"
 #include "xfs_error.h"
 #include "xfs_sysfs.h"
 
@@ -52,6 +53,8 @@ static unsigned int xfs_errortag_random_default[] = {
 	XFS_RANDOM_FREE_EXTENT,
 	XFS_RANDOM_DROP_WRITES,
 	XFS_RANDOM_LOG_BAD_CRC,
+	XFS_RANDOM_LOG_ITEM_PIN,
+	XFS_RANDOM_BUF_LRU_REF,
 };
 
 struct xfs_errortag_attr {
@@ -151,6 +154,8 @@ XFS_ERRORTAG_ATTR_RW(bmapifmt,		XFS_ERRTAG_BMAPIFORMAT);
 XFS_ERRORTAG_ATTR_RW(free_extent,	XFS_ERRTAG_FREE_EXTENT);
 XFS_ERRORTAG_ATTR_RW(drop_writes,	XFS_ERRTAG_DROP_WRITES);
 XFS_ERRORTAG_ATTR_RW(log_bad_crc,	XFS_ERRTAG_LOG_BAD_CRC);
+XFS_ERRORTAG_ATTR_RW(log_item_pin,	XFS_ERRTAG_LOG_ITEM_PIN);
+XFS_ERRORTAG_ATTR_RW(buf_lru_ref,	XFS_ERRTAG_BUF_LRU_REF);
 
 static struct attribute *xfs_errortag_attrs[] = {
 	XFS_ERRORTAG_ATTR_LIST(noerror),
@@ -178,10 +183,12 @@ static struct attribute *xfs_errortag_attrs[] = {
 	XFS_ERRORTAG_ATTR_LIST(free_extent),
 	XFS_ERRORTAG_ATTR_LIST(drop_writes),
 	XFS_ERRORTAG_ATTR_LIST(log_bad_crc),
+	XFS_ERRORTAG_ATTR_LIST(log_item_pin),
+	XFS_ERRORTAG_ATTR_LIST(buf_lru_ref),
 	NULL,
 };
 
-struct kobj_type xfs_errortag_ktype = {
+static struct kobj_type xfs_errortag_ktype = {
 	.release = xfs_sysfs_release,
 	.sysfs_ops = &xfs_errortag_sysfs_ops,
 	.default_attrs = xfs_errortag_attrs,
@@ -329,7 +336,7 @@ xfs_verifier_error(
 {
 	struct xfs_mount *mp = bp->b_target->bt_mount;
 
-	xfs_alert(mp, "Metadata %s detected at %pF, %s block 0x%llx",
+	xfs_alert(mp, "Metadata %s detected at %pS, %s block 0x%llx",
 		  bp->b_error == -EFSBADCRC ? "CRC error" : "corruption",
 		  __return_address, bp->b_ops->name, bp->b_bn);
 

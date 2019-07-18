@@ -1,10 +1,12 @@
+// SPDX-License-Identifier: GPL-2.0+
+
+#define pr_fmt(fmt) "ipmi_hardcode: " fmt
 
 #include <linux/moduleparam.h>
-#include <linux/platform_device.h>
 #include <linux/property.h>
+#include <linux/platform_device.h>
 #include "ipmi_si.h"
 
-#define PFX "ipmi_hardcode: "
 /*
  * There can be 4 IO ports passed in (with or without IRQs), 4 addresses,
  * a default IO port, and 1 ACPI/SPMI address.  That sets SI_MAX_DRIVERS.

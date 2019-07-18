@@ -46,10 +46,13 @@
 #include <linux/spinlock.h>
 #include <linux/timer.h>
 #include <linux/vmalloc.h>
+#include <linux/rhashtable.h>
 #include <linux/etherdevice.h>
 #include <linux/net_tstamp.h>
 #include <linux/ptp_clock_kernel.h>
 #include <linux/ptp_classify.h>
+#include <linux/crash_dump.h>
+#include <linux/thermal.h>
 #include <asm/io.h>
 #include "t4_chip_type.h"
 #include "cxgb4_uld.h"
@@ -318,6 +321,21 @@ struct vpd_params {
 	u8 na[MACADDR_LEN + 1];
 };
 
+/* Maximum resources provisioned for a PCI PF.
+ */
+struct pf_resources {
+	unsigned int nvi;		/* N virtual interfaces */
+	unsigned int neq;		/* N egress Qs */
+	unsigned int nethctrl;		/* N egress ETH or CTRL Qs */
+	unsigned int niqflint;		/* N ingress Qs/w free list(s) & intr */
+	unsigned int niq;		/* N ingress Qs */
+	unsigned int tc;		/* PCI-E traffic class */
+	unsigned int pmask;		/* port access rights mask */
+	unsigned int nexactf;		/* N exact MPS filters */
+	unsigned int r_caps;		/* read capabilities */
+	unsigned int wx_caps;		/* write/execute capabilities */
+};
+
 struct pci_params {
 	unsigned int vpd_cap_addr;
 	unsigned char speed;
@@ -345,6 +363,7 @@ struct adapter_params {
 	struct sge_params sge;
 	struct tp_params  tp;
 	struct vpd_params vpd;
+	struct pf_resources pfres;
 	struct pci_params pci;
 	struct devlog_params devlog;
 	enum pcie_memwin drv_memwin;
@@ -385,6 +404,7 @@ struct adapter_params {
 	bool fr_nsmr_tpte_wr_support;	  /* FW support for FR_NSMR_TPTE_WR */
 	u8 fw_caps_support;		/* 32-bit Port Capabilities */
 	bool filter2_wr_support;	/* FW support for FILTER2_WR */
+	unsigned int viid_smt_extn_support:1; /* FW returns vin and smt index */
 
 	/* MPS Buffer Group Map[per Port].  Bit i is set if buffer group i is
 	 * used by the Port
@@ -515,6 +535,13 @@ enum {
 };
 
 enum {
+	MAX_TXQ_DESC_SIZE      = 64,
+	MAX_RXQ_DESC_SIZE      = 128,
+	MAX_FL_DESC_SIZE       = 8,
+	MAX_CTRL_TXQ_DESC_SIZE = 64,
+};
+
+enum {
 	INGQ_EXTRAS = 2,        /* firmware event queue and */
 				/*   forwarded interrupts */
 	MAX_INGQ = MAX_ETH_QSETS + INGQ_EXTRAS,
@@ -537,7 +564,7 @@ struct sge_rspq;
 struct port_info {
 	struct adapter *adapter;
 	u16    viid;
-	s16    xact_addr_filt;        /* index of exact MAC address filter */
+	int    xact_addr_filt;        /* index of exact MAC address filter */
 	u16    rss_size;              /* size of VI's RSS table slice */
 	s8     mdio_addr;
 	enum fw_port_type port_type;
@@ -559,6 +586,13 @@ struct port_info {
 	bool ptp_enable;
 	struct sched_table *sched_tbl;
 	u32 eth_flags;
+
+	/* viid and smt fields either returned by fw
+	 * or decoded by parsing viid by driver.
+	 */
+	u8 vin;
+	u8 vivld;
+	u8 smt_idx;
 };
 
 struct dentry;
@@ -660,6 +694,7 @@ struct sge_eth_stats {              /* Ethernet queue statistics */
 	unsigned long rx_cso;       /* # of Rx checksum offloads */
 	unsigned long vlan_ex;      /* # of Rx VLAN extractions */
 	unsigned long rx_drops;     /* # of packets dropped due to no mem */
+	unsigned long bad_rx_pkts;  /* # of packets with err_vec!=0 */
 };
 
 struct sge_eth_rxq {                /* SW Ethernet Rx queue */
@@ -818,6 +853,7 @@ struct doorbell_stats {
 struct hash_mac_addr {
 	struct list_head list;
 	u8 addr[ETH_ALEN];
+	unsigned int iface_mac;
 };
 
 struct uld_msix_bmap {
@@ -837,6 +873,7 @@ struct vf_info {
 	unsigned int tx_rate;
 	bool pf_set_mac;
 	u16 vlan;
+	int link_state;
 };
 
 enum {
@@ -856,6 +893,14 @@ struct mbox_list {
 struct mps_encap_entry {
 	atomic_t refcnt;
 };
+
+#if IS_ENABLED(CONFIG_THERMAL)
+struct ch_thermal {
+	struct thermal_zone_device *tzdev;
+	int trip_temp;
+	int trip_type;
+};
+#endif
 
 struct adapter {
 	void __iomem *regs;
@@ -959,8 +1004,11 @@ struct adapter {
 	struct chcr_stats_debug chcr_stats;
 
 	/* TC flower offload */
-	DECLARE_HASHTABLE(flower_anymatch_tbl, 9);
+	bool tc_flower_initialized;
+	struct rhashtable flower_tbl;
+	struct rhashtable_params flower_ht_params;
 	struct timer_list flower_stats_timer;
+	struct work_struct flower_stats_work;
 
 	/* Ethtool Dump */
 	struct ethtool_dump eth_dump;
@@ -969,6 +1017,12 @@ struct adapter {
 	struct hma_data hma;
 
 	struct srq_data *srq;
+
+	/* Dump buffer for collecting logs in kdump kernel */
+	struct vmcoredd_data vmcoredd;
+#if IS_ENABLED(CONFIG_THERMAL)
+	struct ch_thermal ch_thermal;
+#endif
 };
 
 /* Support for "sched-class" command to allow a TX Scheduling Class to be
@@ -1039,6 +1093,7 @@ struct ch_sched_queue {
 #define VF_BITWIDTH 8
 #define IVLAN_BITWIDTH 16
 #define OVLAN_BITWIDTH 16
+#define ENCAP_VNI_BITWIDTH 24
 
 /* Filter matching rules.  These consist of a set of ingress packet field
  * (value, mask) tuples.  The associated ingress packet field matches the
@@ -1069,6 +1124,7 @@ struct ch_filter_tuple {
 	uint32_t ivlan_vld:1;                   /* inner VLAN valid */
 	uint32_t ovlan_vld:1;                   /* outer VLAN valid */
 	uint32_t pfvf_vld:1;                    /* PF/VF valid */
+	uint32_t encap_vld:1;			/* Encapsulation valid */
 	uint32_t macidx:MACIDX_BITWIDTH;        /* exact match MAC index */
 	uint32_t fcoe:FCOE_BITWIDTH;            /* FCoE packet */
 	uint32_t iport:IPORT_BITWIDTH;          /* ingress port */
@@ -1079,6 +1135,7 @@ struct ch_filter_tuple {
 	uint32_t vf:VF_BITWIDTH;                /* PCI-E VF ID */
 	uint32_t ivlan:IVLAN_BITWIDTH;          /* inner VLAN */
 	uint32_t ovlan:OVLAN_BITWIDTH;          /* outer VLAN */
+	uint32_t vni:ENCAP_VNI_BITWIDTH;	/* VNI of tunnel */
 
 	/* Uncompressed header matching field rules.  These are always
 	 * available for field rules.
@@ -1550,6 +1607,7 @@ int t4_eeprom_ptov(unsigned int phys_addr, unsigned int fn, unsigned int sz);
 int t4_seeprom_wp(struct adapter *adapter, bool enable);
 int t4_get_raw_vpd_params(struct adapter *adapter, struct vpd_params *p);
 int t4_get_vpd_params(struct adapter *adapter, struct vpd_params *p);
+int t4_get_pfres(struct adapter *adapter);
 int t4_read_flash(struct adapter *adapter, unsigned int addr,
 		  unsigned int nwords, u32 *data, int byte_oriented);
 int t4_load_fw(struct adapter *adapter, const u8 *fw_data, unsigned int size);
@@ -1702,7 +1760,7 @@ int t4_cfg_pfvf(struct adapter *adap, unsigned int mbox, unsigned int pf,
 		unsigned int nexact, unsigned int rcaps, unsigned int wxcaps);
 int t4_alloc_vi(struct adapter *adap, unsigned int mbox, unsigned int port,
 		unsigned int pf, unsigned int vf, unsigned int nmac, u8 *mac,
-		unsigned int *rss_size);
+		unsigned int *rss_size, u8 *vivld, u8 *vin);
 int t4_free_vi(struct adapter *adap, unsigned int mbox,
 	       unsigned int pf, unsigned int vf,
 	       unsigned int viid);
@@ -1712,6 +1770,12 @@ int t4_set_rxmode(struct adapter *adap, unsigned int mbox, unsigned int viid,
 int t4_free_raw_mac_filt(struct adapter *adap, unsigned int viid,
 			 const u8 *addr, const u8 *mask, unsigned int idx,
 			 u8 lookup_type, u8 port_id, bool sleep_ok);
+int t4_free_encap_mac_filt(struct adapter *adap, unsigned int viid, int idx,
+			   bool sleep_ok);
+int t4_alloc_encap_mac_filt(struct adapter *adap, unsigned int viid,
+			    const u8 *addr, const u8 *mask, unsigned int vni,
+			    unsigned int vni_mask, u8 dip_hit, u8 lookup_type,
+			    bool sleep_ok);
 int t4_alloc_raw_mac_filt(struct adapter *adap, unsigned int viid,
 			  const u8 *addr, const u8 *mask, unsigned int idx,
 			  u8 lookup_type, u8 port_id, bool sleep_ok);
@@ -1722,7 +1786,7 @@ int t4_free_mac_filt(struct adapter *adap, unsigned int mbox,
 		     unsigned int viid, unsigned int naddr,
 		     const u8 **addr, bool sleep_ok);
 int t4_change_mac(struct adapter *adap, unsigned int mbox, unsigned int viid,
-		  int idx, const u8 *addr, bool persist, bool add_smt);
+		  int idx, const u8 *addr, bool persist, u8 *smt_idx);
 int t4_set_addr_hash(struct adapter *adap, unsigned int mbox, unsigned int viid,
 		     bool ucast, u64 vec, bool sleep_ok);
 int t4_enable_vi_params(struct adapter *adap, unsigned int mbox,
@@ -1812,4 +1876,9 @@ void cxgb4_write_sgl(const struct sk_buff *skb, struct sge_txq *q,
 void cxgb4_ring_tx_db(struct adapter *adap, struct sge_txq *q, int n);
 int t4_set_vlan_acl(struct adapter *adap, unsigned int mbox, unsigned int vf,
 		    u16 vlan);
+int cxgb4_dcb_enabled(const struct net_device *dev);
+
+int cxgb4_thermal_init(struct adapter *adap);
+int cxgb4_thermal_remove(struct adapter *adap);
+
 #endif /* __CXGB4_H__ */
