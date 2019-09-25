@@ -55,6 +55,7 @@
 #include <linux/irqdomain.h>
 #include <linux/msi.h>
 #include <linux/hyperv.h>
+#include <linux/refcount.h>
 #include <asm/mshyperv.h>
 
 /*
@@ -94,6 +95,9 @@ static enum pci_protocol_version_t pci_protocol_version;
 #define MAX_SUPPORTED_MSI_MESSAGES 0x400
 
 #define STATUS_REVISION_MISMATCH 0xC0000059
+
+/* space for 32bit serial number as string */
+#define SLOT_NAME_SIZE 11
 
 /*
  * Message Types
@@ -486,22 +490,12 @@ enum hv_pcichild_state {
 	hv_pcichild_maximum
 };
 
-enum hv_pcidev_ref_reason {
-	hv_pcidev_ref_invalid = 0,
-	hv_pcidev_ref_initial,
-	hv_pcidev_ref_by_slot,
-	hv_pcidev_ref_packet,
-	hv_pcidev_ref_pnp,
-	hv_pcidev_ref_childlist,
-	hv_pcidev_irqdata,
-	hv_pcidev_ref_max
-};
-
 struct hv_pci_dev {
 	/* List protected by pci_rescan_remove_lock */
 	struct list_head list_entry;
-	atomic_t refs;
+	refcount_t refs;
 	enum hv_pcichild_state state;
+	struct pci_slot *pci_slot;
 	struct pci_function_description desc;
 	bool reported_missing;
 	struct hv_pcibus_device *hbus;
@@ -548,10 +542,17 @@ static void hv_pci_generic_compl(void *context, struct pci_response *resp,
 
 static struct hv_pci_dev *get_pcichild_wslot(struct hv_pcibus_device *hbus,
 						u32 wslot);
-static void get_pcichild(struct hv_pci_dev *hv_pcidev,
-			 enum hv_pcidev_ref_reason reason);
-static void put_pcichild(struct hv_pci_dev *hv_pcidev,
-			 enum hv_pcidev_ref_reason reason);
+
+static void get_pcichild(struct hv_pci_dev *hpdev)
+{
+	refcount_inc(&hpdev->refs);
+}
+
+static void put_pcichild(struct hv_pci_dev *hpdev)
+{
+	if (refcount_dec_and_test(&hpdev->refs))
+		kfree(hpdev);
+}
 
 static void get_hvpcibus(struct hv_pcibus_device *hv_pcibus);
 static void put_hvpcibus(struct hv_pcibus_device *hv_pcibus);
@@ -782,7 +783,7 @@ static int hv_pcifront_read_config(struct pci_bus *bus, unsigned int devfn,
 
 	_hv_pcifront_read_config(hpdev, where, size, val);
 
-	put_pcichild(hpdev, hv_pcidev_ref_by_slot);
+	put_pcichild(hpdev);
 	return PCIBIOS_SUCCESSFUL;
 }
 
@@ -810,7 +811,7 @@ static int hv_pcifront_write_config(struct pci_bus *bus, unsigned int devfn,
 
 	_hv_pcifront_write_config(hpdev, where, size, val);
 
-	put_pcichild(hpdev, hv_pcidev_ref_by_slot);
+	put_pcichild(hpdev);
 	return PCIBIOS_SUCCESSFUL;
 }
 
@@ -1153,13 +1154,13 @@ static void hv_compose_msi_msg(struct pci_dev *pdev, unsigned int irq,
 	msg->address_lo = comp.int_desc.address & 0xffffffff;
 	msg->data = comp.int_desc.data;
 
-	put_pcichild(hpdev, hv_pcidev_ref_by_slot);
+	put_pcichild(hpdev);
 	return;
 
 free_int_desc:
 	kfree(int_desc);
 drop_reference:
-	put_pcichild(hpdev, hv_pcidev_ref_by_slot);
+	put_pcichild(hpdev);
 return_null_message:
 	msg->address_hi = 0;
 	msg->address_lo = 0;
@@ -1197,7 +1198,7 @@ void hv_teardown_msi_irqs(struct pci_dev *pdev)
 				 0);
 	}
 
-	put_pcichild(hpdev, hv_pcidev_ref_by_slot);
+	put_pcichild(hpdev);
 
 msi_teardown:
 	hv_msi.teardown_msi_irqs(pdev);
@@ -1394,6 +1395,49 @@ static void prepopulate_bars(struct hv_pcibus_device *hbus)
 	spin_unlock_irqrestore(&hbus->device_list_lock, flags);
 }
 
+/*
+ * Assign entries in sysfs pci slot directory.
+ *
+ * Note that this function does not need to lock the children list
+ * because it is called from pci_devices_present_work which
+ * is serialized with hv_eject_device_work because they are on the
+ * same ordered workqueue. Therefore hbus->children list will not change
+ * even when pci_create_slot sleeps.
+ */
+static void hv_pci_assign_slots(struct hv_pcibus_device *hbus)
+{
+	struct hv_pci_dev *hpdev;
+	char name[SLOT_NAME_SIZE];
+	int slot_nr;
+
+	list_for_each_entry(hpdev, &hbus->children, list_entry) {
+		if (hpdev->pci_slot)
+			continue;
+
+		slot_nr = PCI_SLOT(wslot_to_devfn(hpdev->desc.win_slot.slot));
+		snprintf(name, SLOT_NAME_SIZE, "%u", hpdev->desc.ser);
+		hpdev->pci_slot = pci_create_slot(hbus->pci_bus, slot_nr,
+					  name, NULL);
+		if (!hpdev->pci_slot)
+			pr_warn("pci_create slot %s failed\n", name);
+	}
+}
+
+/*
+ * Remove entries in sysfs pci slot directory.
+ */
+static void hv_pci_remove_slots(struct hv_pcibus_device *hbus)
+{
+	struct hv_pci_dev *hpdev;
+
+	list_for_each_entry(hpdev, &hbus->children, list_entry) {
+		if (!hpdev->pci_slot)
+			continue;
+		pci_destroy_slot(hpdev->pci_slot);
+		hpdev->pci_slot = NULL;
+	}
+}
+
 /**
  * create_root_hv_pci_bus() - Expose a new root PCI bus
  * @hbus:	Root PCI bus, as understood by this driver
@@ -1414,6 +1458,7 @@ static int create_root_hv_pci_bus(struct hv_pcibus_device *hbus)
 	pci_lock_rescan_remove();
 	pci_scan_child_bus(hbus->pci_bus);
 	pci_bus_assign_resources(hbus->pci_bus);
+	hv_pci_assign_slots(hbus);
 	pci_bus_add_devices(hbus->pci_bus);
 	pci_unlock_rescan_remove();
 	hbus->state = hv_pcibus_installed;
@@ -1454,19 +1499,6 @@ static void q_resource_requirements(void *context, struct pci_response *resp,
 	}
 
 	complete(&completion->host_event);
-}
-
-static void get_pcichild(struct hv_pci_dev *hpdev,
-			    enum hv_pcidev_ref_reason reason)
-{
-	atomic_inc(&hpdev->refs);
-}
-
-static void put_pcichild(struct hv_pci_dev *hpdev,
-			    enum hv_pcidev_ref_reason reason)
-{
-	if (atomic_dec_and_test(&hpdev->refs))
-		kfree(hpdev);
 }
 
 /**
@@ -1520,8 +1552,8 @@ static struct hv_pci_dev *new_pcichild_device(struct hv_pcibus_device *hbus,
 		goto error;
 
 	hpdev->desc = *desc;
-	get_pcichild(hpdev, hv_pcidev_ref_initial);
-	get_pcichild(hpdev, hv_pcidev_ref_childlist);
+	refcount_set(&hpdev->refs, 1);
+	get_pcichild(hpdev);
 	spin_lock_irqsave(&hbus->device_list_lock, flags);
 
 	list_add_tail(&hpdev->list_entry, &hbus->children);
@@ -1556,7 +1588,7 @@ static struct hv_pci_dev *get_pcichild_wslot(struct hv_pcibus_device *hbus,
 	list_for_each_entry(iter, &hbus->children, list_entry) {
 		if (iter->desc.win_slot.slot == wslot) {
 			hpdev = iter;
-			get_pcichild(hpdev, hv_pcidev_ref_by_slot);
+			get_pcichild(hpdev);
 			break;
 		}
 	}
@@ -1683,7 +1715,7 @@ static void pci_devices_present_work(struct work_struct *work)
 					     list_entry);
 			if (hpdev->reported_missing) {
 				found = true;
-				put_pcichild(hpdev, hv_pcidev_ref_childlist);
+				put_pcichild(hpdev);
 				list_move_tail(&hpdev->list_entry, &removed);
 				break;
 			}
@@ -1696,7 +1728,11 @@ static void pci_devices_present_work(struct work_struct *work)
 		hpdev = list_first_entry(&removed, struct hv_pci_dev,
 					 list_entry);
 		list_del(&hpdev->list_entry);
-		put_pcichild(hpdev, hv_pcidev_ref_initial);
+
+		if (hpdev->pci_slot)
+			pci_destroy_slot(hpdev->pci_slot);
+
+		put_pcichild(hpdev);
 	}
 
 	switch (hbus->state) {
@@ -1707,6 +1743,7 @@ static void pci_devices_present_work(struct work_struct *work)
 		 */
 		pci_lock_rescan_remove();
 		pci_scan_child_bus(hbus->pci_bus);
+		hv_pci_assign_slots(hbus);
 		pci_unlock_rescan_remove();
 		break;
 
@@ -1780,6 +1817,7 @@ static void hv_pci_devices_present(struct hv_pcibus_device *hbus,
 static void hv_eject_device_work(struct work_struct *work)
 {
 	struct pci_eject_response *ejct_pkt;
+	struct hv_pcibus_device *hbus;
 	struct hv_pci_dev *hpdev;
 	struct pci_dev *pdev;
 	unsigned long flags;
@@ -1790,11 +1828,9 @@ static void hv_eject_device_work(struct work_struct *work)
 	} ctxt;
 
 	hpdev = container_of(work, struct hv_pci_dev, wrk);
+	hbus = hpdev->hbus;
 
-	if (hpdev->state != hv_pcichild_ejecting) {
-		put_pcichild(hpdev, hv_pcidev_ref_pnp);
-		return;
-	}
+	WARN_ON(hpdev->state != hv_pcichild_ejecting);
 
 	/*
 	 * Ejection can come before or after the PCI bus has been set up, so
@@ -1803,8 +1839,7 @@ static void hv_eject_device_work(struct work_struct *work)
 	 * because hbus->pci_bus may not exist yet.
 	 */
 	wslot = wslot_to_devfn(hpdev->desc.win_slot.slot);
-	pdev = pci_get_domain_bus_and_slot(hpdev->hbus->sysdata.domain, 0,
-					   wslot);
+	pdev = pci_get_domain_bus_and_slot(hbus->sysdata.domain, 0, wslot);
 	if (pdev) {
 		pci_lock_rescan_remove();
 		pci_stop_and_remove_bus_device(pdev);
@@ -1812,21 +1847,29 @@ static void hv_eject_device_work(struct work_struct *work)
 		pci_unlock_rescan_remove();
 	}
 
-	spin_lock_irqsave(&hpdev->hbus->device_list_lock, flags);
+	spin_lock_irqsave(&hbus->device_list_lock, flags);
 	list_del(&hpdev->list_entry);
-	spin_unlock_irqrestore(&hpdev->hbus->device_list_lock, flags);
+	spin_unlock_irqrestore(&hbus->device_list_lock, flags);
+
+	if (hpdev->pci_slot)
+		pci_destroy_slot(hpdev->pci_slot);
 
 	memset(&ctxt, 0, sizeof(ctxt));
 	ejct_pkt = (struct pci_eject_response *)&ctxt.pkt.message;
 	ejct_pkt->message_type.type = PCI_EJECTION_COMPLETE;
 	ejct_pkt->wslot.slot = hpdev->desc.win_slot.slot;
-	vmbus_sendpacket(hpdev->hbus->hdev->channel, ejct_pkt,
+	vmbus_sendpacket(hbus->hdev->channel, ejct_pkt,
 			 sizeof(*ejct_pkt), (unsigned long)&ctxt.pkt,
 			 VM_PKT_DATA_INBAND, 0);
 
-	put_pcichild(hpdev, hv_pcidev_ref_childlist);
-	put_pcichild(hpdev, hv_pcidev_ref_pnp);
-	put_hvpcibus(hpdev->hbus);
+	/* For the get_pcichild() in hv_pci_eject_device() */
+	put_pcichild(hpdev);
+	/* For the two refs got in new_pcichild_device() */
+	put_pcichild(hpdev);
+	put_pcichild(hpdev);
+	/* hpdev has been freed. Do not use it any more. */
+
+	put_hvpcibus(hbus);
 }
 
 /**
@@ -1840,7 +1883,7 @@ static void hv_eject_device_work(struct work_struct *work)
 static void hv_pci_eject_device(struct hv_pci_dev *hpdev)
 {
 	hpdev->state = hv_pcichild_ejecting;
-	get_pcichild(hpdev, hv_pcidev_ref_pnp);
+	get_pcichild(hpdev);
 	INIT_WORK(&hpdev->wrk, hv_eject_device_work);
 	get_hvpcibus(hpdev->hbus);
 	schedule_work(&hpdev->wrk);
@@ -1940,8 +1983,7 @@ static void hv_pci_onchannelcallback(void *context)
 						      dev_message->wslot.slot);
 				if (hpdev) {
 					hv_pci_eject_device(hpdev);
-					put_pcichild(hpdev,
-							hv_pcidev_ref_by_slot);
+					put_pcichild(hpdev);
 				}
 				break;
 
@@ -2340,7 +2382,7 @@ static int hv_send_resources_allocated(struct hv_device *hdev)
 				PCI_RESOURCES_ASSIGNED2;
 			res_assigned2->wslot.slot = hpdev->desc.win_slot.slot;
 		}
-		put_pcichild(hpdev, hv_pcidev_ref_by_slot);
+		put_pcichild(hpdev);
 
 		ret = vmbus_sendpacket(hdev->channel, &pkt->message,
 				size_res, (unsigned long)pkt,
@@ -2388,7 +2430,7 @@ static int hv_send_resources_released(struct hv_device *hdev)
 		pkt.message_type.type = PCI_RESOURCES_RELEASED;
 		pkt.wslot.slot = hpdev->desc.win_slot.slot;
 
-		put_pcichild(hpdev, hv_pcidev_ref_by_slot);
+		put_pcichild(hpdev);
 
 		ret = vmbus_sendpacket(hdev->channel, &pkt, sizeof(pkt), 0,
 				       VM_PKT_DATA_INBAND, 0);
@@ -2581,6 +2623,7 @@ static int hv_pci_remove(struct hv_device *hdev)
 		pci_lock_rescan_remove();
 		pci_stop_root_bus(hbus->pci_bus);
 		pci_remove_root_bus(hbus->pci_bus);
+		hv_pci_remove_slots(hbus);
 		pci_unlock_rescan_remove();
 		hbus->state = hv_pcibus_removed;
 	}

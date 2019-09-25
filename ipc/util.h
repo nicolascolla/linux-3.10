@@ -15,9 +15,9 @@
 
 #define SEQ_MULTIPLIER	(IPCMNI)
 
-void sem_init (void);
-void msg_init (void);
-void shm_init (void);
+void sem_init(void);
+void msg_init(void);
+void shm_init(void);
 
 struct ipc_namespace;
 
@@ -113,19 +113,13 @@ void ipc_rmid(struct ipc_ids *, struct kern_ipc_perm *);
 /* must be called with ipcp locked */
 int ipcperms(struct ipc_namespace *ns, struct kern_ipc_perm *ipcp, short flg);
 
-/* for rare, potentially huge allocations.
- * both function can sleep
- */
-void* ipc_alloc(int size);
-void ipc_free(void* ptr, int size);
-
 /*
  * For allocation that need to be freed by RCU.
  * Objects are reference counted, they start with reference count 1.
  * getref increases the refcount, the putref call that reduces the recount
  * to 0 schedules the rcu destruction. Caller must guarantee locking.
  */
-void* ipc_rcu_alloc(int size);
+void *ipc_rcu_alloc(int size);
 int ipc_rcu_getref(void *ptr);
 void ipc_rcu_putref(void *ptr, void (*func)(struct rcu_head *head));
 void ipc_rcu_free(struct rcu_head *head);
@@ -144,7 +138,7 @@ struct kern_ipc_perm *ipcctl_pre_down_nolock(struct ipc_namespace *ns,
   /* On IA-64, we always use the "64-bit version" of the IPC structures.  */ 
 # define ipc_parse_version(cmd)	IPC_64
 #else
-int ipc_parse_version (int *cmd);
+int ipc_parse_version(int *cmd);
 #endif
 
 extern void free_msg(struct msg_msg *msg);
