@@ -496,6 +496,18 @@ struct rt_rq {
 #endif
 };
 
+#ifdef CONFIG_RT_GROUP_SCHED
+static inline int rt_rq_throttled(struct rt_rq *rt_rq)
+{
+	return rt_rq->rt_throttled && !rt_rq->rt_nr_boosted;
+}
+#else
+static inline int rt_rq_throttled(struct rt_rq *rt_rq)
+{
+	return rt_rq->rt_throttled;
+}
+#endif
+
 /* Deadline class' related fields in a runqueue */
 struct dl_rq {
 	/* runqueue is an rbtree, ordered by deadline */
@@ -677,7 +689,7 @@ struct rq {
 
 	unsigned char idle_balance;
 	/* For active balancing */
-	int post_schedule;
+	RH_KABI_DEPRECATE(int, post_schedule)
 	int active_balance;
 	int push_cpu;
 	struct cpu_stop_work active_balance_work;
@@ -725,6 +737,7 @@ struct rq {
 	struct sched_avg avg;
 
 	RH_KABI_EXTEND(struct dl_rq dl)
+	RH_KABI_EXTEND(struct callback_head *balance_callback)
 
 #ifndef __GENKSYMS__
 	/* CONFIG_SCHEDSTATS */
@@ -782,6 +795,21 @@ extern int migrate_swap(struct task_struct *, struct task_struct *);
 #endif /* CONFIG_NUMA_BALANCING */
 
 #ifdef CONFIG_SMP
+
+static inline void
+queue_balance_callback(struct rq *rq,
+		       struct callback_head *head,
+		       void (*func)(struct rq *rq))
+{
+	lockdep_assert_held(&rq->lock);
+
+	if (unlikely(head->next))
+		return;
+
+	head->func = (void (*)(struct callback_head *))func;
+	head->next = rq->balance_callback;
+	rq->balance_callback = head;
+}
 
 extern void sched_ttwu_pending(void);
 
@@ -1245,6 +1273,8 @@ static const u32 prio_to_wmult[40] = {
 #define DEQUEUE_SLEEP		0x01
 #define DEQUEUE_SAVE		0x02
 
+#define RETRY_TASK		((void *)-1UL)
+
 struct sched_class {
 	const struct sched_class *next;
 
@@ -1255,15 +1285,24 @@ struct sched_class {
 
 	void (*check_preempt_curr) (struct rq *rq, struct task_struct *p, int flags);
 
-	struct task_struct * (*pick_next_task) (struct rq *rq);
+	/*
+	 * It is the responsibility of the pick_next_task() method that will
+	 * return the next task to call put_prev_task() on the @prev task or
+	 * something equivalent.
+	 *
+	 * May return RETRY_TASK when it finds a higher prio class has runnable
+	 * tasks.
+	 */
+	RH_KABI_REPLACE(struct task_struct * (* pick_next_task) (struct rq *rq),
+			struct task_struct * (*pick_next_task) (struct rq *rq, struct task_struct *prev))
 	void (*put_prev_task) (struct rq *rq, struct task_struct *p);
 
 #ifdef CONFIG_SMP
 	int  (*select_task_rq)(struct task_struct *p, int task_cpu, int sd_flag, int flags);
 	void (*migrate_task_rq)(struct task_struct *p, int next_cpu);
 
-	void (*pre_schedule) (struct rq *this_rq, struct task_struct *task);
-	void (*post_schedule) (struct rq *this_rq);
+	RH_KABI_DEPRECATE_FN(void, pre_schedule, struct rq *this_rq, struct task_struct *task)
+	RH_KABI_DEPRECATE_FN(void, post_schedule, struct rq *this_rq)
 	RH_KABI_DEPRECATE_FN(void, task_waking, struct task_struct *task)
 	void (*task_woken) (struct rq *this_rq, struct task_struct *task);
 
@@ -1298,6 +1337,11 @@ struct sched_class {
 	RH_KABI_EXTEND(void (*task_dead) (struct task_struct *p))
 };
 
+static inline void put_prev_task(struct rq *rq, struct task_struct *prev)
+{
+	prev->sched_class->put_prev_task(rq, prev);
+}
+
 #define sched_class_highest (&stop_sched_class)
 #define for_each_class(class) \
    for (class = sched_class_highest; class; class = class->next)
@@ -1314,7 +1358,6 @@ extern const struct sched_class idle_sched_class;
 extern void update_group_power(struct sched_domain *sd, int cpu);
 
 extern void trigger_load_balance(struct rq *rq, int cpu);
-extern void idle_balance(int this_cpu, struct rq *this_rq);
 
 extern void sched_cpu_activate(unsigned int cpu);
 extern void sched_cpu_deactivate(unsigned int cpu);
@@ -1331,11 +1374,10 @@ static inline void idle_enter_fair(struct rq *this_rq) {}
 static inline void idle_exit_fair(struct rq *this_rq) {}
 #endif
 
-#else	/* CONFIG_SMP */
+#else
 
-static inline void idle_balance(int cpu, struct rq *rq)
-{
-}
+static inline void idle_enter_fair(struct rq *rq) { }
+static inline void idle_exit_fair(struct rq *rq) { }
 
 #endif
 

@@ -1570,7 +1570,7 @@ static int mlx5e_open_xdpsq(struct mlx5e_channel *c,
 		return err;
 
 	csp.tis_lst_sz      = 1;
-	csp.tisn            = c->priv->tisn[0]; /* tc = 0 */
+	csp.tisn            = c->priv->tisn[c->lag_port][0]; /* tc = 0 */
 	csp.cqn             = sq->cq.mcq.cqn;
 	csp.wq_ctrl         = &sq->wq_ctrl;
 	csp.min_inline_mode = sq->min_inline_mode;
@@ -1811,7 +1811,7 @@ static int mlx5e_open_sqs(struct mlx5e_channel *c,
 	for (tc = 0; tc < params->num_tc; tc++) {
 		int txq_ix = c->ix + tc * max_nch;
 
-		err = mlx5e_open_txqsq(c, c->priv->tisn[tc], txq_ix,
+		err = mlx5e_open_txqsq(c, c->priv->tisn[c->lag_port][tc], txq_ix,
 				       params, &cparam->sq, &c->sq[tc], tc);
 		if (err)
 			goto err_close_sqs;
@@ -1915,6 +1915,13 @@ static int mlx5e_set_tx_maxrate(struct net_device *dev, int index, u32 rate)
 	return err;
 }
 
+static u8 mlx5e_enumerate_lag_port(struct mlx5_core_dev *mdev, int ix)
+{
+	u16 port_aff_bias = mlx5_core_is_pf(mdev) ? 0 : MLX5_CAP_GEN(mdev, vhca_id);
+
+	return (ix + port_aff_bias) % mlx5e_get_num_lag_ports(mdev);
+}
+
 static int mlx5e_open_channel(struct mlx5e_priv *priv, int ix,
 			      struct mlx5e_params *params,
 			      struct mlx5e_channel_param *cparam,
@@ -1951,6 +1958,7 @@ static int mlx5e_open_channel(struct mlx5e_priv *priv, int ix,
 #ifdef CONFIG_GENERIC_HARDIRQS
 	c->irq_desc = irq_to_desc(irq);
 #endif
+	c->lag_port = mlx5e_enumerate_lag_port(priv->mdev, ix);
 
 	netif_napi_add(netdev, &c->napi, mlx5e_napi_poll, 64);
 
@@ -3129,20 +3137,16 @@ void mlx5e_close_drop_rq(struct mlx5e_rq *drop_rq)
 	mlx5e_free_cq(&drop_rq->cq);
 }
 
-int mlx5e_create_tis(struct mlx5_core_dev *mdev, int tc,
-		     u32 underlay_qpn, u32 *tisn)
+int mlx5e_create_tis(struct mlx5_core_dev *mdev, void *in, u32 *tisn)
 {
-	u32 in[MLX5_ST_SZ_DW(create_tis_in)] = {0};
 	void *tisc = MLX5_ADDR_OF(create_tis_in, in, ctx);
 
-	MLX5_SET(tisc, tisc, prio, tc << 1);
-	MLX5_SET(tisc, tisc, underlay_qpn, underlay_qpn);
 	MLX5_SET(tisc, tisc, transport_domain, mdev->mlx5e_res.td.tdn);
 
 	if (mlx5_lag_is_lacp_owner(mdev))
 		MLX5_SET(tisc, tisc, strict_lag_tx_port_affinity, 1);
 
-	return mlx5_core_create_tis(mdev, in, sizeof(in), tisn);
+	return mlx5_core_create_tis(mdev, in, MLX5_ST_SZ_BYTES(create_tis_in), tisn);
 }
 
 void mlx5e_destroy_tis(struct mlx5_core_dev *mdev, u32 tisn)
@@ -3150,32 +3154,58 @@ void mlx5e_destroy_tis(struct mlx5_core_dev *mdev, u32 tisn)
 	mlx5_core_destroy_tis(mdev, tisn);
 }
 
+void mlx5e_destroy_tises(struct mlx5e_priv *priv)
+{
+	int tc, i;
+
+	for (i = 0; i < mlx5e_get_num_lag_ports(priv->mdev); i++)
+		for (tc = 0; tc < priv->profile->max_tc; tc++)
+			mlx5e_destroy_tis(priv->mdev, priv->tisn[i][tc]);
+}
+
+static bool mlx5e_lag_should_assign_affinity(struct mlx5_core_dev *mdev)
+{
+	return MLX5_CAP_GEN(mdev, lag_tx_port_affinity) && mlx5e_get_num_lag_ports(mdev) > 1;
+}
+
 int mlx5e_create_tises(struct mlx5e_priv *priv)
 {
+	int tc, i;
 	int err;
-	int tc;
 
-	for (tc = 0; tc < priv->profile->max_tc; tc++) {
-		err = mlx5e_create_tis(priv->mdev, tc, 0, &priv->tisn[tc]);
-		if (err)
-			goto err_close_tises;
+	for (i = 0; i < mlx5e_get_num_lag_ports(priv->mdev); i++) {
+		for (tc = 0; tc < priv->profile->max_tc; tc++) {
+			u32 in[MLX5_ST_SZ_DW(create_tis_in)] = {};
+			void *tisc;
+
+			tisc = MLX5_ADDR_OF(create_tis_in, in, ctx);
+
+			MLX5_SET(tisc, tisc, prio, tc << 1);
+
+			if (mlx5e_lag_should_assign_affinity(priv->mdev))
+				MLX5_SET(tisc, tisc, lag_tx_port_affinity, i + 1);
+
+			err = mlx5e_create_tis(priv->mdev, in, &priv->tisn[i][tc]);
+			if (err)
+				goto err_close_tises;
+		}
 	}
 
 	return 0;
 
 err_close_tises:
-	for (tc--; tc >= 0; tc--)
-		mlx5e_destroy_tis(priv->mdev, priv->tisn[tc]);
+	for (; i >= 0; i--) {
+		for (tc--; tc >= 0; tc--)
+			mlx5e_destroy_tis(priv->mdev, priv->tisn[i][tc]);
+		tc = priv->profile->max_tc;
+	}
 
 	return err;
 }
 
 void mlx5e_cleanup_nic_tx(struct mlx5e_priv *priv)
 {
-	int tc;
-
-	for (tc = 0; tc < priv->profile->max_tc; tc++)
-		mlx5e_destroy_tis(priv->mdev, priv->tisn[tc]);
+	mlx5e_destroy_tises(priv);
 }
 
 static void mlx5e_build_indir_tir_ctx(struct mlx5e_priv *priv,
@@ -4361,11 +4391,35 @@ static int mlx5e_xdp(struct net_device *dev, struct netdev_xdp *xdp)
 	}
 }
 
+static int mlx5e_pf_get_phys_port_name(struct net_device *dev,
+					char *buf, size_t len)
+{
+	struct mlx5e_priv *priv = netdev_priv(dev);
+	struct mlx5_eswitch *esw;
+	unsigned int fn;
+	int ret;
+
+	esw = priv->mdev->priv.eswitch;
+	if (!esw || esw->mode != SRIOV_OFFLOADS)
+		return -EOPNOTSUPP;
+
+	fn = PCI_FUNC(priv->mdev->pdev->devfn);
+	if (fn >= MLX5_MAX_PORTS)
+		return -EOPNOTSUPP;
+
+	ret = snprintf(buf, len, "p%d", fn);
+	if (ret >= len)
+		return -EOPNOTSUPP;
+
+	return 0;
+}
+
 const struct net_device_ops mlx5e_netdev_ops = {
 	.ndo_size                = sizeof(struct net_device_ops),
 	.ndo_open                = mlx5e_open,
 	.ndo_stop                = mlx5e_close,
 	.ndo_start_xmit          = mlx5e_xmit,
+	.extended.ndo_get_phys_port_name  = mlx5e_pf_get_phys_port_name,
 	.extended.ndo_setup_tc_rh = mlx5e_setup_tc,
 	.ndo_select_queue        = mlx5e_select_queue,
 	.ndo_get_stats64         = mlx5e_get_stats,
