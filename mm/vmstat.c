@@ -212,7 +212,7 @@ void set_pgdat_percpu_threshold(pg_data_t *pgdat,
 			continue;
 
 		threshold = (*calculate_pressure)(zone);
-		for_each_possible_cpu(cpu)
+		for_each_online_cpu(cpu)
 			per_cpu_ptr(zone->pageset, cpu)->stat_threshold
 							= threshold;
 	}
@@ -1020,7 +1020,7 @@ static void pagetypeinfo_showblockcount_print(struct seq_file *m,
 	seq_putc(m, '\n');
 }
 
-/* Print out the free pages at each order for each migratetype */
+/* Print out the number of pageblocks for each migratetype */
 static int pagetypeinfo_showblockcount(struct seq_file *m, void *arg)
 {
 	int mtype;

@@ -229,7 +229,7 @@ static void * r10buf_pool_alloc(gfp_t gfp_flags, void *data)
 
 out_free_pages:
 	while (--j >= 0)
-		resync_free_pages(&rps[j * 2]);
+		resync_free_pages(&rps[j]);
 
 	j = 0;
 out_free_bio:
@@ -1592,10 +1592,9 @@ static bool raid10_make_request(struct mddev *mddev, struct bio * bio)
 	int chunk_sects = chunk_mask + 1;
 	int sectors;
 
-	if (unlikely(bio->bi_rw & REQ_FLUSH)) {
-		md_flush_request(mddev, bio);
+	if (unlikely(bio->bi_rw & REQ_FLUSH)
+	    && md_flush_request(mddev, bio))
 		return true;
-	}
 
 	/* If this request crosses a chunk boundary, we need to
 	 * split it.  This will only happen for 1 PAGE (or less) requests.

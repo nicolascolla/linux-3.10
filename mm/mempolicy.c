@@ -2099,8 +2099,8 @@ retry_cpuset:
 
 	nmask = policy_nodemask(gfp, pol);
 	zl = policy_zonelist(gfp, pol, node);
-	mpol_cond_put(pol);
 	page = __alloc_pages_nodemask(gfp, order, zl, nmask);
+	mpol_cond_put(pol);
 out:
 	if (unlikely(!page && read_mems_allowed_retry(cpuset_mems_cookie)))
 		goto retry_cpuset;
@@ -2155,6 +2155,16 @@ retry_cpuset:
 	return page;
 }
 EXPORT_SYMBOL(alloc_pages_current);
+
+int vma_dup_policy(struct vm_area_struct *src, struct vm_area_struct *dst)
+{
+	struct mempolicy *pol = mpol_dup(vma_policy(src));
+
+	if (IS_ERR(pol))
+		return PTR_ERR(pol);
+	dst->vm_policy = pol;
+	return 0;
+}
 
 /*
  * If mpol_dup() sees current->cpuset == cpuset_being_rebound, then it
@@ -2213,6 +2223,9 @@ bool __mpol_equal(struct mempolicy *a, struct mempolicy *b)
 	case MPOL_INTERLEAVE:
 		return !!nodes_equal(a->v.nodes, b->v.nodes);
 	case MPOL_PREFERRED:
+		/* a's ->flags is the same as b's */
+		if (a->flags & MPOL_F_LOCAL)
+			return true;
 		return a->v.preferred_node == b->v.preferred_node;
 	default:
 		BUG();
@@ -2399,6 +2412,23 @@ out:
 	mpol_cond_put(pol);
 
 	return ret;
+}
+
+/*
+ * Drop the (possibly final) reference to task->mempolicy.  It needs to be
+ * dropped after task->mempolicy is set to NULL so that any allocation done as
+ * part of its kmem_cache_free(), such as by KASAN, doesn't reference a freed
+ * policy.
+ */
+void mpol_put_task_policy(struct task_struct *task)
+{
+	struct mempolicy *pol;
+
+	task_lock(task);
+	pol = task->mempolicy;
+	task->mempolicy = NULL;
+	task_unlock(task);
+	mpol_put(pol);
 }
 
 static void sp_delete(struct shared_policy *sp, struct sp_node *n)

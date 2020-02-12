@@ -907,7 +907,7 @@ static void __meminit __init_single_pfn(unsigned long pfn, unsigned long zone,
 }
 
 #ifdef CONFIG_DEFERRED_STRUCT_PAGE_INIT
-static void init_reserved_page(unsigned long pfn)
+static void __meminit init_reserved_page(unsigned long pfn)
 {
 	pg_data_t *pgdat;
 	int nid, zid;
@@ -938,7 +938,7 @@ static inline void init_reserved_page(unsigned long pfn)
  * marks the pages PageReserved. The remaining valid pages are later
  * sent to the buddy page allocator.
  */
-void __meminit reserve_bootmem_region(unsigned long start, unsigned long end)
+void __meminit reserve_bootmem_region(phys_addr_t start, phys_addr_t end)
 {
 	unsigned long start_pfn = PFN_DOWN(start);
 	unsigned long end_pfn = PFN_UP(end);
@@ -1092,15 +1092,18 @@ static void __init deferred_free_range(struct page *page,
 		return;
 
 	/* Free a large naturally-aligned chunk if possible */
-	if (nr_pages == MAX_ORDER_NR_PAGES &&
-	    (pfn & (MAX_ORDER_NR_PAGES-1)) == 0) {
+	if (nr_pages == pageblock_nr_pages &&
+	    (pfn & (pageblock_nr_pages - 1)) == 0) {
 		set_pageblock_migratetype(page, MIGRATE_MOVABLE);
-		__free_pages_boot_core(page, pfn, MAX_ORDER-1);
+		__free_pages_boot_core(page, pfn, pageblock_order);
 		return;
 	}
 
-	for (i = 0; i < nr_pages; i++, page++, pfn++)
+	for (i = 0; i < nr_pages; i++, page++, pfn++) {
+		if ((pfn & (pageblock_nr_pages - 1)) == 0)
+			set_pageblock_migratetype(page, MIGRATE_MOVABLE);
 		__free_pages_boot_core(page, pfn, 0);
+	}
 }
 
 /* Completion tracking for deferred_init_memmap() threads */
@@ -1255,9 +1258,9 @@ static int __init deferred_init_memmap(void *data)
 
 			/*
 			 * Ensure pfn_valid is checked every
-			 * MAX_ORDER_NR_PAGES for memory holes
+			 * pageblock_nr_pages for memory holes
 			 */
-			if ((pfn & (MAX_ORDER_NR_PAGES - 1)) == 0) {
+			if ((pfn & (pageblock_nr_pages - 1)) == 0) {
 				if (!pfn_valid(pfn)) {
 					page = NULL;
 					goto free_range;
@@ -1270,7 +1273,7 @@ static int __init deferred_init_memmap(void *data)
 			}
 
 			/* Minimise pfn page lookups and scheduler checks */
-			if (page && (pfn & (MAX_ORDER_NR_PAGES - 1)) != 0) {
+			if (page && (pfn & (pageblock_nr_pages - 1)) != 0) {
 				page++;
 			} else {
 				nr_pages += nr_to_free;
@@ -1306,6 +1309,9 @@ free_range:
 			free_base_page = NULL;
 			free_base_pfn = nr_to_free = 0;
 		}
+		/* Free the last block of pages to allocator */
+		nr_pages += nr_to_free;
+		deferred_free_range(free_base_page, free_base_pfn, nr_to_free);
 
 		first_init_pfn = max(end_pfn, first_init_pfn);
 	}
@@ -2529,7 +2535,7 @@ static bool zone_local(struct zone *local_zone, struct zone *zone)
 
 static bool zone_allows_reclaim(struct zone *local_zone, struct zone *zone)
 {
-	return node_distance(zone_to_nid(local_zone), zone_to_nid(zone)) <
+	return node_distance(zone_to_nid(local_zone), zone_to_nid(zone)) <=
 				RECLAIM_DISTANCE;
 }
 
@@ -2605,7 +2611,7 @@ zonelist_scan:
 		 */
 		if (alloc_flags & ALLOC_FAIR) {
 			if (!zone_local(preferred_zone, zone))
-				continue;
+				break;
 			if (zone_page_state(zone, NR_ALLOC_BATCH) <= 0)
 				continue;
 		}
@@ -2879,6 +2885,14 @@ __alloc_pages_may_oom(gfp_t gfp_mask, unsigned int order,
 		schedule_timeout_uninterruptible(1);
 		return NULL;
 	}
+
+	/*
+	 * PM-freezer should be notified that there might be an OOM killer on
+	 * its way to kill and wake somebody up. This is too early and we might
+	 * end up not killing anything but false positives are acceptable.
+	 * See freeze_processes.
+	 */
+	note_oom_kill();
 
 	/*
 	 * Go through the zonelist yet one more time, keep very high watermark
@@ -7251,6 +7265,7 @@ static int __alloc_contig_migrate_range(struct compact_control *cc,
  *			#MIGRATE_MOVABLE or #MIGRATE_CMA).  All pageblocks
  *			in range must have the same migratetype and it must
  *			be either of the two.
+ * @gfp_mask:	GFP mask to use during compaction
  *
  * The PFN range does not have to be pageblock or MAX_ORDER_NR_PAGES
  * aligned, however it's the caller's responsibility to guarantee that
@@ -7264,7 +7279,7 @@ static int __alloc_contig_migrate_range(struct compact_control *cc,
  * need to be freed with free_contig_range().
  */
 int alloc_contig_range(unsigned long start, unsigned long end,
-		       unsigned migratetype)
+		       unsigned migratetype, gfp_t gfp_mask)
 {
 	unsigned long outer_start, outer_end;
 	int ret = 0, order;
@@ -7275,6 +7290,7 @@ int alloc_contig_range(unsigned long start, unsigned long end,
 		.zone = page_zone(pfn_to_page(start)),
 		.sync = true,
 		.ignore_skip_hint = true,
+		.gfp_mask = memalloc_noio_flags(gfp_mask),
 	};
 	INIT_LIST_HEAD(&cc.migratepages);
 
