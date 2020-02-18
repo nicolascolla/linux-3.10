@@ -709,7 +709,7 @@ xfs_reserve_blocks(
 	do {
 		free = percpu_counter_sum(&mp->m_fdblocks) -
 						mp->m_alloc_set_aside;
-		if (!free)
+		if (free <= 0)
 			break;
 
 		delta = request - mp->m_resblks;
@@ -803,7 +803,7 @@ xfs_do_force_shutdown(
 
 	if (!(flags & SHUTDOWN_FORCE_UMOUNT)) {
 		xfs_notice(mp,
-	"%s(0x%x) called from line %d of file %s.  Return address = 0x%p",
+	"%s(0x%x) called from line %d of file %s.  Return address = %p",
 			__func__, flags, lnnum, fname, __return_address);
 	}
 	/*

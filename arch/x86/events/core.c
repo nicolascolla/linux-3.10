@@ -260,10 +260,13 @@ static bool check_hw_exists(void)
 	return true;
 
 msr_fail:
-	printk(KERN_CONT "Broken PMU hardware detected, using software events only.\n");
-	printk("%sFailed to access perfctr msr (MSR %x is %Lx)\n",
-		boot_cpu_has(X86_FEATURE_HYPERVISOR) ? KERN_INFO : KERN_ERR,
-		reg, val_new);
+	if (boot_cpu_has(X86_FEATURE_HYPERVISOR)) {
+		pr_cont("PMU not available due to virtualization, using software events only.\n");
+	} else {
+		pr_cont("Broken PMU hardware detected, using software events only.\n");
+		pr_err("Failed to access perfctr msr (MSR %x is %Lx)\n",
+		       reg, val_new);
+	}
 
 	return false;
 }
@@ -548,6 +551,21 @@ int x86_pmu_hw_config(struct perf_event *event)
 	if (event->attr.sample_period && x86_pmu.limit_period) {
 		if (x86_pmu.limit_period(event, event->attr.sample_period) >
 				event->attr.sample_period)
+			return -EINVAL;
+	}
+
+	/* sample_regs_user never support XMM registers */
+	if (unlikely(event->attr.sample_regs_user & PEBS_XMM_REGS))
+		return -EINVAL;
+	/*
+	 * Besides the general purpose registers, XMM registers may
+	 * be collected in PEBS on some platforms, e.g. Icelake
+	 */
+	if (unlikely(event->attr.sample_regs_intr & PEBS_XMM_REGS)) {
+		if (x86_pmu.pebs_no_xmm_regs)
+			return -EINVAL;
+
+		if (!event->attr.precise_ip)
 			return -EINVAL;
 	}
 

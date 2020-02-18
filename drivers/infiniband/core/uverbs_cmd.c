@@ -58,8 +58,6 @@
 static int uverbs_response(struct uverbs_attr_bundle *attrs, const void *resp,
 			   size_t resp_len)
 {
-	u8 __user *cur = attrs->ucore.outbuf + resp_len;
-	u8 __user *end = attrs->ucore.outbuf + attrs->ucore.outlen;
 	int ret;
 
 	if (uverbs_attr_is_valid(attrs, UVERBS_ATTR_CORE_OUT))
@@ -70,11 +68,15 @@ static int uverbs_response(struct uverbs_attr_bundle *attrs, const void *resp,
 			 min(attrs->ucore.outlen, resp_len)))
 		return -EFAULT;
 
-	/* Zero fill any extra memory that user space might have provided */
-	for (; cur < end; cur++) {
-		ret = put_user(0, cur);
+	if (resp_len < attrs->ucore.outlen) {
+		/*
+		 * Zero fill any extra memory that user
+		 * space might have provided.
+		 */
+		ret = clear_user(attrs->ucore.outbuf + resp_len,
+				 attrs->ucore.outlen - resp_len);
 		if (ret)
-			return ret;
+			return -EFAULT;
 	}
 
 	return 0;
@@ -160,7 +162,7 @@ static const void __user *uverbs_request_next_ptr(struct uverbs_req_iter *iter,
 	const void __user *res = iter->cur;
 
 	if (iter->cur + len > iter->end)
-		return ERR_PTR(-ENOSPC);
+		return (void __force __user *)ERR_PTR(-ENOSPC);
 	iter->cur += len;
 	return res;
 }
@@ -920,6 +922,11 @@ static int ib_uverbs_alloc_mw(struct uverbs_attr_bundle *attrs)
 		goto err_free;
 	}
 
+	if (cmd.mw_type != IB_MW_TYPE_1 && cmd.mw_type != IB_MW_TYPE_2) {
+		ret = -EINVAL;
+		goto err_put;
+	}
+
 	mw = pd->device->alloc_mw(pd, cmd.mw_type, &attrs->driver_udata);
 	if (IS_ERR(mw)) {
 		ret = PTR_ERR(mw);
@@ -1443,7 +1450,6 @@ static int create_qp(struct uverbs_attr_bundle *attrs,
 		if (ret)
 			goto err_cb;
 
-		qp->real_qp	  = qp;
 		qp->pd		  = pd;
 		qp->send_cq	  = attr.send_cq;
 		qp->recv_cq	  = attr.recv_cq;
@@ -2555,7 +2561,7 @@ static int ib_uverbs_detach_mcast(struct uverbs_attr_bundle *attrs)
 	struct ib_uqp_object         *obj;
 	struct ib_qp                 *qp;
 	struct ib_uverbs_mcast_entry *mcast;
-	int                           ret = -EINVAL;
+	int                           ret;
 	bool                          found = false;
 
 	ret = uverbs_request(attrs, &cmd, sizeof(cmd));

@@ -1005,7 +1005,6 @@ struct ca0132_spec {
 	unsigned int scp_resp_header;
 	unsigned int scp_resp_data[4];
 	unsigned int scp_resp_count;
-	bool alt_firmware_present;
 	bool startup_check_entered;
 	bool dsp_reload;
 
@@ -1189,6 +1188,7 @@ static const struct snd_pci_quirk ca0132_quirks[] = {
 	SND_PCI_QUIRK(0x1028, 0x0708, "Alienware 15 R2 2016", QUIRK_ALIENWARE),
 	SND_PCI_QUIRK(0x1102, 0x0010, "Sound Blaster Z", QUIRK_SBZ),
 	SND_PCI_QUIRK(0x1102, 0x0023, "Sound Blaster Z", QUIRK_SBZ),
+	SND_PCI_QUIRK(0x1102, 0x0027, "Sound Blaster Z", QUIRK_SBZ),
 	SND_PCI_QUIRK(0x1102, 0x0033, "Sound Blaster ZxR", QUIRK_SBZ),
 	SND_PCI_QUIRK(0x1458, 0xA016, "Recon3Di", QUIRK_R3DI),
 	SND_PCI_QUIRK(0x1458, 0xA026, "Gigabyte G1.Sniper Z97", QUIRK_R3DI),
@@ -2732,7 +2732,7 @@ static bool is_last(const struct dsp_image_seg *p)
 
 static size_t dsp_sizeof(const struct dsp_image_seg *p)
 {
-	return sizeof(*p) + p->count*sizeof(u32);
+	return struct_size(p, data, p->count);
 }
 
 static const struct dsp_image_seg *get_next_seg_ptr(
@@ -5994,7 +5994,7 @@ static int ca0132_alt_volume_put(struct snd_kcontrol *kcontrol,
 	int ch = get_amp_channels(kcontrol);
 	long *valp = ucontrol->value.integer.value;
 	hda_nid_t vnid = 0;
-	int changed = 1;
+	int changed;
 
 	switch (nid) {
 	case 0x02:
@@ -7518,7 +7518,7 @@ static bool ca0132_download_dsp_images(struct hda_codec *codec)
 	bool dsp_loaded = false;
 	struct ca0132_spec *spec = codec->spec;
 	const struct dsp_image_seg *dsp_os_image;
-	const struct firmware *fw_entry;
+	const struct firmware *fw_entry = NULL;
 	/*
 	 * Alternate firmwares for different variants. The Recon3Di apparently
 	 * can use the default firmware, but I'll leave the option in case
@@ -7529,33 +7529,26 @@ static bool ca0132_download_dsp_images(struct hda_codec *codec)
 	case QUIRK_R3D:
 	case QUIRK_AE5:
 		if (request_firmware(&fw_entry, DESKTOP_EFX_FILE,
-					codec->card->dev) != 0) {
+					codec->card->dev) != 0)
 			codec_dbg(codec, "Desktop firmware not found.");
-			spec->alt_firmware_present = false;
-		} else {
+		else
 			codec_dbg(codec, "Desktop firmware selected.");
-			spec->alt_firmware_present = true;
-		}
 		break;
 	case QUIRK_R3DI:
 		if (request_firmware(&fw_entry, R3DI_EFX_FILE,
-					codec->card->dev) != 0) {
+					codec->card->dev) != 0)
 			codec_dbg(codec, "Recon3Di alt firmware not detected.");
-			spec->alt_firmware_present = false;
-		} else {
+		else
 			codec_dbg(codec, "Recon3Di firmware selected.");
-			spec->alt_firmware_present = true;
-		}
 		break;
 	default:
-		spec->alt_firmware_present = false;
 		break;
 	}
 	/*
 	 * Use default ctefx.bin if no alt firmware is detected, or if none
 	 * exists for your particular codec.
 	 */
-	if (!spec->alt_firmware_present) {
+	if (!fw_entry) {
 		codec_dbg(codec, "Default firmware selected.");
 		if (request_firmware(&fw_entry, EFX_FILE,
 					codec->card->dev) != 0)

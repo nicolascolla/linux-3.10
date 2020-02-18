@@ -608,6 +608,13 @@ static int pppol2tp_connect(struct socket *sock, struct sockaddr *uservaddr,
 	lock_sock(sk);
 
 	error = -EINVAL;
+
+	if (sockaddr_len != sizeof(struct sockaddr_pppol2tp) &&
+	    sockaddr_len != sizeof(struct sockaddr_pppol2tpv3) &&
+	    sockaddr_len != sizeof(struct sockaddr_pppol2tpin6) &&
+	    sockaddr_len != sizeof(struct sockaddr_pppol2tpv3in6))
+		goto end;
+
 	if (sp->sa_protocol != PX_PROTO_OL2TP)
 		goto end;
 
@@ -682,6 +689,15 @@ static int pppol2tp_connect(struct socket *sock, struct sockaddr *uservaddr,
 				.encap = L2TP_ENCAPTYPE_UDP,
 				.debug = 0,
 			};
+
+			/* Prevent l2tp_tunnel_register() from trying to set up
+			 * a kernel socket.
+			 */
+			if (fd < 0) {
+				error = -EBADF;
+				goto end;
+			}
+
 			error = l2tp_tunnel_create(sock_net(sk), fd, ver, tunnel_id, peer_tunnel_id, &tcfg, &tunnel);
 			if (error < 0)
 				goto end;
@@ -875,10 +891,8 @@ static int pppol2tp_getname(struct socket *sock, struct sockaddr *uaddr,
 
 	pls = l2tp_session_priv(session);
 	tunnel = l2tp_sock_to_tunnel(pls->tunnel_sock);
-	if (tunnel == NULL) {
-		error = -EBADF;
+	if (tunnel == NULL)
 		goto end_put_sess;
-	}
 
 	inet = inet_sk(tunnel->sock);
 	if ((tunnel->version == 2) && (tunnel->sock->sk_family == AF_INET)) {
@@ -956,12 +970,11 @@ static int pppol2tp_getname(struct socket *sock, struct sockaddr *uaddr,
 	}
 
 	*usockaddr_len = len;
+	error = 0;
 
 	sock_put(pls->tunnel_sock);
 end_put_sess:
 	sock_put(sk);
-	error = 0;
-
 end:
 	return error;
 }
@@ -1390,8 +1403,6 @@ static int pppol2tp_setsockopt(struct socket *sock, int level, int optname,
 	} else
 		err = pppol2tp_session_setsockopt(sk, session, optname, val);
 
-	err = 0;
-
 end_put_sess:
 	sock_put(sk);
 end:
@@ -1514,8 +1525,13 @@ static int pppol2tp_getsockopt(struct socket *sock, int level, int optname,
 
 		err = pppol2tp_tunnel_getsockopt(sk, tunnel, optname, &val);
 		sock_put(ps->tunnel_sock);
-	} else
+		if (err)
+			goto end_put_sess;
+	} else {
 		err = pppol2tp_session_getsockopt(sk, session, optname, &val);
+		if (err)
+			goto end_put_sess;
+	}
 
 	err = -EFAULT;
 	if (put_user(len, optlen))

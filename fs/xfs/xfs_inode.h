@@ -433,7 +433,7 @@ xfs_extlen_t	xfs_get_extsz_hint(struct xfs_inode *ip);
 
 int		xfs_dir_ialloc(struct xfs_trans **, struct xfs_inode *, umode_t,
 			       xfs_nlink_t, dev_t, prid_t,
-			       struct xfs_inode **, int *);
+			       struct xfs_inode **);
 
 /* from xfs_file.c */
 enum xfs_prealloc_flags {
@@ -492,5 +492,7 @@ do { \
 } while (0)
 
 extern struct kmem_zone	*xfs_inode_zone;
+
+bool xfs_inode_verify_forks(struct xfs_inode *ip);
 
 #endif	/* __XFS_INODE_H__ */

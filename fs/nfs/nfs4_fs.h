@@ -161,6 +161,7 @@ enum {
 	NFS_STATE_POSIX_LOCKS,		/* Posix locks are supported */
 	NFS_STATE_RECOVERY_FAILED,	/* OPEN stateid state recovery failed */
 	NFS_STATE_MAY_NOTIFY_LOCK,	/* server may CB_NOTIFY_LOCK */
+	NFS_STATE_CHANGE_WAIT,		/* A state changing operation is outstanding */
 };
 
 struct nfs4_state {
@@ -184,6 +185,8 @@ struct nfs4_state {
 	unsigned int n_rdwr;		/* Number of read/write references */
 	fmode_t state;			/* State on the server (R,W, or RW) */
 	atomic_t count;
+
+	wait_queue_head_t waitq;
 };
 
 
@@ -445,6 +448,10 @@ extern int nfs4_set_lock_state(struct nfs4_state *state, struct file_lock *fl);
 extern int nfs4_select_rw_stateid(struct nfs4_state *, fmode_t,
 		const struct nfs_lock_context *, nfs4_stateid *,
 		struct rpc_cred **);
+extern bool nfs4_refresh_open_stateid(nfs4_stateid *dst,
+		struct nfs4_state *state);
+extern bool nfs4_copy_open_stateid(nfs4_stateid *dst,
+		struct nfs4_state *state);
 
 extern struct nfs_seqid *nfs_alloc_seqid(struct nfs_seqid_counter *counter, gfp_t gfp_mask);
 extern int nfs_wait_on_sequence(struct nfs_seqid *seqid, struct rpc_task *task);

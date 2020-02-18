@@ -1060,6 +1060,14 @@ u64 kvm_get_arch_capabilities(void)
 	rdmsrl_safe(MSR_IA32_ARCH_CAPABILITIES, &data);
 
 	/*
+	 * If nx_huge_pages is enabled, KVM's shadow paging will ensure that
+	 * the nested hypervisor runs with NX huge pages.  If it is not,
+	 * L1 is anyway vulnerable to ITLB_MULTIHIT explots from other
+	 * L1 guests, so it need not worry about its own (L2) guests.
+	 */
+	data |= ARCH_CAP_PSCHANGE_MC_NO;
+
+	/*
 	 * If we're doing cache flushes (either "always" or "cond")
 	 * we will do one whenever the guest does a vmlaunch/vmresume.
 	 * If an outer hypervisor is doing the cache flush for us
@@ -1217,20 +1225,25 @@ static int do_set_msr(struct kvm_vcpu *vcpu, unsigned index, u64 *data)
 }
 
 #ifdef CONFIG_X86_64
+struct pvclock_clock {
+	int vclock_mode;
+	u64 cycle_last;
+	u64 mask;
+	u32 mult;
+	u32 shift;
+};
+
 struct pvclock_gtod_data {
 	seqcount_t	seq;
 
-	struct { /* extract of a clocksource struct */
-		int vclock_mode;
-		u64	cycle_last;
-		u64	mask;
-		u32	mult;
-		u32	shift;
-	} clock;
+	struct pvclock_clock clock; /* extract of a clocksource struct */
+	struct pvclock_clock raw_clock; /* extract of a clocksource struct */
 
+	u64		boot_ns_raw;
 	u64		boot_ns;
 	u64		nsec_base;
 	u64		wall_time_sec;
+	u64		monotonic_raw_nsec;
 };
 
 static struct pvclock_gtod_data pvclock_gtod_data;
@@ -1238,12 +1251,14 @@ static struct pvclock_gtod_data pvclock_gtod_data;
 static void update_pvclock_gtod(struct timekeeper *tk)
 {
 	struct pvclock_gtod_data *vdata = &pvclock_gtod_data;
-	u64 boot_ns;
+	u64 boot_ns, boot_ns_raw;
 
 	boot_ns = timespec_to_ns(&tk->total_sleep_time)
 		+ tk->wall_to_monotonic.tv_sec * (u64)NSEC_PER_SEC
 		+ tk->wall_to_monotonic.tv_nsec
 		+ tk->xtime_sec * (u64)NSEC_PER_SEC;
+
+	boot_ns_raw = ktime_to_ns(ktime_add(tk->tkr_raw.base, tk->offs_boot));
 
 	write_seqcount_begin(&vdata->seq);
 
@@ -1254,10 +1269,19 @@ static void update_pvclock_gtod(struct timekeeper *tk)
 	vdata->clock.mult		= tk->tkr_mono.mult;
 	vdata->clock.shift		= tk->tkr_mono.shift;
 
+	vdata->raw_clock.vclock_mode    = tk->tkr_raw.clock->archdata.vclock_mode;
+	vdata->raw_clock.cycle_last     = tk->tkr_raw.clock->cycle_last;
+	vdata->raw_clock.mask           = tk->tkr_raw.clock->mask;
+	vdata->raw_clock.mult           = tk->tkr_raw.mult;
+	vdata->raw_clock.shift          = tk->tkr_raw.shift;
+
 	vdata->boot_ns                  = boot_ns;
 	vdata->nsec_base		= tk->tkr_mono.xtime_nsec;
 
 	vdata->wall_time_sec            = tk->xtime_sec;
+
+	vdata->boot_ns_raw              = boot_ns_raw;
+	vdata->monotonic_raw_nsec       = tk->tkr_raw.xtime_nsec;
 
 	write_seqcount_end(&vdata->seq);
 }
@@ -1671,18 +1695,17 @@ static u64 read_tsc(void)
 	return last;
 }
 
-static inline u64 vgettsc(u64 *cycle_now)
+static inline u64 vgettsc(struct pvclock_clock *clock, u64 *cycle_now)
 {
 	long v;
-	struct pvclock_gtod_data *gtod = &pvclock_gtod_data;
 
 	*cycle_now = read_tsc();
 
-	v = (*cycle_now - gtod->clock.cycle_last) & gtod->clock.mask;
-	return v * gtod->clock.mult;
+	v = (*cycle_now - clock->cycle_last) & clock->mask;
+	return v * clock->mult;
 }
 
-static int do_monotonic_boot(s64 *t, u64 *cycle_now)
+static int do_monotonic_raw(s64 *t, u64 *cycle_now)
 {
 	struct pvclock_gtod_data *gtod = &pvclock_gtod_data;
 	unsigned long seq;
@@ -1691,11 +1714,12 @@ static int do_monotonic_boot(s64 *t, u64 *cycle_now)
 
 	do {
 		seq = read_seqcount_begin(&gtod->seq);
-		mode = gtod->clock.vclock_mode;
-		ns = gtod->nsec_base;
-		ns += vgettsc(cycle_now);
+		mode = gtod->raw_clock.vclock_mode;
+		ns = gtod->monotonic_raw_nsec;
+		ns += vgettsc(&gtod->raw_clock, cycle_now);
+
 		ns >>= gtod->clock.shift;
-		ns += gtod->boot_ns;
+		ns += gtod->boot_ns_raw;
 	} while (unlikely(read_seqcount_retry(&gtod->seq, seq)));
 	*t = ns;
 
@@ -1714,7 +1738,7 @@ static int do_realtime(struct timespec *ts, u64 *cycle_now)
 		mode = gtod->clock.vclock_mode;
 		ts->tv_sec = gtod->wall_time_sec;
 		ns = gtod->nsec_base;
-		ns += vgettsc(cycle_now);
+		ns += vgettsc(&gtod->clock, cycle_now);
 		ns >>= gtod->clock.shift;
 	} while (unlikely(read_seqcount_retry(&gtod->seq, seq)));
 
@@ -1731,7 +1755,7 @@ static bool kvm_get_time_and_clockread(s64 *kernel_ns, u64 *cycle_now)
 	if (pvclock_gtod_data.clock.vclock_mode != VCLOCK_TSC)
 		return false;
 
-	return do_monotonic_boot(kernel_ns, cycle_now) == VCLOCK_TSC;
+	return do_monotonic_raw(kernel_ns, cycle_now) == VCLOCK_TSC;
 }
 
 /* returns true if host is using tsc clocksource */

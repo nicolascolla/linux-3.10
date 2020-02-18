@@ -141,6 +141,7 @@ struct xfs_buf_ops {
 	char *name;
 	void (*verify_read)(struct xfs_buf *);
 	void (*verify_write)(struct xfs_buf *);
+	xfs_failaddr_t (*verify_struct)(struct xfs_buf *bp);
 };
 
 typedef struct xfs_buf {
@@ -217,20 +218,9 @@ typedef struct xfs_buf {
 } xfs_buf_t;
 
 /* Finding and Reading Buffers */
-struct xfs_buf *_xfs_buf_find(struct xfs_buftarg *target,
-			      struct xfs_buf_map *map, int nmaps,
-			      xfs_buf_flags_t flags, struct xfs_buf *new_bp);
-
-static inline struct xfs_buf *
-xfs_incore(
-	struct xfs_buftarg	*target,
-	xfs_daddr_t		blkno,
-	size_t			numblks,
-	xfs_buf_flags_t		flags)
-{
-	DEFINE_SINGLE_BUF_MAP(map, blkno, numblks);
-	return _xfs_buf_find(target, &map, 1, flags, NULL);
-}
+struct xfs_buf *xfs_buf_incore(struct xfs_buftarg *target,
+			   xfs_daddr_t blkno, size_t numblks,
+			   xfs_buf_flags_t flags);
 
 struct xfs_buf *_xfs_buf_alloc(struct xfs_buftarg *target,
 			       struct xfs_buf_map *map, int nmaps,
@@ -316,10 +306,18 @@ extern void xfs_buf_unlock(xfs_buf_t *);
 /* Buffer Read and Write Routines */
 extern int xfs_bwrite(struct xfs_buf *bp);
 extern void xfs_buf_ioend(struct xfs_buf *bp);
-extern void xfs_buf_ioerror(xfs_buf_t *, int);
+extern void __xfs_buf_ioerror(struct xfs_buf *bp, int error,
+		xfs_failaddr_t failaddr);
+#define xfs_buf_ioerror(bp, err) __xfs_buf_ioerror((bp), (err), __this_address)
 extern void xfs_buf_ioerror_alert(struct xfs_buf *, const char *func);
-extern void xfs_buf_submit(struct xfs_buf *bp);
-extern int xfs_buf_submit_wait(struct xfs_buf *bp);
+
+extern int __xfs_buf_submit(struct xfs_buf *bp, bool);
+static inline int xfs_buf_submit(struct xfs_buf *bp)
+{
+	bool wait = bp->b_flags & XBF_ASYNC ? false : true;
+	return __xfs_buf_submit(bp, wait);
+}
+
 extern void xfs_buf_iomove(xfs_buf_t *, size_t, size_t, void *,
 				xfs_buf_rw_t);
 #define xfs_buf_zero(bp, off, len) \

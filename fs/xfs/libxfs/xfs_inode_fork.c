@@ -35,6 +35,8 @@
 #include "xfs_da_format.h"
 #include "xfs_da_btree.h"
 #include "xfs_dir2_priv.h"
+#include "xfs_attr_leaf.h"
+#include "xfs_shared.h"
 
 kmem_zone_t *xfs_ifork_zone;
 
@@ -98,15 +100,6 @@ xfs_iformat_fork(
 		return error;
 	}
 
-	/* Check inline dir contents. */
-	if (S_ISDIR(inode->i_mode) && dip->di_format == XFS_DINODE_FMT_LOCAL) {
-		error = xfs_dir2_sf_verify(ip);
-		if (error) {
-			xfs_idestroy_fork(ip, XFS_DATA_FORK);
-			return error;
-		}
-	}
-
 	if (!XFS_DFORK_Q(dip))
 		return 0;
 
@@ -117,17 +110,6 @@ xfs_iformat_fork(
 	case XFS_DINODE_FMT_LOCAL:
 		atp = (xfs_attr_shortform_t *)XFS_DFORK_APTR(dip);
 		size = be16_to_cpu(atp->hdr.totsize);
-
-		if (unlikely(size < sizeof(struct xfs_attr_sf_hdr))) {
-			xfs_warn(ip->i_mount,
-				"corrupt inode %Lu (bad attr fork size %Ld).",
-				(unsigned long long) ip->i_ino,
-				(long long) size);
-			XFS_CORRUPTION_ERROR("xfs_iformat(8)",
-					     XFS_ERRLEVEL_LOW,
-					     ip->i_mount, dip);
-			return -EFSCORRUPTED;
-		}
 
 		error = xfs_iformat_local(ip, dip, XFS_ATTR_FORK, size);
 		break;
@@ -157,12 +139,25 @@ xfs_init_local_fork(
 	int			size)
 {
 	struct xfs_ifork	*ifp = XFS_IFORK_PTR(ip, whichfork);
-	int			real_size = 0;
+	int			mem_size = size, real_size = 0;
+	bool			zero_terminate;
+
+	/*
+	 * If we are using the local fork to store a symlink body we need to
+	 * zero-terminate it so that we can pass it back to the VFS directly.
+	 * Overallocate the in-memory fork by one for that and add a zero
+	 * to terminate it below.
+	 */
+	zero_terminate = S_ISLNK(VFS_I(ip)->i_mode);
+	if (zero_terminate)
+		mem_size++;
 
 	if (size) {
-		real_size = roundup(size, 4);
+		real_size = roundup(mem_size, 4);
 		ifp->if_u1.if_data = kmem_alloc(real_size, KM_SLEEP | KM_NOFS);
 		memcpy(ifp->if_u1.if_data, data, size);
+		if (zero_terminate)
+			ifp->if_u1.if_data[size] = '\0';
 	} else {
 		ifp->if_u1.if_data = NULL;
 	}
@@ -193,8 +188,9 @@ xfs_iformat_local(
 	"corrupt inode %Lu (bad size %d for local fork, size = %d).",
 			(unsigned long long) ip->i_ino, size,
 			XFS_DFORK_SIZE(dip, ip->i_mount, whichfork));
-		XFS_CORRUPTION_ERROR("xfs_iformat_local", XFS_ERRLEVEL_LOW,
-				     ip->i_mount, dip);
+		xfs_inode_verifier_error(ip, -EFSCORRUPTED,
+				"xfs_iformat_local", dip, sizeof(*dip),
+				__this_address);
 		return -EFSCORRUPTED;
 	}
 
@@ -229,8 +225,9 @@ xfs_iformat_extents(
 	if (unlikely(size < 0 || size > XFS_DFORK_SIZE(dip, mp, whichfork))) {
 		xfs_warn(ip->i_mount, "corrupt inode %Lu ((a)extents = %d).",
 			(unsigned long long) ip->i_ino, nex);
-		XFS_CORRUPTION_ERROR("xfs_iformat_extents(1)", XFS_ERRLEVEL_LOW,
-				     mp, dip);
+		xfs_inode_verifier_error(ip, -EFSCORRUPTED,
+				"xfs_iformat_extents(1)", dip, sizeof(*dip),
+				__this_address);
 		return -EFSCORRUPTED;
 	}
 
@@ -243,10 +240,14 @@ xfs_iformat_extents(
 
 		xfs_iext_first(ifp, &icur);
 		for (i = 0; i < nex; i++, dp++) {
+			xfs_failaddr_t	fa;
+
 			xfs_bmbt_disk_get_all(dp, &new);
-			if (!xfs_bmbt_validate_extent(mp, whichfork, &new)) {
-				XFS_ERROR_REPORT("xfs_iformat_extents(2)",
-						 XFS_ERRLEVEL_LOW, mp);
+			fa = xfs_bmap_validate_extent(ip, whichfork, &new);
+			if (fa) {
+				xfs_inode_verifier_error(ip, -EFSCORRUPTED,
+						"xfs_iformat_extents(2)",
+						dp, sizeof(*dp), fa);
 				return -EFSCORRUPTED;
 			}
 
@@ -296,14 +297,16 @@ xfs_iformat_btree(
 	 */
 	if (unlikely(XFS_IFORK_NEXTENTS(ip, whichfork) <=
 					XFS_IFORK_MAXEXT(ip, whichfork) ||
+		     nrecs == 0 ||
 		     XFS_BMDR_SPACE_CALC(nrecs) >
 					XFS_DFORK_SIZE(dip, mp, whichfork) ||
 		     XFS_IFORK_NEXTENTS(ip, whichfork) > ip->i_d.di_nblocks) ||
 		     level == 0 || level > XFS_BTREE_MAXLEVELS) {
 		xfs_warn(mp, "corrupt inode %Lu (btree).",
 					(unsigned long long) ip->i_ino);
-		XFS_CORRUPTION_ERROR("xfs_iformat_btree", XFS_ERRLEVEL_LOW,
-					 mp, dip);
+		xfs_inode_verifier_error(ip, -EFSCORRUPTED,
+				"xfs_iformat_btree", dfp, size,
+				__this_address);
 		return -EFSCORRUPTED;
 	}
 
@@ -589,7 +592,7 @@ xfs_iextents_copy(
 	for_each_xfs_iext(ifp, &icur, &rec) {
 		if (isnullstartblock(rec.br_startblock))
 			continue;
-		ASSERT(xfs_bmbt_validate_extent(ip->i_mount, whichfork, &rec));
+		ASSERT(xfs_bmap_validate_extent(ip, whichfork, &rec) == NULL);
 		xfs_bmbt_disk_set_all(dp, &rec);
 		trace_xfs_write_extent(ip, &icur, state, _RET_IP_);
 		copied += sizeof(struct xfs_bmbt_rec);
@@ -697,4 +700,46 @@ xfs_iext_state_to_fork(
 	if (state & BMAP_ATTRFORK)
 		return ip->i_afp;
 	return &ip->i_df;
+}
+
+/* Default fork content verifiers. */
+struct xfs_ifork_ops xfs_default_ifork_ops = {
+	.verify_attr	= xfs_attr_shortform_verify,
+	.verify_dir	= xfs_dir2_sf_verify,
+	.verify_symlink	= xfs_symlink_shortform_verify,
+};
+
+/* Verify the inline contents of the data fork of an inode. */
+xfs_failaddr_t
+xfs_ifork_verify_data(
+	struct xfs_inode	*ip,
+	struct xfs_ifork_ops	*ops)
+{
+	/* Non-local data fork, we're done. */
+	if (ip->i_d.di_format != XFS_DINODE_FMT_LOCAL)
+		return NULL;
+
+	/* Check the inline data fork if there is one. */
+	switch (VFS_I(ip)->i_mode & S_IFMT) {
+	case S_IFDIR:
+		return ops->verify_dir(ip);
+	case S_IFLNK:
+		return ops->verify_symlink(ip);
+	default:
+		return NULL;
+	}
+}
+
+/* Verify the inline contents of the attr fork of an inode. */
+xfs_failaddr_t
+xfs_ifork_verify_attr(
+	struct xfs_inode	*ip,
+	struct xfs_ifork_ops	*ops)
+{
+	/* There has to be an attr fork allocated if aformat is local. */
+	if (ip->i_d.di_aformat != XFS_DINODE_FMT_LOCAL)
+		return NULL;
+	if (!XFS_IFORK_PTR(ip, XFS_ATTR_FORK))
+		return __this_address;
+	return ops->verify_attr(ip);
 }

@@ -364,7 +364,7 @@ static __always_inline void setup_umip(struct cpuinfo_x86 *c)
 
 	set_in_cr4(X86_CR4_UMIP);
 
-	pr_info("x86/cpu: Activated the Intel User Mode Instruction Prevention (UMIP) CPU feature\n");
+	pr_info_once("x86/cpu: User Mode Instruction Prevention (UMIP) activated\n");
 
 	return;
 
@@ -1203,6 +1203,7 @@ static void validate_apic_and_package_id(struct cpuinfo_x86 *c)
 {
 #ifdef CONFIG_SMP
 	unsigned int apicid, cpu = smp_processor_id();
+	struct rh_cpuinfo_x86 *rhc = &rh_cpu_data(c->cpu_index);
 
 	apicid = apic->cpu_present_to_apicid(cpu);
 	if (apicid != c->apicid) {
@@ -1210,6 +1211,7 @@ static void validate_apic_and_package_id(struct cpuinfo_x86 *c)
 		       cpu, apicid, c->initial_apicid);
 	}
 	BUG_ON(topology_update_package_map(c->phys_proc_id, cpu));
+	BUG_ON(topology_update_die_map(rhc->cpu_die_id, cpu));
 #else
 	c->logical_proc_id = 0;
 #endif

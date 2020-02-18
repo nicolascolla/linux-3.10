@@ -563,6 +563,7 @@ static int nvmet_port_subsys_drop_link(struct config_item *parent,
 
 found:
 	list_del(&p->entry);
+	nvmet_port_del_ctrls(port, subsys);
 	nvmet_genctr++;
 	if (list_empty(&port->subsystems))
 		nvmet_disable_port(port);
@@ -783,8 +784,8 @@ static struct config_group *nvmet_subsys_make(struct config_group *group,
 	}
 
 	subsys = nvmet_subsys_alloc(name, NVME_NQN_NVME);
-	if (!subsys)
-		return ERR_PTR(-ENOMEM);
+	if (IS_ERR(subsys))
+		return ERR_CAST(subsys);
 
 	config_group_init_type_name(&subsys->group, name, &nvmet_subsys_type);
 

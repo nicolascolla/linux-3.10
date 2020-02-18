@@ -174,7 +174,7 @@ int ib_get_cached_subnet_prefix(struct ib_device *device,
 				u64              *sn_pfx);
 
 #ifdef CONFIG_SECURITY_INFINIBAND
-void ib_security_destroy_port_pkey_list(struct ib_device *device);
+void ib_security_release_port_pkey_list(struct ib_device *device);
 
 void ib_security_cache_change(struct ib_device *device,
 			      u8 port_num,
@@ -195,8 +195,9 @@ int ib_mad_agent_security_setup(struct ib_mad_agent *agent,
 				enum ib_qp_type qp_type);
 void ib_mad_agent_security_cleanup(struct ib_mad_agent *agent);
 int ib_mad_enforce_security(struct ib_mad_agent_private *map, u16 pkey_index);
+void ib_mad_agent_security_change(void);
 #else
-static inline void ib_security_destroy_port_pkey_list(struct ib_device *device)
+static inline void ib_security_release_port_pkey_list(struct ib_device *device)
 {
 }
 
@@ -260,6 +261,10 @@ static inline int ib_mad_enforce_security(struct ib_mad_agent_private *map,
 {
 	return 0;
 }
+
+static inline void ib_mad_agent_security_change(void)
+{
+}
 #endif
 
 struct ib_device *ib_device_get_by_index(u32 ifindex);
@@ -286,6 +291,7 @@ static inline struct ib_qp *_ib_create_qp(struct ib_device *dev,
 	qp->device = dev;
 	qp->pd = pd;
 	qp->uobject = uobj;
+	qp->real_qp = qp;
 	/*
 	 * We don't track XRC QPs for now, because they don't have PD
 	 * and more importantly they are created internaly by driver,

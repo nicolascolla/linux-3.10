@@ -1159,9 +1159,11 @@ static void __migrate_swap_task(struct task_struct *p, int cpu)
 		src_rq = task_rq(p);
 		dst_rq = cpu_rq(cpu);
 
+		p->on_rq = TASK_ON_RQ_MIGRATING;
 		deactivate_task(src_rq, p, 0);
 		set_task_cpu(p, cpu);
 		activate_task(dst_rq, p, 0);
+		p->on_rq = TASK_ON_RQ_QUEUED;
 		check_preempt_curr(dst_rq, p, 0);
 	} else {
 		/*
@@ -2523,14 +2525,15 @@ static inline void balance_callback(struct rq *rq)
 asmlinkage void schedule_tail(struct task_struct *prev)
 	__releases(rq->lock)
 {
-	struct rq *rq;
+	struct rq *rq = this_rq();
 
-	/* finish_task_switch() drops rq->lock and enables preemtion */
-	preempt_disable();
-	rq = this_rq();
 	finish_task_switch(rq, prev);
+
+	/*
+	 * FIXME: do we need to worry about rq being invalidated by the
+	 * task_switch?
+	 */
 	balance_callback(rq);
-	preempt_enable();
 
 #ifdef __ARCH_WANT_UNLOCKED_CTXSW
 	/* In this case, finish_task_switch does not reenable preemption */
@@ -6084,20 +6087,20 @@ EXPORT_SYMBOL_GPL(set_cpus_allowed_ptr);
  */
 static int __migrate_task(struct task_struct *p, int src_cpu, int dest_cpu)
 {
-	struct rq *rq_dest, *rq_src;
+	struct rq *rq;
 	int ret = 0;
 
 	if (unlikely(!cpu_active(dest_cpu)))
 		return ret;
 
-	rq_src = cpu_rq(src_cpu);
-	rq_dest = cpu_rq(dest_cpu);
+	rq = cpu_rq(src_cpu);
 
 	raw_spin_lock(&p->pi_lock);
-	double_rq_lock(rq_src, rq_dest);
+	raw_spin_lock(&rq->lock);
 	/* Already moved. */
 	if (task_cpu(p) != src_cpu)
 		goto done;
+
 	/* Affinity changed (again). */
 	if (!cpumask_test_cpu(dest_cpu, tsk_cpus_allowed(p)))
 		goto fail;
@@ -6107,15 +6110,22 @@ static int __migrate_task(struct task_struct *p, int src_cpu, int dest_cpu)
 	 * placed properly.
 	 */
 	if (task_on_rq_queued(p)) {
-		dequeue_task(rq_src, p, DEQUEUE_SAVE);
+		dequeue_task(rq, p, DEQUEUE_SAVE);
+		p->on_rq = TASK_ON_RQ_MIGRATING;
 		set_task_cpu(p, dest_cpu);
-		enqueue_task(rq_dest, p, ENQUEUE_RESTORE);
-		check_preempt_curr(rq_dest, p, 0);
+		raw_spin_unlock(&rq->lock);
+
+		rq = cpu_rq(dest_cpu);
+		raw_spin_lock(&rq->lock);
+		BUG_ON(task_rq(p) != rq);
+		p->on_rq = TASK_ON_RQ_QUEUED;
+		enqueue_task(rq, p, ENQUEUE_RESTORE);
+		check_preempt_curr(rq, p, 0);
 	}
 done:
 	ret = 1;
 fail:
-	double_rq_unlock(rq_src, rq_dest);
+	raw_spin_unlock(&rq->lock);
 	raw_spin_unlock(&p->pi_lock);
 	return ret;
 }
@@ -8487,13 +8497,21 @@ static int cpuset_cpu_inactive(struct notifier_block *nfb, unsigned long action,
 struct static_key sched_smt_present = STATIC_KEY_INIT_FALSE;
 EXPORT_SYMBOL_GPL(sched_smt_present);
 
+/*
+ * RHEL: This mask is used as a temporary variable in
+ * sched_cpu_{activate,deactivate}().  It's allocated globally to avoid large
+ * stack allocations.  Concurrent access is protected by cpu_add_remove_lock.
+ */
+static cpumask_t smt_cpus;
+
 void sched_cpu_activate(unsigned int cpu)
 {
 #ifdef CONFIG_SCHED_SMT
 	/*
 	 * When going up, increment the number of cores with SMT present.
 	 */
-	if (cpumask_weight(cpu_smt_mask(cpu)) == 2)
+	cpumask_and(&smt_cpus, cpu_smt_mask(cpu), cpu_online_mask);
+	if (cpumask_weight(&smt_cpus) == 2)
 		static_key_slow_inc(&sched_smt_present);
 #endif
 }
@@ -8504,7 +8522,8 @@ void sched_cpu_deactivate(unsigned int cpu)
 	/*
 	 * When going down, decrement the number of cores with SMT present.
 	 */
-	if (cpumask_weight(cpu_smt_mask(cpu)) == 2)
+	cpumask_and(&smt_cpus, cpu_smt_mask(cpu), cpu_online_mask);
+	if (cpumask_weight(&smt_cpus) == 2)
 		static_key_slow_dec(&sched_smt_present);
 #endif
 }

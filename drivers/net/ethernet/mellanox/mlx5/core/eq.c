@@ -223,11 +223,11 @@ static struct mlx5_core_cq *mlx5_eq_cq_get(struct mlx5_eq *eq, u32 cqn)
 	struct mlx5_cq_table *table = &eq->cq_table;
 	struct mlx5_core_cq *cq = NULL;
 
-	spin_lock(&table->lock);
+	rcu_read_lock();
 	cq = radix_tree_lookup(&table->tree, cqn);
 	if (likely(cq))
 		mlx5_cq_hold(cq);
-	spin_unlock(&table->lock);
+	rcu_read_unlock();
 
 	return cq;
 }
@@ -512,6 +512,9 @@ create_map_eq(struct mlx5_core_dev *dev, struct mlx5_eq *eq, const char *name,
 	mlx5_fill_page_array(&eq->buf, pas);
 
 	MLX5_SET(create_eq_in, in, opcode, MLX5_CMD_OP_CREATE_EQ);
+	if (!param->mask && MLX5_CAP_GEN(dev, log_max_uctx))
+		MLX5_SET(create_eq_in, in, uid, MLX5_SHARED_RESOURCE_UID);
+
 	MLX5_SET64(create_eq_in, in, event_bitmask, param->mask);
 
 	eqc = MLX5_ADDR_OF(create_eq_in, in, eq_context_entry);
@@ -593,33 +596,31 @@ int mlx5_eq_add_cq(struct mlx5_eq *eq, struct mlx5_core_cq *cq)
 	struct mlx5_cq_table *table = &eq->cq_table;
 	int err;
 
-	spin_lock_irq(&table->lock);
+	spin_lock(&table->lock);
 	err = radix_tree_insert(&table->tree, cq->cqn, cq);
-	spin_unlock_irq(&table->lock);
+	spin_unlock(&table->lock);
 
 	return err;
 }
 
-int mlx5_eq_del_cq(struct mlx5_eq *eq, struct mlx5_core_cq *cq)
+void mlx5_eq_del_cq(struct mlx5_eq *eq, struct mlx5_core_cq *cq)
 {
 	struct mlx5_cq_table *table = &eq->cq_table;
 	struct mlx5_core_cq *tmp;
 
-	spin_lock_irq(&table->lock);
+	spin_lock(&table->lock);
 	tmp = radix_tree_delete(&table->tree, cq->cqn);
-	spin_unlock_irq(&table->lock);
+	spin_unlock(&table->lock);
 
 	if (!tmp) {
-		mlx5_core_warn(eq->dev, "cq 0x%x not found in eq 0x%x tree\n", eq->eqn, cq->cqn);
-		return -ENOENT;
+		mlx5_core_dbg(eq->dev, "cq 0x%x not found in eq 0x%x tree\n",
+			      eq->eqn, cq->cqn);
+		return;
 	}
 
-	if (tmp != cq) {
-		mlx5_core_warn(eq->dev, "corruption on cqn 0x%x in eq 0x%x\n", eq->eqn, cq->cqn);
-		return -EINVAL;
-	}
-
-	return 0;
+	if (tmp != cq)
+		mlx5_core_dbg(eq->dev, "corruption on cqn 0x%x in eq 0x%x\n",
+			      eq->eqn, cq->cqn);
 }
 
 int mlx5_eq_table_init(struct mlx5_core_dev *dev)

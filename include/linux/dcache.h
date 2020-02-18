@@ -29,8 +29,10 @@ struct vfsmount;
 /* The hash is always the low bits of hash_len */
 #ifdef __LITTLE_ENDIAN
  #define HASH_LEN_DECLARE u32 hash; u32 len;
+ #define bytemask_from_count(cnt)	(~(~0ul << (cnt)*8))
 #else
  #define HASH_LEN_DECLARE u32 len; u32 hash;
+ #define bytemask_from_count(cnt)	(~(~0ul >> (cnt)*8))
 #endif
 
 /*
@@ -230,6 +232,8 @@ struct dentry_operations_wrapper {
 #define DCACHE_SYMLINK_TYPE		0x03000000 /* Symlink */
 #define DCACHE_FILE_TYPE		0x04000000 /* Other file type */
 #define DCACHE_OP_REAL			0x08000000
+
+#define DCACHE_DENTRY_CURSOR		0x20000000
 
 extern seqlock_t rename_lock;
 

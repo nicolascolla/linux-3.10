@@ -193,9 +193,9 @@ int snd_seq_fifo_cell_out(struct snd_seq_fifo *f,
 		}
 		set_current_state(TASK_INTERRUPTIBLE);
 		add_wait_queue(&f->input_sleep, &wait);
-		spin_unlock_irq(&f->lock);
+		spin_unlock_irqrestore(&f->lock, flags);
 		schedule();
-		spin_lock_irq(&f->lock);
+		spin_lock_irqsave(&f->lock, flags);
 		remove_wait_queue(&f->input_sleep, &wait);
 		if (signal_pending(current)) {
 			spin_unlock_irqrestore(&f->lock, flags);
@@ -277,4 +277,21 @@ int snd_seq_fifo_resize(struct snd_seq_fifo *f, int poolsize)
 	snd_seq_pool_delete(&oldpool);
 
 	return 0;
+}
+
+/* get the number of unused cells safely */
+int snd_seq_fifo_unused_cells(struct snd_seq_fifo *f)
+{
+	unsigned long flags;
+	int cells;
+
+	if (!f)
+		return 0;
+
+	snd_use_lock_use(&f->use_lock);
+	spin_lock_irqsave(&f->lock, flags);
+	cells = snd_seq_unused_cells(f->pool);
+	spin_unlock_irqrestore(&f->lock, flags);
+	snd_use_lock_free(&f->use_lock);
+	return cells;
 }

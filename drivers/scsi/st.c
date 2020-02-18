@@ -827,10 +827,7 @@ static int st_flush_write_buffer(struct scsi_tape * STp)
 static int flush_buffer(struct scsi_tape *STp, int seek_next)
 {
 	int backspace, result;
-	struct st_buffer *STbuffer;
 	struct st_partstat *STps;
-
-	STbuffer = STp->buffer;
 
 	/*
 	 * If there was a bus reset, block further access
@@ -1974,9 +1971,12 @@ static long read_tape(struct scsi_tape *STp, long count,
 					transfer = (int)cmdstatp->uremainder64;
 				else
 					transfer = 0;
-				if (STp->block_size == 0 &&
-				    cmdstatp->sense_hdr.sense_key == MEDIUM_ERROR)
-					transfer = bytes;
+				if (cmdstatp->sense_hdr.sense_key == MEDIUM_ERROR) {
+					if (STp->block_size == 0)
+						transfer = bytes;
+					/* Some drives set ILI with MEDIUM ERROR */
+					cmdstatp->flags &= ~SENSE_ILI;
+				}
 
 				if (cmdstatp->flags & SENSE_ILI) {	/* ILI */
 					if (STp->block_size == 0 &&
@@ -4296,11 +4296,11 @@ static int st_probe(struct device *dev)
 	kref_init(&tpnt->kref);
 	tpnt->disk = disk;
 	disk->private_data = &tpnt->driver;
-	disk->queue = SDp->request_queue;
 	/* SCSI tape doesn't register this gendisk via add_disk().  Manually
 	 * take queue reference that release_disk() expects. */
-	if (!blk_get_queue(disk->queue))
+	if (!blk_get_queue(SDp->request_queue))
 		goto out_put_disk;
+	disk->queue = SDp->request_queue;
 	tpnt->driver = &st_template;
 
 	tpnt->device = SDp;
@@ -4679,7 +4679,7 @@ static ssize_t read_byte_cnt_show(struct device *dev,
 static DEVICE_ATTR_RO(read_byte_cnt);
 
 /**
- * read_us_show - return read us - overall time spent waiting on reads in ns.
+ * read_ns_show - return read ns - overall time spent waiting on reads in ns.
  * @dev: struct device
  * @attr: attribute structure
  * @buf: buffer to return formatted data in

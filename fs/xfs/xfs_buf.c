@@ -548,17 +548,17 @@ _xfs_buf_map_pages(
  */
 
 /*
- *	Look up, and creates if absent, a lockable buffer for
- *	a given range of an inode.  The buffer is returned
- *	locked.	No I/O is implied by this call.
+ * Look up (and insert if absent), a lockable buffer for a given
+ * range of an inode.  The buffer is returned locked. No I/O is
+ * implied by this call.
  */
-xfs_buf_t *
+static struct xfs_buf *
 _xfs_buf_find(
 	struct xfs_buftarg	*btp,
 	struct xfs_buf_map	*map,
 	int			nmaps,
 	xfs_buf_flags_t		flags,
-	xfs_buf_t		*new_bp)
+	struct xfs_buf		*new_bp)
 {
 	struct xfs_perag	*pag;
 	struct rb_node		**rbp;
@@ -588,7 +588,7 @@ _xfs_buf_find(
 		 * returning a specific error on buffer lookup failures.
 		 */
 		xfs_alert(btp->bt_mount,
-			  "%s: Block out of range: block 0x%llx, EOFS 0x%llx ",
+			  "%s: daddr 0x%llx out of range, EOFS 0x%llx",
 			  __func__, blkno, eofs);
 		WARN_ON(1);
 		return NULL;
@@ -675,6 +675,17 @@ found:
 	return bp;
 }
 
+struct xfs_buf *
+xfs_buf_incore(
+	struct xfs_buftarg	*target,
+	xfs_daddr_t		blkno,
+	size_t			numblks,
+	xfs_buf_flags_t		flags)
+{
+	DEFINE_SINGLE_BUF_MAP(map, blkno, numblks);
+	return _xfs_buf_find(target, &map, 1, flags, NULL);
+}
+
 /*
  * Assembles a buffer covering the specified range. The code is optimised for
  * cache hits, as metadata intensive workloads will see 3 orders of magnitude
@@ -748,11 +759,7 @@ _xfs_buf_read(
 	bp->b_flags &= ~(XBF_WRITE | XBF_ASYNC | XBF_READ_AHEAD);
 	bp->b_flags |= flags & (XBF_READ | XBF_ASYNC | XBF_READ_AHEAD);
 
-	if (flags & XBF_ASYNC) {
-		xfs_buf_submit(bp);
-		return 0;
-	}
-	return xfs_buf_submit_wait(bp);
+	return xfs_buf_submit(bp);
 }
 
 xfs_buf_t *
@@ -837,7 +844,7 @@ xfs_buf_read_uncached(
 	bp->b_flags |= XBF_READ;
 	bp->b_ops = ops;
 
-	xfs_buf_submit_wait(bp);
+	xfs_buf_submit(bp);
 	if (bp->b_error) {
 		int	error = bp->b_error;
 		xfs_buf_relse(bp);
@@ -1205,13 +1212,14 @@ xfs_buf_ioend_async(
 }
 
 void
-xfs_buf_ioerror(
+__xfs_buf_ioerror(
 	xfs_buf_t		*bp,
-	int			error)
+	int			error,
+	xfs_failaddr_t		failaddr)
 {
 	ASSERT(error <= 0 && error >= -1000);
 	bp->b_error = error;
-	trace_xfs_buf_ioerror(bp, error, _RET_IP_);
+	trace_xfs_buf_ioerror(bp, error, failaddr);
 }
 
 void
@@ -1220,8 +1228,9 @@ xfs_buf_ioerror_alert(
 	const char		*func)
 {
 	xfs_alert(bp->b_target->bt_mount,
-"metadata I/O error: block 0x%llx (\"%s\") error %d numblks %d",
-		(uint64_t)XFS_BUF_ADDR(bp), func, -bp->b_error, bp->b_length);
+"metadata I/O error in \"%s\" at daddr 0x%llx len %d error %d",
+			func, (uint64_t)XFS_BUF_ADDR(bp), bp->b_length,
+			-bp->b_error);
 }
 
 int
@@ -1236,7 +1245,7 @@ xfs_bwrite(
 	bp->b_flags &= ~(XBF_ASYNC | XBF_READ | _XBF_DELWRI_Q |
 			 XBF_WRITE_FAIL | XBF_DONE);
 
-	error = xfs_buf_submit_wait(bp);
+	error = xfs_buf_submit(bp);
 	if (error) {
 		xfs_force_shutdown(bp->b_target->bt_mount,
 				   SHUTDOWN_META_IO_ERROR);
@@ -1402,9 +1411,10 @@ _xfs_buf_ioapply(
 			 */
 			if (xfs_sb_version_hascrc(&mp->m_sb)) {
 				xfs_warn(mp,
-					"%s: no ops on block 0x%llx/0x%x",
+					"%s: no buf ops on daddr 0x%llx len %d",
 					__func__, bp->b_bn, bp->b_length);
-				xfs_hex_dump(bp->b_addr, 64);
+				xfs_hex_dump(bp->b_addr,
+						XFS_CORRUPTION_DUMP_LEN);
 				dump_stack();
 			}
 		}
@@ -1437,15 +1447,34 @@ _xfs_buf_ioapply(
 }
 
 /*
- * Asynchronous IO submission path. This transfers the buffer lock ownership and
- * the current reference to the IO. It is not safe to reference the buffer after
- * a call to this function unless the caller holds an additional reference
- * itself.
+ * Wait for I/O completion of a sync buffer and return the I/O error code.
  */
 static int
-__xfs_buf_submit(
+xfs_buf_iowait(
 	struct xfs_buf	*bp)
 {
+	ASSERT(!(bp->b_flags & XBF_ASYNC));
+
+	trace_xfs_buf_iowait(bp, _RET_IP_);
+	wait_for_completion(&bp->b_iowait);
+	trace_xfs_buf_iowait_done(bp, _RET_IP_);
+
+	return bp->b_error;
+}
+
+/*
+ * Buffer I/O submission path, read or write. Asynchronous submission transfers
+ * the buffer lock ownership and the current reference to the IO. It is not
+ * safe to reference the buffer after a call to this function unless the caller
+ * holds an additional reference itself.
+ */
+int
+__xfs_buf_submit(
+	struct xfs_buf	*bp,
+	bool		wait)
+{
+	int		error = 0;
+
 	trace_xfs_buf_submit(bp, _RET_IP_);
 
 	ASSERT(!(bp->b_flags & _XBF_DELWRI_Q));
@@ -1455,8 +1484,16 @@ __xfs_buf_submit(
 		xfs_buf_ioerror(bp, -EIO);
 		bp->b_flags &= ~XBF_DONE;
 		xfs_buf_stale(bp);
+		xfs_buf_ioend(bp);
 		return -EIO;
 	}
+
+	/*
+	 * Grab a reference so the buffer does not go away underneath us. For
+	 * async buffers, I/O completion drops the callers reference, which
+	 * could occur before submission returns.
+	 */
+	xfs_buf_hold(bp);
 
 	if (bp->b_flags & XBF_WRITE)
 		xfs_buf_wait_unpin(bp);
@@ -1486,77 +1523,13 @@ __xfs_buf_submit(
 			xfs_buf_ioend_async(bp);
 	}
 
-	return 0;
-}
-
-void
-xfs_buf_submit(
-	struct xfs_buf	*bp)
-{
-	int		error;
-
-	ASSERT(bp->b_flags & XBF_ASYNC);
+	if (wait)
+		error = xfs_buf_iowait(bp);
 
 	/*
-	 * The caller's reference is released during I/O completion.
-	 * This occurs some time after the last b_io_remaining reference is
-	 * released, so after we drop our Io reference we have to have some
-	 * other reference to ensure the buffer doesn't go away from underneath
-	 * us. Take a direct reference to ensure we have safe access to the
-	 * buffer until we are finished with it.
-	 */
-	xfs_buf_hold(bp);
-
-	error = __xfs_buf_submit(bp);
-	if (error)
-		xfs_buf_ioend(bp);
-
-	/* Note: it is not safe to reference bp now we've dropped our ref */
-	xfs_buf_rele(bp);
-}
-
-/*
- * Wait for I/O completion of a sync buffer and return the I/O error code.
- */
-static int
-xfs_buf_iowait(
-	struct xfs_buf	*bp)
-{
-	trace_xfs_buf_iowait(bp, _RET_IP_);
-	wait_for_completion(&bp->b_iowait);
-	trace_xfs_buf_iowait_done(bp, _RET_IP_);
-
-	return bp->b_error;
-}
-
-/*
- * Synchronous buffer IO submission path, read or write.
- */
-int
-xfs_buf_submit_wait(
-	struct xfs_buf	*bp)
-{
-	int		error;
-
-	ASSERT(!(bp->b_flags & XBF_ASYNC));
-
-	/*
-	 * For synchronous IO, the IO does not inherit the submitters reference
-	 * count, nor the buffer lock. Hence we cannot release the reference we
-	 * are about to take until we've waited for all IO completion to occur,
-	 * including any xfs_buf_ioend_async() work that may be pending.
-	 */
-	xfs_buf_hold(bp);
-
-	error = __xfs_buf_submit(bp);
-	if (error)
-		goto out;
-	error = xfs_buf_iowait(bp);
-
-out:
-	/*
-	 * all done now, we can release the hold that keeps the buffer
-	 * referenced for the entire IO.
+	 * Release the hold that keeps the buffer referenced for the entire
+	 * I/O. Note that if the buffer is async, it is not safe to reference
+	 * after this release.
 	 */
 	xfs_buf_rele(bp);
 	return error;
@@ -1674,7 +1647,7 @@ skip:
 		atomic_set(&bp->b_lru_ref, 0);
 		if (bp->b_flags & XBF_WRITE_FAIL) {
 			xfs_alert(btp->bt_mount,
-"Corruption Alert: Buffer at block 0x%llx had permanent write failures!",
+"Corruption Alert: Buffer at daddr 0x%llx had permanent write failures!",
 				(long long)bp->b_bn);
 			xfs_alert(btp->bt_mount,
 "Please run xfs_repair to determine the extent of the problem.");
@@ -1991,12 +1964,11 @@ xfs_buf_delwri_submit_buffers(
 		if (wait_list) {
 			bp->b_flags &= ~XBF_ASYNC;
 			list_move_tail(&bp->b_list, wait_list);
-			__xfs_buf_submit(bp);
 		} else {
 			bp->b_flags |= XBF_ASYNC;
 			list_del_init(&bp->b_list);
-			xfs_buf_submit(bp);
 		}
+		__xfs_buf_submit(bp, false);
 	}
 	blk_finish_plug(&plug);
 

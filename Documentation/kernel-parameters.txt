@@ -458,6 +458,14 @@ bytes respectively. Such letter suffixes can also be entirely omitted.
 	atkbd.softrepeat= [HW]
 			Use software keyboard repeat
 
+	audit=		[KNL] Enable the audit sub-system
+			Format: { "0" | "1" } (0 = disabled, 1 = enabled)
+			Default: unset
+			
+	audit_backlog_limit= [KNL] Set the audit queue size limit.
+			Format: <int> (must be >=0)
+			Default: 64
+
 	bau=		[X86_UV] Enable the BAU on SGI UV.  The default
 			behavior is to disable the BAU (i.e. bau=0).
 			Format: { "0" | "1" }
@@ -1418,6 +1426,9 @@ bytes respectively. Such letter suffixes can also be entirely omitted.
 			See comment before ip2_setup() in
 			drivers/char/ip2/ip2base.c.
 
+	ipcmni_extend	[KNL] Extend the maximum number of unique System V
+			IPC identifiers from 32,768 to 16,777,216.
+
 	irqaffinity=	[SMP] Set the default irq affinity mask
 			Format:
 			<cpu number>,...,<cpu number>
@@ -1884,6 +1895,12 @@ bytes respectively. Such letter suffixes can also be entirely omitted.
 			full,nosmt - Enable MDS mitigation and disable
 				     SMT on vulnerable CPUs
 			off        - Unconditionally disable MDS mitigation
+
+			On TAA-affected machines, mds=off can be prevented by
+			an active TAA mitigation as both vulnerabilities are
+			mitigated with the same mechanism so in order to disable
+			this mitigation, you need to specify tsx_async_abort=off
+			too.
 
 			Not specifying this option is equivalent to
 			mds=full.
@@ -3777,6 +3794,11 @@ bytes respectively. Such letter suffixes can also be entirely omitted.
 				     is not disabled because CPU is not
 				     vulnerable to cross-thread TAA attacks.
 			off        - Unconditionally disable TAA mitigation
+
+			On MDS-affected machines, tsx_async_abort=off can be
+			prevented by an active MDS mitigation as both vulnerabilities
+			are mitigated with the same mechanism so in order to disable
+			this mitigation, you need to specify mds=off too.
 
 			Not specifying this option is equivalent to
 			tsx_async_abort=full.  On CPUs which are MDS affected

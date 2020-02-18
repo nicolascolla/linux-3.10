@@ -69,6 +69,7 @@ static void mlx5i_build_nic_params(struct mlx5_core_dev *mdev,
 
 	params->lro_en = false;
 	params->hard_mtu = MLX5_IB_GRH_BYTES + MLX5_IPOIB_HARD_LEN;
+	params->tunneled_offload_en = false;
 }
 
 /* Called directly after IPoIB netdevice was created to initialize SW structs */
@@ -88,7 +89,7 @@ int mlx5i_init(struct mlx5_core_dev *mdev,
 	mlx5_query_port_max_mtu(mdev, &max_mtu, 1);
 	netdev->mtu = max_mtu;
 
-	mlx5e_build_nic_params(mdev, &priv->channels.params,
+	mlx5e_build_nic_params(mdev, &priv->rss_params, &priv->channels.params,
 			       mlx5e_get_netdev_max_channels(netdev),
 			       netdev->mtu);
 	mlx5i_build_nic_params(mdev, &priv->channels.params);
@@ -711,7 +712,9 @@ static int mlx5_rdma_setup_rn(struct ib_device *ibdev, u8 port_num,
 
 	prof->init(mdev, netdev, prof, ipriv);
 
-	mlx5e_attach_netdev(epriv);
+	err = mlx5e_attach_netdev(epriv);
+	if (err)
+		goto detach;
 	netif_carrier_off(netdev);
 
 	/* set rdma_netdev func pointers */
@@ -727,6 +730,11 @@ static int mlx5_rdma_setup_rn(struct ib_device *ibdev, u8 port_num,
 
 	return 0;
 
+detach:
+	prof->cleanup(epriv);
+	if (ipriv->sub_interface)
+		return err;
+	mlx5e_destroy_mdev_resources(mdev);
 destroy_ht:
 	mlx5i_pkey_qpn_ht_cleanup(netdev);
 	return err;

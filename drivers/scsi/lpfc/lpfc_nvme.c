@@ -297,7 +297,8 @@ lpfc_nvme_localport_delete(struct nvme_fc_local_port *localport)
 			 lport);
 
 	/* release any threads waiting for the unreg to complete */
-	complete(&lport->lport_unreg_done);
+	if (lport->vport->localport)
+		complete(lport->lport_unreg_cmp);
 }
 
 /* lpfc_nvme_remoteport_delete
@@ -311,7 +312,7 @@ lpfc_nvme_localport_delete(struct nvme_fc_local_port *localport)
  * Return value :
  * None
  */
-void
+static void
 lpfc_nvme_remoteport_delete(struct nvme_fc_remote_port *remoteport)
 {
 	struct lpfc_nvme_rport *rport = remoteport->private;
@@ -961,18 +962,16 @@ lpfc_nvme_io_cmd_wqe_cmpl(struct lpfc_hba *phba, struct lpfc_iocbq *pwqeIn,
 	struct nvmefc_fcp_req *nCmd;
 	struct nvme_fc_ersp_iu *ep;
 	struct nvme_fc_cmd_iu *cp;
-	struct lpfc_nvme_rport *rport;
 	struct lpfc_nodelist *ndlp;
 	struct lpfc_nvme_fcpreq_priv *freqpriv;
 	struct lpfc_nvme_lport *lport;
 	struct lpfc_nvme_ctrl_stat *cstat;
-	unsigned long flags;
 	uint32_t code, status, idx;
 	uint16_t cid, sqhd, data;
 	uint32_t *ptr;
 
 	/* Sanity check on return of outstanding command */
-	if (!lpfc_ncmd || !lpfc_ncmd->nvmeCmd || !lpfc_ncmd->nrport) {
+	if (!lpfc_ncmd || !lpfc_ncmd->nvmeCmd) {
 		if (!lpfc_ncmd) {
 			lpfc_printf_vlog(vport, KERN_ERR,
 					 LOG_NODE | LOG_NVME_IOERR,
@@ -983,16 +982,14 @@ lpfc_nvme_io_cmd_wqe_cmpl(struct lpfc_hba *phba, struct lpfc_iocbq *pwqeIn,
 
 		lpfc_printf_vlog(vport, KERN_ERR, LOG_NODE | LOG_NVME_IOERR,
 				 "6066 Missing cmpl ptrs: lpfc_ncmd %p, "
-				 "nvmeCmd %p nrport %p\n",
-				 lpfc_ncmd, lpfc_ncmd->nvmeCmd,
-				 lpfc_ncmd->nrport);
+				 "nvmeCmd %p\n",
+				 lpfc_ncmd, lpfc_ncmd->nvmeCmd);
 
 		/* Release the lpfc_ncmd regardless of the missing elements. */
 		lpfc_release_nvme_buf(phba, lpfc_ncmd);
 		return;
 	}
 	nCmd = lpfc_ncmd->nvmeCmd;
-	rport = lpfc_ncmd->nrport;
 	status = bf_get(lpfc_wcqe_c_status, wcqe);
 
 	if (vport->localport) {
@@ -1016,18 +1013,11 @@ lpfc_nvme_io_cmd_wqe_cmpl(struct lpfc_hba *phba, struct lpfc_iocbq *pwqeIn,
 	 * Catch race where our node has transitioned, but the
 	 * transport is still transitioning.
 	 */
-	ndlp = rport->ndlp;
+	ndlp = lpfc_ncmd->ndlp;
 	if (!ndlp || !NLP_CHK_NODE_ACT(ndlp)) {
-		lpfc_printf_vlog(vport, KERN_ERR, LOG_NODE | LOG_NVME_IOERR,
-				 "6061 rport %p,  DID x%06x node not ready.\n",
-				 rport, rport->remoteport->port_id);
-
-		ndlp = lpfc_findnode_did(vport, rport->remoteport->port_id);
-		if (!ndlp) {
-			lpfc_printf_vlog(vport, KERN_ERR, LOG_NVME_IOERR,
-					 "6062 Ignoring NVME cmpl.  No ndlp\n");
-			goto out_err;
-		}
+		lpfc_printf_vlog(vport, KERN_ERR, LOG_NVME_IOERR,
+				 "6062 Ignoring NVME cmpl.  No ndlp\n");
+		goto out_err;
 	}
 
 	code = bf_get(lpfc_wcqe_c_code, wcqe);
@@ -1115,13 +1105,16 @@ lpfc_nvme_io_cmd_wqe_cmpl(struct lpfc_hba *phba, struct lpfc_iocbq *pwqeIn,
 					 lpfc_ncmd, nCmd,
 					 lpfc_ncmd->cur_iocbq.sli4_xritag,
 					 bf_get(lpfc_wcqe_c_xb, wcqe));
+			/* fall through */
 		default:
 out_err:
 			lpfc_printf_vlog(vport, KERN_INFO, LOG_NVME_IOERR,
 					 "6072 NVME Completion Error: xri %x "
-					 "status x%x result x%x placed x%x\n",
+					 "status x%x result x%x [x%x] "
+					 "placed x%x\n",
 					 lpfc_ncmd->cur_iocbq.sli4_xritag,
 					 lpfc_ncmd->status, lpfc_ncmd->result,
+					 wcqe->parameter,
 					 wcqe->total_data_placed);
 			nCmd->transferred_length = 0;
 			nCmd->rcv_rsplen = 0;
@@ -1168,10 +1161,6 @@ out_err:
 		lpfc_ncmd->nvmeCmd = NULL;
 	}
 
-	spin_lock_irqsave(&phba->hbalock, flags);
-	lpfc_ncmd->nrport = NULL;
-	spin_unlock_irqrestore(&phba->hbalock, flags);
-
 	/* Call release with XB=1 to queue the IO into the abort list. */
 	lpfc_release_nvme_buf(phba, lpfc_ncmd);
 }
@@ -1205,7 +1194,7 @@ lpfc_nvme_prep_io_cmd(struct lpfc_vport *vport,
 	union lpfc_wqe128 *wqe = &pwqeq->wqe;
 	uint32_t req_len;
 
-	if (!pnode || !NLP_CHK_NODE_ACT(pnode))
+	if (!NLP_CHK_NODE_ACT(pnode))
 		return -EINVAL;
 
 	/*
@@ -1585,7 +1574,6 @@ lpfc_nvme_fcp_io_submit(struct nvme_fc_local_port *pnvme_lport,
 	 */
 	freqpriv->nvme_buf = lpfc_ncmd;
 	lpfc_ncmd->nvmeCmd = pnvme_fcreq;
-	lpfc_ncmd->nrport = rport;
 	lpfc_ncmd->ndlp = ndlp;
 	lpfc_ncmd->start_time = jiffies;
 
@@ -2470,15 +2458,15 @@ lpfc_nvme_create_localport(struct lpfc_vport *vport)
 	if (!cstat)
 		return -ENOMEM;
 
+	if (!IS_ENABLED(CONFIG_NVME_FC))
+		return ret;
+
 	/* localport is allocated from the stack, but the registration
 	 * call allocates heap memory as well as the private area.
 	 */
-#if (IS_ENABLED(CONFIG_NVME_FC))
+
 	ret = nvme_fc_register_localport(&nfcp_info, &lpfc_nvme_template,
 					 &vport->phba->pcidev->dev, &localport);
-#else
-	ret = -ENOMEM;
-#endif
 	if (!ret) {
 		lpfc_printf_vlog(vport, KERN_INFO, LOG_NVME | LOG_NVME_DISC,
 				 "6005 Successfully registered local "
@@ -2533,6 +2521,7 @@ lpfc_nvme_create_localport(struct lpfc_vport *vport)
 	return ret;
 }
 
+#if (IS_ENABLED(CONFIG_NVME_FC))
 /* lpfc_nvme_lport_unreg_wait - Wait for the host to complete an lport unreg.
  *
  * The driver has to wait for the host nvme transport to callback
@@ -2543,11 +2532,11 @@ lpfc_nvme_create_localport(struct lpfc_vport *vport)
  * An uninterruptible wait is used because of the risk of transport-to-
  * driver state mismatch.
  */
-void
+static void
 lpfc_nvme_lport_unreg_wait(struct lpfc_vport *vport,
-			   struct lpfc_nvme_lport *lport)
+			   struct lpfc_nvme_lport *lport,
+			   struct completion *lport_unreg_cmp)
 {
-#if (IS_ENABLED(CONFIG_NVME_FC))
 	u32 wait_tmo;
 	int ret;
 
@@ -2557,8 +2546,7 @@ lpfc_nvme_lport_unreg_wait(struct lpfc_vport *vport,
 	 */
 	wait_tmo = msecs_to_jiffies(LPFC_NVME_WAIT_TMO * 1000);
 	while (true) {
-		ret = wait_for_completion_timeout(&lport->lport_unreg_done,
-						  wait_tmo);
+		ret = wait_for_completion_timeout(lport_unreg_cmp, wait_tmo);
 		if (unlikely(!ret)) {
 			lpfc_printf_vlog(vport, KERN_ERR, LOG_NVME_IOERR,
 					 "6176 Lport %p Localport %p wait "
@@ -2571,8 +2559,8 @@ lpfc_nvme_lport_unreg_wait(struct lpfc_vport *vport,
 	lpfc_printf_vlog(vport, KERN_INFO, LOG_NVME_IOERR,
 			 "6177 Lport %p Localport %p Complete Success\n",
 			 lport, vport->localport);
-#endif
 }
+#endif
 
 /**
  * lpfc_nvme_destroy_localport - Destroy lpfc_nvme bound to nvme transport.
@@ -2592,12 +2580,12 @@ lpfc_nvme_destroy_localport(struct lpfc_vport *vport)
 	struct lpfc_nvme_lport *lport;
 	struct lpfc_nvme_ctrl_stat *cstat;
 	int ret;
+	DECLARE_COMPLETION_ONSTACK(lport_unreg_cmp);
 
 	if (vport->nvmei_support == 0)
 		return;
 
 	localport = vport->localport;
-	vport->localport = NULL;
 	lport = (struct lpfc_nvme_lport *)localport->private;
 	cstat = lport->cstat;
 
@@ -2608,13 +2596,14 @@ lpfc_nvme_destroy_localport(struct lpfc_vport *vport)
 	/* lport's rport list is clear.  Unregister
 	 * lport and release resources.
 	 */
-	init_completion(&lport->lport_unreg_done);
+	lport->lport_unreg_cmp = &lport_unreg_cmp;
 	ret = nvme_fc_unregister_localport(localport);
 
 	/* Wait for completion.  This either blocks
 	 * indefinitely or succeeds
 	 */
-	lpfc_nvme_lport_unreg_wait(vport, lport);
+	lpfc_nvme_lport_unreg_wait(vport, lport, &lport_unreg_cmp);
+	vport->localport = NULL;
 	kfree(cstat);
 
 	/* Regardless of the unregister upcall response, clear

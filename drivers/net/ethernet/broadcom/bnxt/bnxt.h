@@ -20,11 +20,14 @@
 
 #include <linux/interrupt.h>
 #include <linux/rhashtable.h>
+#include <linux/crash_dump.h>
 #include <net/devlink.h>
 #include <net/dst_metadata.h>
 #include <net/switchdev.h>
 #include <net/xdp.h>
 #include <linux/net_dim.h>
+
+extern struct list_head bnxt_block_cb_list;
 
 struct tx_bd {
 	__le32 tx_bd_len_flags_type;
@@ -1132,6 +1135,14 @@ struct bnxt_tc_flow_stats {
 	u64		bytes;
 };
 
+#ifdef CONFIG_BNXT_FLOWER_OFFLOAD
+struct bnxt_flower_indr_block_cb_priv {
+	struct net_device *tunnel_netdev;
+	struct bnxt *bp;
+	struct list_head list;
+};
+#endif
+
 struct bnxt_tc_info {
 	bool				enabled;
 
@@ -1271,7 +1282,9 @@ struct bnxt {
 
 #define CHIP_NUM_5745X		0xd730
 
-#define CHIP_NUM_57500		0x1750
+#define CHIP_NUM_57508		0x1750
+#define CHIP_NUM_57504		0x1751
+#define CHIP_NUM_57502		0x1752
 
 #define CHIP_NUM_58802		0xd802
 #define CHIP_NUM_58804		0xd804
@@ -1367,11 +1380,14 @@ struct bnxt {
 #define BNXT_CHIP_TYPE_NITRO_A0(bp) ((bp)->flags & BNXT_FLAG_CHIP_NITRO_A0)
 #define BNXT_RX_PAGE_MODE(bp)	((bp)->flags & BNXT_FLAG_RX_PAGE_MODE)
 #define BNXT_SUPPORTS_TPA(bp)	(!BNXT_CHIP_TYPE_NITRO_A0(bp) &&	\
-				 !(bp->flags & BNXT_FLAG_CHIP_P5))
+				 !(bp->flags & BNXT_FLAG_CHIP_P5) &&	\
+				 !is_kdump_kernel())
 
 /* Chip class phase 5 */
 #define BNXT_CHIP_P5(bp)			\
-	((bp)->chip_num == CHIP_NUM_57500)
+	((bp)->chip_num == CHIP_NUM_57508 ||	\
+	 (bp)->chip_num == CHIP_NUM_57504 ||	\
+	 (bp)->chip_num == CHIP_NUM_57502)
 
 /* Chip class phase 4.x */
 #define BNXT_CHIP_P4(bp)			\
@@ -1614,6 +1630,8 @@ struct bnxt {
 	u16			*cfa_code_map; /* cfa_code -> vf_idx map */
 	u8			switch_id[8];
 	struct bnxt_tc_info	*tc_info;
+	struct list_head	tc_indr_block_list;
+	struct notifier_block	tc_netdev_nb;
 	struct dentry		*debugfs_pdev;
 	struct dentry		*debugfs_dim;
 	struct device		*hwmon_dev;
@@ -1776,7 +1794,7 @@ unsigned int bnxt_get_avail_stat_ctxs_for_en(struct bnxt *bp);
 unsigned int bnxt_get_max_func_cp_rings(struct bnxt *bp);
 unsigned int bnxt_get_avail_cp_rings_for_en(struct bnxt *bp);
 int bnxt_get_avail_msix(struct bnxt *bp, int num);
-int bnxt_reserve_rings(struct bnxt *bp);
+int bnxt_reserve_rings(struct bnxt *bp, bool irq_re_init);
 void bnxt_tx_disable(struct bnxt *bp);
 void bnxt_tx_enable(struct bnxt *bp);
 int bnxt_hwrm_set_pause(struct bnxt *);

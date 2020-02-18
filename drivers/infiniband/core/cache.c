@@ -1407,7 +1407,6 @@ static void ib_cache_event(struct ib_event_handler *handler,
 	    event->event == IB_EVENT_PORT_ACTIVE ||
 	    event->event == IB_EVENT_LID_CHANGE  ||
 	    event->event == IB_EVENT_PKEY_CHANGE ||
-	    event->event == IB_EVENT_SM_CHANGE   ||
 	    event->event == IB_EVENT_CLIENT_REREGISTER ||
 	    event->event == IB_EVENT_GID_CHANGE) {
 		work = kmalloc(sizeof *work, GFP_ATOMIC);
@@ -1459,6 +1458,9 @@ int ib_cache_setup_one(struct ib_device *device)
 void ib_cache_release_one(struct ib_device *device)
 {
 	int p;
+
+	if (!device->cache.ports)
+		return;
 
 	/*
 	 * The release function frees all the cache elements.

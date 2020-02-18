@@ -515,8 +515,8 @@ static void sctp_do_8_2_transport_strike(sctp_cmd_seq_t *commands,
 	 */
 	if (net->sctp_pf_enable &&
 	   (transport->state == SCTP_ACTIVE) &&
-	   (asoc->pf_retrans < transport->pathmaxrxt) &&
-	   (transport->error_count > asoc->pf_retrans)) {
+	   (transport->error_count < transport->pathmaxrxt) &&
+	   (transport->error_count > transport->pf_retrans)) {
 
 		sctp_assoc_control_transport(asoc, transport,
 					     SCTP_TRANSPORT_PF,
@@ -827,6 +827,11 @@ static void sctp_cmd_new_state(sctp_cmd_seq_t *cmds,
 						asoc->rto_initial;
 		asoc->timeouts[SCTP_EVENT_TIMEOUT_T1_COOKIE] =
 						asoc->rto_initial;
+	}
+
+	if (sctp_state(asoc, ESTABLISHED)) {
+		kfree(asoc->peer.cookie);
+		asoc->peer.cookie = NULL;
 	}
 
 	if (sctp_state(asoc, ESTABLISHED) ||

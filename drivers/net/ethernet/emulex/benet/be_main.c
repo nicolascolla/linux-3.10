@@ -1257,10 +1257,6 @@ static void be_xmit_flush(struct be_adapter *adapter, struct be_tx_obj *txo)
 #define is_arp_allowed_on_bmc(adapter, skb)	\
 	(is_arp(skb) && is_arp_filt_enabled(adapter))
 
-#define is_broadcast_packet(eh, adapter)	\
-		(is_multicast_ether_addr(eh->h_dest) && \
-		!compare_ether_addr(eh->h_dest, adapter->netdev->broadcast))
-
 #define is_arp(skb)	(skb->protocol == htons(ETH_P_ARP))
 
 #define is_arp_filt_enabled(adapter)	\
@@ -1410,6 +1406,83 @@ drop:
 		be_xmit_flush(adapter, txo);
 
 	return NETDEV_TX_OK;
+}
+
+static void be_tx_timeout(struct net_device *netdev)
+{
+	struct be_adapter *adapter = netdev_priv(netdev);
+	struct device *dev = &adapter->pdev->dev;
+	struct be_tx_obj *txo;
+	struct sk_buff *skb;
+	struct tcphdr *tcphdr;
+	struct udphdr *udphdr;
+	u32 *entry;
+	int status;
+	int i, j;
+
+	for_all_tx_queues(adapter, txo, i) {
+		dev_info(dev, "TXQ Dump: %d H: %d T: %d used: %d, qid: 0x%x\n",
+			 i, txo->q.head, txo->q.tail,
+			 atomic_read(&txo->q.used), txo->q.id);
+
+		entry = txo->q.dma_mem.va;
+		for (j = 0; j < TX_Q_LEN * 4; j += 4) {
+			if (entry[j] != 0 || entry[j + 1] != 0 ||
+			    entry[j + 2] != 0 || entry[j + 3] != 0) {
+				dev_info(dev, "Entry %d 0x%x 0x%x 0x%x 0x%x\n",
+					 j, entry[j], entry[j + 1],
+					 entry[j + 2], entry[j + 3]);
+			}
+		}
+
+		entry = txo->cq.dma_mem.va;
+		dev_info(dev, "TXCQ Dump: %d  H: %d T: %d used: %d\n",
+			 i, txo->cq.head, txo->cq.tail,
+			 atomic_read(&txo->cq.used));
+		for (j = 0; j < TX_CQ_LEN * 4; j += 4) {
+			if (entry[j] != 0 || entry[j + 1] != 0 ||
+			    entry[j + 2] != 0 || entry[j + 3] != 0) {
+				dev_info(dev, "Entry %d 0x%x 0x%x 0x%x 0x%x\n",
+					 j, entry[j], entry[j + 1],
+					 entry[j + 2], entry[j + 3]);
+			}
+		}
+
+		for (j = 0; j < TX_Q_LEN; j++) {
+			if (txo->sent_skb_list[j]) {
+				skb = txo->sent_skb_list[j];
+				if (ip_hdr(skb)->protocol == IPPROTO_TCP) {
+					tcphdr = tcp_hdr(skb);
+					dev_info(dev, "TCP source port %d\n",
+						 ntohs(tcphdr->source));
+					dev_info(dev, "TCP dest port %d\n",
+						 ntohs(tcphdr->dest));
+					dev_info(dev, "TCP sequence num %d\n",
+						 ntohs(tcphdr->seq));
+					dev_info(dev, "TCP ack_seq %d\n",
+						 ntohs(tcphdr->ack_seq));
+				} else if (ip_hdr(skb)->protocol ==
+					   IPPROTO_UDP) {
+					udphdr = udp_hdr(skb);
+					dev_info(dev, "UDP source port %d\n",
+						 ntohs(udphdr->source));
+					dev_info(dev, "UDP dest port %d\n",
+						 ntohs(udphdr->dest));
+				}
+				dev_info(dev, "skb[%d] %p len %d proto 0x%x\n",
+					 j, skb, skb->len, skb->protocol);
+			}
+		}
+	}
+
+	if (lancer_chip(adapter)) {
+		dev_info(dev, "Initiating reset due to tx timeout\n");
+		dev_info(dev, "Resetting adapter\n");
+		status = lancer_physdev_ctrl(adapter,
+					     PHYSDEV_CONTROL_FW_RESET_MASK);
+		if (status)
+			dev_err(dev, "Reset failed .. Reboot server\n");
+	}
 }
 
 static inline bool be_in_all_promisc(struct be_adapter *adapter)
@@ -2065,7 +2138,7 @@ static int be_get_new_eqd(struct be_eq_obj *eqo)
 	int i;
 
 	aic = &adapter->aic_obj[eqo->idx];
-	if (!aic->enable) {
+	if (!adapter->aic_enabled) {
 		if (aic->jiffies)
 			aic->jiffies = 0;
 		eqd = aic->et_eqd;
@@ -2122,7 +2195,7 @@ static u32 be_get_eq_delay_mult_enc(struct be_eq_obj *eqo)
 	int eqd;
 	u32 mult_enc;
 
-	if (!aic->enable)
+	if (!adapter->aic_enabled)
 		return 0;
 
 	if (jiffies_to_msecs(now - aic->jiffies) < 1)
@@ -2877,6 +2950,8 @@ static int be_evt_queues_create(struct be_adapter *adapter)
 				    max(adapter->cfg_num_rx_irqs,
 					adapter->cfg_num_tx_irqs));
 
+	adapter->aic_enabled = true;
+
 	for_all_evt_queues(adapter, eqo, i) {
 		int numa_node = dev_to_node(&adapter->pdev->dev);
 
@@ -2884,7 +2959,6 @@ static int be_evt_queues_create(struct be_adapter *adapter)
 		eqo->adapter = adapter;
 		eqo->idx = i;
 		aic->max_eqd = BE_MAX_EQD;
-		aic->enable = true;
 
 		eq = &eqo->q;
 		rc = be_queue_alloc(adapter, eq, EVNT_Q_LEN,
@@ -3274,7 +3348,7 @@ void be_detect_error(struct be_adapter *adapter)
 			/* Do not log error messages if its a FW reset */
 			if (sliport_err1 == SLIPORT_ERROR_FW_RESET1 &&
 			    sliport_err2 == SLIPORT_ERROR_FW_RESET2) {
-				dev_info(dev, "Firmware update in progress\n");
+				dev_info(dev, "Reset is in progress\n");
 			} else {
 				dev_err(dev, "Error detected in the card\n");
 				dev_err(dev, "ERR: sliport status 0x%x\n",
@@ -3309,7 +3383,9 @@ void be_detect_error(struct be_adapter *adapter)
 				if ((val & POST_STAGE_FAT_LOG_START)
 				     != POST_STAGE_FAT_LOG_START &&
 				    (val & POST_STAGE_ARMFW_UE)
-				     != POST_STAGE_ARMFW_UE)
+				     != POST_STAGE_ARMFW_UE &&
+				    (val & POST_STAGE_RECOVERABLE_ERR)
+				     != POST_STAGE_RECOVERABLE_ERR)
 					return;
 			}
 
@@ -3913,8 +3989,6 @@ static int be_enable_vxlan_offloads(struct be_adapter *adapter)
 	netdev->hw_enc_features |= NETIF_F_IP_CSUM | NETIF_F_IPV6_CSUM |
 				   NETIF_F_TSO | NETIF_F_TSO6 |
 				   NETIF_F_GSO_UDP_TUNNEL;
-	netdev->hw_features |= NETIF_F_GSO_UDP_TUNNEL;
-	netdev->features |= NETIF_F_GSO_UDP_TUNNEL;
 
 	dev_info(dev, "Enabled VxLAN offloads for UDP port %d\n",
 		 be16_to_cpu(port));
@@ -3936,8 +4010,6 @@ static void be_disable_vxlan_offloads(struct be_adapter *adapter)
 	adapter->vxlan_port = 0;
 
 	netdev->hw_enc_features = 0;
-	netdev->hw_features &= ~(NETIF_F_GSO_UDP_TUNNEL);
-	netdev->features &= ~(NETIF_F_GSO_UDP_TUNNEL);
 }
 
 static void be_calculate_vf_res(struct be_adapter *adapter, u16 num_vfs,
@@ -4617,8 +4689,17 @@ int be_update_queues(struct be_adapter *adapter)
 	struct net_device *netdev = adapter->netdev;
 	int status;
 
-	if (netif_running(netdev))
+	if (netif_running(netdev)) {
+		/* be_tx_timeout() must not run concurrently with this
+		 * function, synchronize with an already-running dev_watchdog
+		 */
+		netif_tx_lock_bh(netdev);
+		/* device cannot transmit now, avoid dev_watchdog timeouts */
+		netif_carrier_off(netdev);
+		netif_tx_unlock_bh(netdev);
+
 		be_close(netdev);
+	}
 
 	be_cancel_worker(adapter);
 
@@ -5215,6 +5296,7 @@ static const struct net_device_ops be_netdev_ops = {
 	.ndo_get_vf_config	= be_get_vf_config,
 	.ndo_set_vf_link_state  = be_set_vf_link_state,
 	.ndo_set_vf_spoofchk    = be_set_vf_spoofchk,
+	.ndo_tx_timeout		= be_tx_timeout,
 #ifdef CONFIG_NET_POLL_CONTROLLER
 	.ndo_poll_controller	= be_netpoll,
 #endif
@@ -5231,6 +5313,7 @@ static void be_netdev_init(struct net_device *netdev)
 	struct be_adapter *adapter = netdev_priv(netdev);
 
 	netdev->hw_features |= NETIF_F_SG | NETIF_F_TSO | NETIF_F_TSO6 |
+		NETIF_F_GSO_UDP_TUNNEL |
 		NETIF_F_IP_CSUM | NETIF_F_IPV6_CSUM | NETIF_F_RXCSUM |
 		NETIF_F_HW_VLAN_CTAG_TX;
 	if ((be_if_cap_flags(adapter) & BE_IF_FLAGS_RSS))
@@ -5540,9 +5623,7 @@ static void be_worker(struct work_struct *work)
 	 * mcc completions
 	 */
 	if (!netif_running(adapter->netdev)) {
-		local_bh_disable();
 		be_process_mcc(adapter);
-		local_bh_enable();
 		goto reschedule;
 	}
 

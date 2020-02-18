@@ -113,6 +113,9 @@ xfs_mount_validate_sb(
 	bool		check_inprogress,
 	bool		check_version)
 {
+	uint32_t	agcount = 0;
+	uint32_t	rem;
+
 	if (sbp->sb_magicnum != XFS_SB_MAGIC) {
 		xfs_warn(mp, "bad magic number");
 		return -EWRONGFS;
@@ -223,6 +226,13 @@ xfs_mount_validate_sb(
 		return -EINVAL;
 	}
 
+	/* Compute agcount for this number of dblocks and agblocks */
+	if (sbp->sb_agblocks) {
+		agcount = div_u64_rem(sbp->sb_dblocks, sbp->sb_agblocks, &rem);
+		if (rem)
+			agcount++;
+	}
+
 	/*
 	 * More sanity checking.  Most of these were stolen directly from
 	 * xfs_repair.
@@ -247,6 +257,10 @@ xfs_mount_validate_sb(
 	    sbp->sb_inodesize != (1 << sbp->sb_inodelog)		||
 	    sbp->sb_logsunit > XLOG_MAX_RECORD_BSIZE			||
 	    sbp->sb_inopblock != howmany(sbp->sb_blocksize,sbp->sb_inodesize) ||
+	    XFS_FSB_TO_B(mp, sbp->sb_agblocks) < XFS_MIN_AG_BYTES	||
+	    XFS_FSB_TO_B(mp, sbp->sb_agblocks) > XFS_MAX_AG_BYTES	||
+	    sbp->sb_agblklog != xfs_highbit32(sbp->sb_agblocks - 1) + 1	||
+	    agcount == 0 || agcount != sbp->sb_agcount			||
 	    (sbp->sb_blocklog - sbp->sb_inodelog != sbp->sb_inopblog)	||
 	    (sbp->sb_rextsize * sbp->sb_blocksize > XFS_MAX_RTEXTSIZE)	||
 	    (sbp->sb_rextsize * sbp->sb_blocksize < XFS_MIN_RTEXTSIZE)	||
@@ -258,6 +272,22 @@ xfs_mount_validate_sb(
 		xfs_notice(mp, "SB sanity check failed");
 		return -EFSCORRUPTED;
 	}
+
+	if (sbp->sb_unit) {
+		if (!xfs_sb_version_hasdalign(sbp) ||
+		    sbp->sb_unit > sbp->sb_width ||
+		    (sbp->sb_width % sbp->sb_unit) != 0) {
+			xfs_notice(mp, "SB stripe unit sanity check failed");
+			return -EFSCORRUPTED;
+		}
+	} else if (xfs_sb_version_hasdalign(sbp)) {
+		xfs_notice(mp, "SB stripe alignment sanity check failed");
+		return -EFSCORRUPTED;
+	} else if (sbp->sb_width) {
+		xfs_notice(mp, "SB stripe width sanity check failed");
+		return -EFSCORRUPTED;
+	}
+
 
 	if (xfs_sb_version_hascrc(&mp->m_sb) &&
 	    sbp->sb_blocksize < XFS_MIN_CRC_BLOCKSIZE) {
@@ -637,11 +667,10 @@ xfs_sb_read_verify(
 	error = xfs_sb_verify(bp, true);
 
 out_error:
-	if (error) {
+	if (error == -EFSCORRUPTED || error == -EFSBADCRC)
+		xfs_verifier_error(bp, error, __this_address);
+	else if (error)
 		xfs_buf_ioerror(bp, error);
-		if (error == -EFSCORRUPTED || error == -EFSBADCRC)
-			xfs_verifier_error(bp);
-	}
 }
 
 /*
@@ -675,8 +704,7 @@ xfs_sb_write_verify(
 
 	error = xfs_sb_verify(bp, false);
 	if (error) {
-		xfs_buf_ioerror(bp, error);
-		xfs_verifier_error(bp);
+		xfs_verifier_error(bp, error, __this_address);
 		return;
 	}
 
@@ -714,7 +742,6 @@ xfs_sb_mount_common(
 	struct xfs_sb	*sbp)
 {
 	mp->m_agfrotor = mp->m_agirotor = 0;
-	spin_lock_init(&mp->m_agirotor_lock);
 	mp->m_maxagi = mp->m_sb.sb_agcount;
 	mp->m_blkbit_log = sbp->sb_blocklog + XFS_NBBYLOG;
 	mp->m_blkbb_log = sbp->sb_blocklog - BBSHIFT;
