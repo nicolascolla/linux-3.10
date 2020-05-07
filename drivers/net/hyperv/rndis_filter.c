@@ -715,6 +715,7 @@ int rndis_filter_set_rss_param(struct rndis_device *rdev,
 			       const u8 *rss_key)
 {
 	struct net_device *ndev = rdev->ndev;
+	struct net_device_context *ndc = netdev_priv(ndev);
 	struct rndis_request *request;
 	struct rndis_set_request *set;
 	struct rndis_set_complete *set_complete;
@@ -754,7 +755,7 @@ int rndis_filter_set_rss_param(struct rndis_device *rdev,
 	/* Set indirection table entries */
 	itab = (u32 *)(rssp + 1);
 	for (i = 0; i < ITAB_NUM; i++)
-		itab[i] = rdev->rx_table[i];
+		itab[i] = ndc->rx_table[i];
 
 	/* Set hask key values */
 	keyp = (u8 *)((unsigned long)rssp + rssp->kashkey_offset);
@@ -1058,29 +1059,17 @@ static void netvsc_sc_open(struct vmbus_channel *new_sc)
  * This breaks overlap of processing the host message for the
  * new primary channel with the initialization of sub-channels.
  */
-void rndis_set_subchannel(struct work_struct *w)
+int rndis_set_subchannel(struct net_device *ndev,
+			 struct netvsc_device *nvdev,
+			 struct netvsc_device_info *dev_info)
 {
-	struct netvsc_device *nvdev
-		= container_of(w, struct netvsc_device, subchan_work);
 	struct nvsp_message *init_packet = &nvdev->channel_init_pkt;
-	struct net_device_context *ndev_ctx;
-	struct rndis_device *rdev;
-	struct net_device *ndev;
-	struct hv_device *hv_dev;
+	struct net_device_context *ndev_ctx = netdev_priv(ndev);
+	struct hv_device *hv_dev = ndev_ctx->device_ctx;
+	struct rndis_device *rdev = nvdev->extension;
 	int i, ret;
 
-	if (!rtnl_trylock()) {
-		schedule_work(w);
-		return;
-	}
-
-	rdev = nvdev->extension;
-	if (!rdev)
-		goto unlock;	/* device was removed */
-
-	ndev = rdev->ndev;
-	ndev_ctx = netdev_priv(ndev);
-	hv_dev = ndev_ctx->device_ctx;
+	ASSERT_RTNL();
 
 	memset(init_packet, 0, sizeof(struct nvsp_message));
 	init_packet->hdr.msg_type = NVSP_MSG5_TYPE_SUBCHANNEL;
@@ -1094,13 +1083,13 @@ void rndis_set_subchannel(struct work_struct *w)
 			       VMBUS_DATA_PACKET_FLAG_COMPLETION_REQUESTED);
 	if (ret) {
 		netdev_err(ndev, "sub channel allocate send failed: %d\n", ret);
-		goto failed;
+		return ret;
 	}
 
 	wait_for_completion(&nvdev->channel_init_wait);
 	if (init_packet->msg.v5_msg.subchn_comp.status != NVSP_STAT_SUCCESS) {
 		netdev_err(ndev, "sub channel request failed\n");
-		goto failed;
+		return -EIO;
 	}
 
 	nvdev->num_chn = 1 +
@@ -1110,30 +1099,19 @@ void rndis_set_subchannel(struct work_struct *w)
 	wait_event(nvdev->subchan_open,
 		   atomic_read(&nvdev->open_chn) == nvdev->num_chn);
 
-	/* ignore failues from setting rss parameters, still have channels */
-	rndis_filter_set_rss_param(rdev, netvsc_hash_key);
+	for (i = 0; i < VRSS_SEND_TAB_SIZE; i++)
+		ndev_ctx->tx_table[i] = i % nvdev->num_chn;
+
+	/* ignore failures from setting rss parameters, still have channels */
+	if (dev_info)
+		rndis_filter_set_rss_param(rdev, dev_info->rss_key);
+	else
+		rndis_filter_set_rss_param(rdev, netvsc_hash_key);
 
 	netif_set_real_num_tx_queues(ndev, nvdev->num_chn);
 	netif_set_real_num_rx_queues(ndev, nvdev->num_chn);
 
-	for (i = 0; i < VRSS_SEND_TAB_SIZE; i++)
-		ndev_ctx->tx_table[i] = i % nvdev->num_chn;
-
-	netif_device_attach(ndev);
-	rtnl_unlock();
-	return;
-
-failed:
-	/* fallback to only primary channel */
-	for (i = 1; i < nvdev->num_chn; i++)
-		netif_napi_del(&nvdev->chan_table[i].napi);
-
-	nvdev->max_chn = 1;
-	nvdev->num_chn = 1;
-
-	netif_device_attach(ndev);
-unlock:
-	rtnl_unlock();
+	return 0;
 }
 
 static int rndis_netdev_set_hwcaps(struct rndis_device *rndis_device,
@@ -1222,6 +1200,7 @@ struct netvsc_device *rndis_filter_device_add(struct hv_device *dev,
 				      struct netvsc_device_info *device_info)
 {
 	struct net_device *net = hv_get_drvdata(dev);
+	struct net_device_context *ndc = netdev_priv(net);
 	struct netvsc_device *net_device;
 	struct rndis_device *rndis_device;
 	struct ndis_recv_scale_cap rsscap;
@@ -1304,9 +1283,11 @@ struct netvsc_device *rndis_filter_device_add(struct hv_device *dev,
 	/* We will use the given number of channels if available. */
 	net_device->num_chn = min(net_device->max_chn, device_info->num_chn);
 
-	for (i = 0; i < ITAB_NUM; i++)
-		rndis_device->rx_table[i] = ethtool_rxfh_indir_default(
+	if (!netif_is_rxfh_configured(net)) {
+		for (i = 0; i < ITAB_NUM; i++)
+			ndc->rx_table[i] = ethtool_rxfh_indir_default(
 						i, net_device->num_chn);
+	}
 
 	atomic_set(&net_device->open_chn, 1);
 	vmbus_set_sc_create_callback(dev->channel, netvsc_sc_open);
@@ -1324,20 +1305,12 @@ struct netvsc_device *rndis_filter_device_add(struct hv_device *dev,
 		netif_napi_add(net, &net_device->chan_table[i].napi,
 			       netvsc_poll, NAPI_POLL_WEIGHT);
 
-	if (net_device->num_chn > 1)
-		schedule_work(&net_device->subchan_work);
+	return net_device;
 
 out:
-	/* if unavailable, just proceed with one queue */
-	if (ret) {
-		net_device->max_chn = 1;
-		net_device->num_chn = 1;
-	}
-
-	/* No sub channels, device is ready */
-	if (net_device->num_chn == 1)
-		netif_device_attach(net);
-
+	/* setting up multiple channels failed */
+	net_device->max_chn = 1;
+	net_device->num_chn = 1;
 	return net_device;
 
 err_dev_remv:

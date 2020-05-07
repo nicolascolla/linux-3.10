@@ -145,6 +145,8 @@ struct hv_netvsc_packet {
 	u32 total_data_buflen;
 };
 
+#define NETVSC_HASH_KEYLEN 40
+
 struct netvsc_device_info {
 	unsigned char mac_adr[ETH_ALEN];
 	u32  num_chn;
@@ -152,6 +154,8 @@ struct netvsc_device_info {
 	u32  recv_sections;
 	u32  send_section_size;
 	u32  recv_section_size;
+
+	u8 rss_key[NETVSC_HASH_KEYLEN];
 };
 
 enum rndis_device_state {
@@ -160,8 +164,6 @@ enum rndis_device_state {
 	RNDIS_DEV_INITIALIZED,
 	RNDIS_DEV_DATAINITIALIZED,
 };
-
-#define NETVSC_HASH_KEYLEN 40
 
 struct rndis_device {
 	struct net_device *ndev;
@@ -180,7 +182,6 @@ struct rndis_device {
 
 	u8 hw_mac_adr[ETH_ALEN];
 	u8 rss_key[NETVSC_HASH_KEYLEN];
-	u16 rx_table[ITAB_NUM];
 };
 
 
@@ -211,7 +212,9 @@ int netvsc_recv_callback(struct net_device *net,
 void netvsc_channel_cb(void *context);
 int netvsc_poll(struct napi_struct *napi, int budget);
 
-void rndis_set_subchannel(struct work_struct *w);
+int rndis_set_subchannel(struct net_device *ndev,
+			 struct netvsc_device *nvdev,
+			 struct netvsc_device_info *dev_info);
 int rndis_filter_open(struct netvsc_device *nvdev);
 int rndis_filter_close(struct netvsc_device *nvdev);
 struct netvsc_device *rndis_filter_device_add(struct hv_device *dev,
@@ -237,6 +240,8 @@ void netvsc_switch_datapath(struct net_device *nv_dev, bool vf);
 #define NVSP_PROTOCOL_VERSION_2		0x30002
 #define NVSP_PROTOCOL_VERSION_4		0x40000
 #define NVSP_PROTOCOL_VERSION_5		0x50000
+#define NVSP_PROTOCOL_VERSION_6		0x60000
+#define NVSP_PROTOCOL_VERSION_61	0x60001
 
 enum {
 	NVSP_MSG_TYPE_NONE = 0,
@@ -308,6 +313,12 @@ enum {
 	NVSP_MSG5_TYPE_SEND_INDIRECTION_TABLE,
 
 	NVSP_MSG5_MAX = NVSP_MSG5_TYPE_SEND_INDIRECTION_TABLE,
+
+	/* Version 6 messages */
+	NVSP_MSG6_TYPE_PD_API,
+	NVSP_MSG6_TYPE_PD_POST_BATCH,
+
+	NVSP_MSG6_MAX = NVSP_MSG6_TYPE_PD_POST_BATCH
 };
 
 enum {
@@ -606,7 +617,8 @@ struct nvsp_5_send_indirect_table {
 	/* The number of entries in the send indirection table */
 	u32 count;
 
-	/* The offset of the send indirection table from top of this struct.
+	/* The offset of the send indirection table from the beginning of
+	 * struct nvsp_message.
 	 * The send indirection table tells which channel to put the send
 	 * traffic on. Each entry is a channel number.
 	 */
@@ -619,12 +631,168 @@ union nvsp_5_message_uber {
 	struct nvsp_5_send_indirect_table send_table;
 } __packed;
 
+enum nvsp_6_pd_api_op {
+	PD_API_OP_CONFIG = 1,
+	PD_API_OP_SW_DATAPATH, /* Switch Datapath */
+	PD_API_OP_OPEN_PROVIDER,
+	PD_API_OP_CLOSE_PROVIDER,
+	PD_API_OP_CREATE_QUEUE,
+	PD_API_OP_FLUSH_QUEUE,
+	PD_API_OP_FREE_QUEUE,
+	PD_API_OP_ALLOC_COM_BUF, /* Allocate Common Buffer */
+	PD_API_OP_FREE_COM_BUF, /* Free Common Buffer */
+	PD_API_OP_MAX
+};
+
+struct grp_affinity {
+	u64 mask;
+	u16 grp;
+	u16 reserved[3];
+} __packed;
+
+struct nvsp_6_pd_api_req {
+	u32 op;
+
+	union {
+		/* MMIO information is sent from the VM to VSP */
+		struct __packed {
+			u64 mmio_pa; /* MMIO Physical Address */
+			u32 mmio_len;
+
+			/* Number of PD queues a VM can support */
+			u16 num_subchn;
+		} config;
+
+		/* Switch Datapath */
+		struct __packed {
+			/* Host Datapath Is PacketDirect */
+			u8 host_dpath_is_pd;
+
+			/* Guest PacketDirect Is Enabled */
+			u8 guest_pd_enabled;
+		} sw_dpath;
+
+		/* Open Provider*/
+		struct __packed {
+			u32 prov_id; /* Provider id */
+			u32 flag;
+		} open_prov;
+
+		/* Close Provider */
+		struct __packed {
+			u32 prov_id;
+		} cls_prov;
+
+		/* Create Queue*/
+		struct __packed {
+			u32 prov_id;
+			u16 q_id;
+			u16 q_size;
+			u8 is_recv_q;
+			u8 is_rss_q;
+			u32 recv_data_len;
+			struct grp_affinity affy;
+		} cr_q;
+
+		/* Delete Queue*/
+		struct __packed {
+			u32 prov_id;
+			u16 q_id;
+		} del_q;
+
+		/* Flush Queue */
+		struct __packed {
+			u32 prov_id;
+			u16 q_id;
+		} flush_q;
+
+		/* Allocate Common Buffer */
+		struct __packed {
+			u32 len;
+			u32 pf_node; /* Preferred Node */
+			u16 region_id;
+		} alloc_com_buf;
+
+		/* Free Common Buffer */
+		struct __packed {
+			u32 len;
+			u64 pa; /* Physical Address */
+			u32 pf_node; /* Preferred Node */
+			u16 region_id;
+			u8 cache_type;
+		} free_com_buf;
+	} __packed;
+} __packed;
+
+struct nvsp_6_pd_api_comp {
+	u32 op;
+	u32 status;
+
+	union {
+		struct __packed {
+			/* actual number of PD queues allocated to the VM */
+			u16 num_pd_q;
+
+			/* Num Receive Rss PD Queues */
+			u8 num_rss_q;
+
+			u8 is_supported; /* Is supported by VSP */
+			u8 is_enabled; /* Is enabled by VSP */
+		} config;
+
+		/* Open Provider */
+		struct __packed {
+			u32 prov_id;
+		} open_prov;
+
+		/* Create Queue */
+		struct __packed {
+			u32 prov_id;
+			u16 q_id;
+			u16 q_size;
+			u32 recv_data_len;
+			struct grp_affinity affy;
+		} cr_q;
+
+		/* Allocate Common Buffer */
+		struct __packed {
+			u64 pa; /* Physical Address */
+			u32 len;
+			u32 pf_node; /* Preferred Node */
+			u16 region_id;
+			u8 cache_type;
+		} alloc_com_buf;
+	} __packed;
+} __packed;
+
+struct nvsp_6_pd_buf {
+	u32 region_offset;
+	u16 region_id;
+	u16 is_partial:1;
+	u16 reserved:15;
+} __packed;
+
+struct nvsp_6_pd_batch_msg {
+	struct nvsp_message_header hdr;
+	u16 count;
+	u16 guest2host:1;
+	u16 is_recv:1;
+	u16 reserved:14;
+	struct nvsp_6_pd_buf pd_buf[0];
+} __packed;
+
+union nvsp_6_message_uber {
+	struct nvsp_6_pd_api_req pd_req;
+	struct nvsp_6_pd_api_comp pd_comp;
+} __packed;
+
 union nvsp_all_messages {
 	union nvsp_message_init_uber init_msg;
 	union nvsp_1_message_uber v1_msg;
 	union nvsp_2_message_uber v2_msg;
 	union nvsp_4_message_uber v4_msg;
 	union nvsp_5_message_uber v5_msg;
+	union nvsp_6_message_uber v6_msg;
 } __packed;
 
 /* ALL Messages */
@@ -754,6 +922,8 @@ struct net_device_context {
 	u32 tx_checksum_mask;
 
 	u32 tx_table[VRSS_SEND_TAB_SIZE];
+
+	u16 rx_table[ITAB_NUM];
 
 	/* Ethtool settings */
 	u8 duplex;
