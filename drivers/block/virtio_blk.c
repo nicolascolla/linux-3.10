@@ -213,13 +213,20 @@ static int virtio_queue_rq(struct blk_mq_hw_ctx *hctx,
 	err = __virtblk_add_req(vblk->vqs[qid].vq, vbr, vbr->sg, num);
 	if (err) {
 		virtqueue_kick(vblk->vqs[qid].vq);
-		blk_mq_stop_hw_queue(hctx);
+		/* Don't stop the queue if -ENOMEM: we may have failed to
+		 * bounce the buffer due to global resource outage.
+		 */
+		if (err == -ENOSPC)
+			blk_mq_stop_hw_queue(hctx);
 		spin_unlock_irqrestore(&vblk->vqs[qid].lock, flags);
-		/* Out of mem doesn't actually happen, since we fall back
-		 * to direct descriptors */
-		if (err == -ENOMEM || err == -ENOSPC)
+		switch (err) {
+		case -ENOSPC:
 			return BLK_MQ_RQ_QUEUE_DEV_BUSY;
-		return BLK_MQ_RQ_QUEUE_ERROR;
+		case -ENOMEM:
+			return BLK_MQ_RQ_QUEUE_BUSY;
+		default:
+			return BLK_MQ_RQ_QUEUE_ERROR;
+		}
 	}
 
 	if (bd->last && virtqueue_kick_prepare(vblk->vqs[qid].vq))
